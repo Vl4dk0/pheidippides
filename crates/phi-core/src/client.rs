@@ -78,12 +78,15 @@ pub struct Client {
     pub channels: Vec<NamedChannel>,
     pub settings: SpaceSettings,
     pub devices: Vec<Device>,
+    pub limits: ServerLimits,
     store: Store,
     keys: Box<dyn KeyStore>,
     identity: Identity,
     cache: Cache,
     http: Http,
     directory: VerifiedDirectory,
+    // Opening prepares the first operation; resolution borrows it, later operations refresh.
+    opening_snapshot: bool,
 }
 impl Client {
     pub async fn create(
@@ -330,7 +333,7 @@ impl Client {
             // Read and check encrypted peer context before giving a device any key.
             let meta_key = grant_keys
                 .iter()
-                .find(|key| key.channel_id() == channel.id && key.epoch() == channel.meta_epoch)
+                .find(|key| key.channel_id() == channel.id && key.epoch() == channel.current_epoch)
                 .ok_or_else(|| user("grant metadata key missing"))?;
             validate_key(meta_key, &epochs)?;
             let meta: ChannelMeta =
@@ -343,7 +346,6 @@ impl Client {
                     Method::PUT,
                     &format!("/channels/{}/keys", channel.id),
                     &PutKeysRequest {
-                        membership: None,
                         epoch: key.epoch(),
                         wrapped_keys: vec![wrapped],
                     },
@@ -413,19 +415,22 @@ impl Client {
             channels: vec![],
             settings: SpaceSettings::default(),
             devices: devices.devices,
+            limits: ServerLimits::default(),
             store,
             keys,
             identity,
             cache,
             http,
             directory,
+            opening_snapshot: false,
         };
-        client.refresh().await?;
+        client.refresh_channels().await?;
         if client.publish_pending_revocations().await? {
             client.refresh().await?;
         }
         client.resume_rotations().await?;
         client.prune()?;
+        client.opening_snapshot = true;
         Ok(client)
     }
     pub async fn refresh(&mut self) -> Result<()> {
@@ -434,10 +439,21 @@ impl Client {
         self.directory = self.cache.trust(sid, &devices.directory)?;
         self.directory.device(self.profile.device_id)?;
         self.devices = devices.devices;
+        self.refresh_channels().await
+    }
+    async fn begin_operation(&mut self) -> Result<()> {
+        if !std::mem::take(&mut self.opening_snapshot) {
+            self.refresh().await?;
+        }
+        Ok(())
+    }
+    async fn refresh_channels(&mut self) -> Result<()> {
+        let sid = self.profile.space_id;
         let space: GetSpaceResponse = self.http.get(&format!("/spaces/{sid}")).await?;
         if space.id != sid {
             return Err(user("space response crossed profile boundary"));
         }
+        self.limits = space.limits;
         self.settings = match space.settings_change {
             Some(change) => self.cache.accept_settings(&self.directory, &change)?,
             None => self.cache.trusted_settings()?,
@@ -468,11 +484,11 @@ impl Client {
             let stored;
             let key = if let Some(key) = candidates
                 .iter()
-                .find(|key| key.epoch() == channel.meta_epoch)
+                .find(|key| key.epoch() == channel.current_epoch)
             {
                 key
             } else {
-                stored = self.key(channel.id, channel.meta_epoch)?;
+                stored = self.key(channel.id, channel.current_epoch)?;
                 &stored
             };
             validate_key(key, &epochs)?;
@@ -548,6 +564,7 @@ impl Client {
             .ok_or_else(|| user(format!("unknown person @{name}; run phi who")))
     }
     async fn register_name(&mut self, name: &str) -> Result<()> {
+        self.opening_snapshot = false;
         let all = self
             .channels
             .iter()
@@ -572,7 +589,7 @@ impl Client {
         if name.trim().is_empty() || name.len() > 120 {
             return Err(user("display name must be 1–120 bytes"));
         }
-        self.refresh().await?;
+        self.begin_operation().await?;
         let all_id = self
             .channels
             .iter()
@@ -615,7 +632,7 @@ impl Client {
         never_expires: bool,
         kind: DeviceKind,
     ) -> Result<Zeroizing<String>> {
-        self.refresh().await?;
+        self.begin_operation().await?;
         if !enroll && never_expires {
             return Err(user("only enrollment grants may have no expiry"));
         }
@@ -641,7 +658,7 @@ impl Client {
                 expires_at: if never_expires {
                     None
                 } else {
-                    Some(now() + 7 * 86400)
+                    Some(now() + DEFAULT_GRANT_LIFETIME_SECS)
                 },
                 issuer_device: self.profile.device_id,
             },
@@ -777,14 +794,14 @@ impl Client {
         Ok((self.new_channel(kind, "dm", members).await?, mentions))
     }
     pub async fn send(&mut self, to: &str, title: &str, options: SendOptions) -> Result<Message> {
-        self.refresh().await?;
+        self.begin_operation().await?;
         reject_links(&options.body)?;
         let (channel, mentions) = self.destination(to).await?;
         self.send_inner(channel, None, Some(title.into()), mentions, options, &[])
             .await
     }
     pub async fn reply(&mut self, thread: MessageId, options: SendOptions) -> Result<Message> {
-        self.refresh().await?;
+        self.begin_operation().await?;
         reject_links(&options.body)?;
         let history = self.load_thread(thread).await?;
         let root = history.first().ok_or_else(|| user("thread not found"))?;
@@ -836,8 +853,11 @@ impl Client {
         let mut attachments = Vec::new();
         for path in options.files {
             let metadata = std::fs::metadata(&path)?;
-            if metadata.len() > DEFAULT_MAX_ATTACHMENT_BYTES {
-                return Err(user("attachment exceeds default 25 MiB file limit"));
+            if metadata.len() > self.limits.max_attachment_bytes {
+                return Err(user(format!(
+                    "attachment exceeds server limit of {} bytes",
+                    self.limits.max_attachment_bytes
+                )));
             }
             let name = path
                 .file_name()
@@ -885,6 +905,7 @@ impl Client {
             .summary
             .as_ref()
             .map(|_| history.last().map_or(0, |m| m.message.seq));
+        content.validate_with_attachment_limit(self.limits.max_attachment_bytes)?;
         let (envelope, signature) = encrypt_message(
             &self.key(channel, epoch)?,
             &self.identity.keys(),
@@ -914,9 +935,18 @@ impl Client {
             .await?;
         self.directory.verify_message(&message)?;
         self.cache.message(&message, &content)?;
+        if message.envelope.thread_id.is_none()
+            || history
+                .last()
+                .is_some_and(|m| m.message.seq.checked_add(1) == Some(message.seq))
+        {
+            // Numbering is optional receipt decoration after publication has committed.
+            let _ = self.cache.number(&message, history.len() + 1);
+        }
         Ok(message)
     }
     pub async fn counts(&mut self) -> Result<Counts> {
+        self.opening_snapshot = false;
         self.http
             .get(&format!(
                 "/spaces/{}/counts?handle={}",
@@ -1060,6 +1090,9 @@ impl Client {
                 .or_insert(0);
             *next += 1;
             message.number = *next;
+            if message.verification_error.is_none() {
+                self.cache.number(&message.message, *next)?;
+            }
             message.reactions = self.reactions(message.message.id)?;
         }
         Ok(decoded)
@@ -1074,7 +1107,21 @@ impl Client {
         Ok(messages)
     }
     async fn load_thread(&mut self, thread: MessageId) -> Result<Vec<DecodedMessage>> {
-        let root: Message = self.http.get(&format!("/messages/{thread}")).await?;
+        let root: Message = match self.cached_message(thread)? {
+            Some(message) => message,
+            None => self.http.get(&format!("/messages/{thread}")).await?,
+        };
+        if self.directory.device(root.author_device).is_err()
+            || self
+                .keys
+                .get(&format!(
+                    "channel/{}/{}",
+                    root.envelope.channel_id, root.envelope.epoch
+                ))?
+                .is_none()
+        {
+            self.refresh().await?;
+        }
         if root.id != thread || root.envelope.thread_id.is_some() {
             return Err(user("read requires a thread root ID"));
         }
@@ -1086,6 +1133,9 @@ impl Client {
             .into_iter()
             .filter(|m| m.message.id == thread || m.message.envelope.thread_id == Some(thread))
             .collect();
+        if let Some(root) = messages.first() {
+            self.directory.verify_message(&root.message)?;
+        }
         if messages
             .first()
             .is_none_or(|m| m.message.id != thread || m.content.title.is_none())
@@ -1107,49 +1157,99 @@ impl Client {
             MessagePerspective::YourOtherSession
         }
     }
+    fn cached_message(&self, id: MessageId) -> Result<Option<Message>> {
+        self.cache
+            .db
+            .query_row(
+                "SELECT raw FROM messages WHERE id=?",
+                [id.to_string()],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?
+            .map(|raw| serde_json::from_str(&raw).map_err(Into::into))
+            .transpose()
+    }
+    pub fn cached_reference(&self, id: MessageId) -> Result<Option<MessageReference>> {
+        self.cache
+            .db
+            .query_row(
+                "SELECT thread,number FROM message_numbers WHERE id=?",
+                [id.to_string()],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, usize>(1)?)),
+            )
+            .optional()?
+            .map(|(thread, number)| {
+                Ok(MessageReference {
+                    thread: thread.parse()?,
+                    number,
+                    id,
+                })
+            })
+            .transpose()
+    }
+    /// Publication already committed: display must never turn it into a failed command.
+    pub fn sent_text(&self, message: &Message) -> String {
+        let thread = message.envelope.thread_id.unwrap_or(message.id);
+        let label = self
+            .cached_reference(message.id)
+            .ok()
+            .flatten()
+            .map(|r| r.to_string())
+            .unwrap_or_else(|| message.id.to_string());
+        format!("thread {thread} · message {label} · id {}\n", message.id)
+    }
     pub async fn resolve_message(&mut self, reference: MessageRef) -> Result<MessageId> {
         match reference {
             MessageRef::Id(id) => Ok(id),
             MessageRef::InThread { thread, number } => {
-                self.refresh().await?;
-                let messages = self.load_thread(thread).await?;
-                let message = messages.get(number.get() - 1).ok_or_else(|| {
-                    user(format!(
-                        "thread {thread} has {} messages; no message #{number}",
-                        messages.len()
-                    ))
-                })?;
-                if let Some(error) = &message.verification_error {
-                    return Err(user(format!("cannot resolve unverified message: {error}")));
+                let cached: Option<String> = self
+                    .cache
+                    .db
+                    .query_row(
+                        "SELECT id FROM message_numbers WHERE thread=? AND number=?",
+                        params![thread.to_string(), number.get()],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                if let Some(id) = cached {
+                    return Ok(id.parse()?);
                 }
-                Ok(message.message.id)
+                self.load_thread(thread)
+                    .await?
+                    .get(number.get() - 1)
+                    .filter(|m| m.verification_error.is_none())
+                    .map(|m| m.message.id)
+                    .ok_or_else(|| user(format!("thread {thread}: message #{number} unavailable")))
             }
         }
     }
     pub async fn resolve_thread(&mut self, reference: MessageRef) -> Result<MessageId> {
+        if let MessageRef::InThread { thread, .. } = reference {
+            self.resolve_message(reference).await?;
+            return Ok(thread);
+        }
         let id = self.resolve_message(reference).await?;
-        self.refresh().await?;
-        let message: Message = self.http.get(&format!("/messages/{id}")).await?;
+        if let Some(reference) = self.cached_reference(id)? {
+            return Ok(reference.thread);
+        }
+        let message: Message = match self.cached_message(id)? {
+            Some(message) => message,
+            None => self.http.get(&format!("/messages/{id}")).await?,
+        };
         self.directory.verify_message(&message)?;
         if message.id != id {
-            return Err(user("message lookup changed the requested ID"));
+            return Err(user("message lookup changed requested ID"));
         }
         Ok(message.envelope.thread_id.unwrap_or(id))
     }
     pub async fn message_reference(&mut self, id: MessageId) -> Result<MessageReference> {
-        let thread = self.resolve_thread(MessageRef::Id(id)).await?;
-        let message = self
-            .load_thread(thread)
-            .await?
-            .into_iter()
-            .find(|m| m.message.id == id)
-            .ok_or_else(|| user("message missing from its thread"))?;
-        if let Some(error) = &message.verification_error {
-            return Err(user(format!(
-                "cannot reference unverified message: {error}"
-            )));
+        if let Some(reference) = self.cached_reference(id)? {
+            return Ok(reference);
         }
-        Ok(message.reference())
+        let thread = self.resolve_thread(MessageRef::Id(id)).await?;
+        self.load_thread(thread).await?;
+        self.cached_reference(id)?
+            .ok_or_else(|| user("message has no verified thread position"))
     }
     async fn wait_reference(
         &mut self,
@@ -1157,20 +1257,13 @@ impl Client {
     ) -> Result<(Option<MessageReference>, String)> {
         match self.message_reference(id).await {
             Ok(reference) => Ok((Some(reference), String::new())),
-            Err(
-                error @ (Error::User(_)
-                | Error::Crypto(_)
-                | Error::Validation(_)
-                | Error::Json(_)
-                | Error::Server { status: 404, .. }),
-            ) => {
+            Err(error) => {
                 // A valid event may refer to unavailable or corrupted history. Keep its
                 // signed ID usable without letting that history block all later events.
                 self.cache
                     .set(&format!("wait-reference/{id}"), &error.to_string())?;
                 Ok((None, format!("  reference unavailable: {error}\n")))
             }
-            Err(error) => Err(error),
         }
     }
     pub async fn format_wait_entry(&mut self, event: &WaitEntry) -> Result<String> {
@@ -1192,56 +1285,27 @@ impl Client {
                 } else {
                     "reply in thread"
                 };
+                let reactions = format_reactions(&entry.reactions, &self.names());
                 Ok(format!(
-                    "{kind} · thread {thread} · message {label} · id {} · {} · {}\n{warning}  phi read {thread}\n",
-                    message.id, entry.channel, entry.from
-                ))
-            }
-            WaitEntry::Reaction(reaction) => {
-                let (reference, warning) = self.wait_reference(reaction.data.message_id).await?;
-                let label = reference
-                    .map(|r| r.to_string())
-                    .unwrap_or_else(|| reaction.data.message_id.to_string());
-                let thread = reference
-                    .map(|r| r.thread.to_string())
-                    .unwrap_or_else(|| "unavailable".into());
-                let pointer = reference
-                    .map(|r| r.thread)
-                    .unwrap_or(reaction.data.message_id);
-                let kind = match (reaction.data.kind, reaction.data.remove) {
-                    (ReactionKind::Claim, true) => "unclaim",
-                    (ReactionKind::Claim, false) => "claim",
-                    (ReactionKind::Ack, _) => "ack",
-                    (ReactionKind::Up, _) => "up",
-                    (ReactionKind::Down, _) => "down",
-                };
-                let kind = if reaction.data.remove && reaction.data.kind != ReactionKind::Claim {
-                    format!("remove {kind}")
-                } else {
-                    kind.into()
-                };
-                Ok(format!(
-                    "reaction: {kind} by {}/{} · thread {thread} · message {label} · id {}\n{warning}  phi read {pointer}\n",
-                    self.person_name(reaction.data.person_id),
-                    reaction.data.handle,
-                    reaction.data.message_id
+                    "{kind} · to: {} · thread {thread} · message {label} · id {} · {} · {}\n{warning}  reactions: {reactions}\n  phi read {thread}\n",
+                    entry.to, message.id, entry.channel, entry.from
                 ))
             }
             WaitEntry::VerificationFailure { seq, description } => Ok(format!(
-                "verification failed · event {seq}: {description} (recorded locally; skipped)\n"
+                "verification failed · to: unavailable · event {seq}: {description} (recorded locally; skipped)\n"
             )),
             WaitEntry::Settings(change) => Ok(format!(
-                "#all · space settings changed: retention_days={} summary_mode={:?}\n",
+                "to: #all · space settings changed: retention_days={} summary_mode={:?}\n",
                 change.data.settings.retention_days, change.data.settings.summary_mode
             )),
             WaitEntry::Revocation(revocation) => Ok(format!(
-                "#all · signed revocation: {:?}\n",
+                "to: #all · signed revocation: {:?}\n",
                 revocation.data.target
             )),
         }
     }
     pub async fn read(&mut self, thread: MessageId, options: ReadOptions) -> Result<ThreadView> {
-        self.refresh().await?;
+        self.begin_operation().await?;
         let messages = self.load_thread(thread).await?;
         let latest = messages.last().map_or(0, |m| m.message.seq);
         let mut view = compose_thread(thread, messages, options, &self.names())?;
@@ -1305,6 +1369,44 @@ impl Client {
         atomic_write(&path, &plaintext)?;
         Ok(path)
     }
+    fn addressed_to_me(&self, mentions: &[Mention]) -> bool {
+        mentions.iter().any(|m| {
+            m.person_id == self.profile.person_id
+                && (self.profile.kind == DeviceKind::Gui
+                    || m.handle.as_ref().is_none_or(|h| h == &self.handle))
+        })
+    }
+    fn thread_root(&self, message: &Message) -> Result<Message> {
+        Ok(match message.envelope.thread_id {
+            Some(id) => self.cached_message(id)?.unwrap_or_else(|| message.clone()),
+            None => message.clone(),
+        })
+    }
+    fn addressed_to(&self, root: &Message) -> String {
+        if root.envelope.mentions.is_empty() {
+            return self.channel_name(root.envelope.channel_id);
+        }
+        root.envelope
+            .mentions
+            .iter()
+            .map(|m| {
+                format!(
+                    "@{}{}{}",
+                    self.person_name(m.person_id),
+                    m.handle
+                        .as_ref()
+                        .map(|h| format!("/{h}"))
+                        .unwrap_or_default(),
+                    if self.addressed_to_me(std::slice::from_ref(m)) {
+                        " (you)"
+                    } else {
+                        ""
+                    }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
     pub async fn inbox(&mut self) -> Result<Vec<InboxEntry>> {
         Ok(self
             .threads()
@@ -1315,7 +1417,7 @@ impl Client {
     }
     /// The desktop keeps read threads visible without advancing their read cursors.
     pub async fn threads(&mut self) -> Result<Vec<InboxEntry>> {
-        self.refresh().await?;
+        self.begin_operation().await?;
         let messages = self.sync_all().await?;
         let mut threads: BTreeMap<MessageId, Vec<DecodedMessage>> = BTreeMap::new();
         for message in messages {
@@ -1344,16 +1446,19 @@ impl Client {
                 .unwrap_or(0);
             let latest = thread.last().ok_or_else(|| user("empty thread"))?;
             let root = thread.first().ok_or_else(|| user("empty thread"))?;
-            let mentions = thread.iter().filter(|m| m.message.seq > cursor).any(|m| {
-                m.message.envelope.mentions.iter().any(|mention| {
-                    mention.person_id == self.profile.person_id
-                        && (self.profile.kind == DeviceKind::Gui
-                            || mention.handle.as_ref().is_none_or(|h| h == &self.handle))
-                })
-            });
+            let mentions = (latest.message.seq > cursor
+                && self.addressed_to_me(&root.message.envelope.mentions))
+                || thread.iter().filter(|m| m.message.seq > cursor).any(|m| {
+                    m.message.envelope.mentions.iter().any(|mention| {
+                        mention.person_id == self.profile.person_id
+                            && (self.profile.kind == DeviceKind::Gui
+                                || mention.handle.as_ref().is_none_or(|h| h == &self.handle))
+                    })
+                });
             result.push(InboxEntry {
                 id,
                 channel: self.channel_name(root.message.envelope.channel_id),
+                to: self.addressed_to(&root.message),
                 title: root.content.title.clone().unwrap_or_default(),
                 from: format!(
                     "{}/{}",
@@ -1380,8 +1485,26 @@ impl Client {
                 latest_seq: latest.message.seq,
             });
         }
-        result.sort_by_key(|e| std::cmp::Reverse(e.latest_seq));
+        result.sort_by_key(|e| {
+            (
+                std::cmp::Reverse(e.mentioned),
+                std::cmp::Reverse(e.latest_seq),
+            )
+        });
         Ok(result)
+    }
+    fn thread_reactions(&self, thread: MessageId) -> Result<Vec<Reaction>> {
+        let mut stmt=self.cache.db.prepare("SELECT r.raw FROM reactions r JOIN messages m ON m.id=r.message WHERE m.thread=? ORDER BY m.seq,r.person,r.handle,r.kind")?;
+        let raws = stmt
+            .query_map([thread.to_string()], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        raws.into_iter()
+            .map(|raw| {
+                let reaction: Reaction = serde_json::from_str(&raw)?;
+                self.directory.verify_reaction(&reaction)?;
+                Ok(reaction)
+            })
+            .collect()
     }
     fn reactions(&self, message: MessageId) -> Result<Vec<Reaction>> {
         let mut stmt = self
@@ -1445,7 +1568,7 @@ impl Client {
         kind: ReactionKind,
         remove: bool,
     ) -> Result<Reaction> {
-        self.refresh().await?;
+        self.begin_operation().await?;
         let reaction = sign_reaction(
             ReactionData {
                 space_id: self.profile.space_id,
@@ -1487,7 +1610,7 @@ impl Client {
         Ok(response)
     }
     pub async fn unread(&mut self, thread: MessageId) -> Result<()> {
-        self.refresh().await?;
+        self.begin_operation().await?;
         let messages = self.load_thread(thread).await?;
         let latest = messages
             .last()
@@ -1512,12 +1635,14 @@ impl Client {
         Ok(())
     }
     pub async fn wait(&mut self, seconds: u16) -> Result<Vec<WaitEntry>> {
+        self.begin_operation().await?;
         let batch = self.wait_batch(seconds).await?;
         self.advance_wait(&batch.cursor, batch.next_after)?;
         Ok(batch.events)
     }
     /// Transient lookup failures leave the batch pending; corrupt history gets a visible ID fallback.
     pub async fn wait_text(&mut self, seconds: u16) -> Result<String> {
+        self.begin_operation().await?;
         let batch = self.wait_batch(seconds).await?;
         let mut output = String::new();
         for event in &batch.events {
@@ -1555,7 +1680,34 @@ impl Client {
                     next_after: after,
                 });
             }
-            self.refresh().await?;
+            let mut changed = false;
+            for event in &response.events {
+                changed |= match &event.event {
+                    EventData::Message(message) => {
+                        self.directory.certificate(message.author_device).is_err()
+                            || self
+                                .keys
+                                .get(&format!(
+                                    "channel/{}/{}",
+                                    message.envelope.channel_id, message.envelope.epoch
+                                ))?
+                                .is_none()
+                    }
+                    EventData::Reaction(reaction) => {
+                        self.directory.certificate(reaction.data.device_id).is_err()
+                    }
+                    EventData::Settings(change) => self
+                        .directory
+                        .certificate(change.data.issuer_device)
+                        .is_err(),
+                    EventData::Revocation(revocation) => {
+                        !self.directory.revocations().contains(revocation)
+                    }
+                };
+            }
+            if changed {
+                self.refresh().await?;
+            }
             let full_page = response.events.len() == MAX_PAGE_SIZE as usize;
             let mut entries = Vec::new();
             let mut previous = after;
@@ -1590,6 +1742,44 @@ impl Client {
             }
             // The cursor names only outcomes recorded locally, never an unsigned high-water mark.
             if !entries.is_empty() {
+                for entry in &mut entries {
+                    if let WaitEntry::Message(entry) = entry {
+                        if self.cached_message(entry.id)?.is_none() {
+                            if let Ok(root) = self
+                                .http
+                                .get::<Message>(&format!("/messages/{}", entry.id))
+                                .await
+                            {
+                                let result = (|| -> Result<()> {
+                                    if root.id != entry.id || root.envelope.thread_id.is_some() {
+                                        return Err(user("root lookup changed thread"));
+                                    }
+                                    let author = self.directory.verify_message(&root)?;
+                                    let content = decrypt_message(
+                                        &self.key(root.envelope.channel_id, root.envelope.epoch)?,
+                                        &author,
+                                        &root.envelope,
+                                        &root.signature,
+                                    )?;
+                                    self.cache.message(&root, &content)?;
+                                    self.cache.number(&root, 1)
+                                })();
+                                if let Err(error) = result {
+                                    self.cache.set(
+                                        &format!("wait-reference/{}", entry.id),
+                                        &error.to_string(),
+                                    )?;
+                                }
+                            }
+                        }
+                        if let Some(root) = self.cached_message(entry.id)? {
+                            entry.to = self.addressed_to(&root);
+                            entry.mentioned = self.addressed_to_me(&root.envelope.mentions);
+                        }
+                        entry.reactions = self.thread_reactions(entry.id)?;
+                    }
+                }
+                entries.sort_by_key(|e| !matches!(e, WaitEntry::Message(entry) if entry.mentioned));
                 return Ok(WaitBatch {
                     events: entries,
                     cursor: name,
@@ -1627,9 +1817,14 @@ impl Client {
                 {
                     return Ok(None);
                 }
+                if message.envelope.thread_id.is_none() {
+                    self.cache.number(&message, 1)?;
+                }
+                let root = self.thread_root(&message)?;
                 WaitEntry::Message(InboxEntry {
                     id: message.envelope.thread_id.unwrap_or(message.id),
                     channel: self.channel_name(message.envelope.channel_id),
+                    to: self.addressed_to(&root),
                     title: content.title.unwrap_or_else(|| {
                         format!(
                             "reply to {}",
@@ -1647,27 +1842,18 @@ impl Client {
                     ),
                     created_at: message.created_at,
                     summary: content.summary,
-                    mentioned: message.envelope.mentions.iter().any(|m| {
-                        m.person_id == self.profile.person_id
-                            && (self.profile.kind == DeviceKind::Gui
-                                || m.handle.as_ref().is_none_or(|h| h == &self.handle))
-                    }),
+                    mentioned: self.addressed_to_me(&root.envelope.mentions),
                     unread: true,
                     own_agent_activity: message.author_person == self.profile.person_id
                         && author.certificate().data.kind == DeviceKind::Cli,
-                    reactions: vec![],
+                    reactions: self.thread_reactions(root.id)?,
                     latest_seq: message.seq,
                 })
             }
             EventData::Reaction(reaction) => {
                 self.directory.verify_reaction(&reaction)?;
                 self.save_reaction(&reaction)?;
-                if reaction.data.device_id == self.profile.device_id
-                    && reaction.data.handle == self.handle
-                {
-                    return Ok(None);
-                }
-                WaitEntry::Reaction(reaction)
+                return Ok(None);
             }
             EventData::Settings(change) => {
                 self.settings = self.cache.accept_settings(&self.directory, &change)?;
@@ -1688,7 +1874,7 @@ impl Client {
     }
     pub async fn group_create(&mut self, name: &str, persons: &[String]) -> Result<ChannelId> {
         validate_name(name)?;
-        self.refresh().await?;
+        self.begin_operation().await?;
         if name == "all"
             || self
                 .channels
@@ -1706,15 +1892,21 @@ impl Client {
     async fn update_channel(
         &mut self,
         channel: &Channel,
-        mut meta: ChannelMeta,
+        meta: ChannelMeta,
         members: Vec<PersonId>,
     ) -> Result<Channel> {
+        self.publish_channel(channel, meta, members, false).await
+    }
+    async fn publish_channel(
+        &mut self,
+        channel: &Channel,
+        mut meta: ChannelMeta,
+        members: Vec<PersonId>,
+        rekey: bool,
+    ) -> Result<Channel> {
         meta.members = members.clone();
-        let shrinking = channel
-            .members
-            .iter()
-            .any(|person| !members.contains(person));
-        let key = if shrinking {
+        let rotating = rekey || channel.members != members;
+        let key = if rotating {
             self.key(channel.id, channel.current_epoch)?
                 .rotate(&mut entropy)?
         } else {
@@ -1737,7 +1929,7 @@ impl Client {
             .directory
             .verify_membership(&membership, Some(&channel.membership))?;
         let mut wrapped_keys = Vec::new();
-        if shrinking {
+        if rotating {
             for device in self.directory.active_devices() {
                 if members.contains(&device.certificate().data.person_id) {
                     wrapped_keys.push(wrap_channel_key(&key, &device, &verified, &mut entropy)?);
@@ -1753,7 +1945,7 @@ impl Client {
                 &UpdateChannelRequest {
                     wrapped_keys,
                     membership: membership.clone(),
-                    meta_epoch: key.epoch(),
+                    epoch: key.epoch(),
                     meta,
                     members,
                 },
@@ -1763,13 +1955,13 @@ impl Client {
             return Err(user("server changed membership publication"));
         }
         self.cache.channel(&self.directory, &response)?;
-        if shrinking {
+        if rotating {
             save_channel_key(self.keys.as_ref(), &key)?;
         }
         Ok(response)
     }
     pub async fn group_member(&mut self, name: &str, person: &str, remove: bool) -> Result<()> {
-        self.refresh().await?;
+        self.begin_operation().await?;
         let person = self.person(person)?;
         let channel = self
             .channels
@@ -1791,12 +1983,8 @@ impl Client {
                 "cannot remove yourself while responsible for the key rotation",
             ));
         }
-        let channel = self
-            .update_channel(&channel.channel, channel.meta, members)
+        self.update_channel(&channel.channel, channel.meta, members)
             .await?;
-        if !remove {
-            self.rotate(&channel).await?;
-        }
         self.refresh().await
     }
     async fn ensure_safe_epoch(&mut self, channel_id: ChannelId) -> Result<()> {
@@ -1904,27 +2092,7 @@ impl Client {
         let channels: Vec<_> = self.channels.clone();
         let mut first_error = None;
         for named in channels {
-            let result = async {
-                let marker = format!("pending-rotation/{}", named.channel.id);
-                if let Some(epoch) = self.cache.get::<Epoch>(&marker)? {
-                    if named.channel.current_epoch < epoch {
-                        self.rotate(&named.channel).await?;
-                    } else if named.channel.meta_epoch < named.channel.current_epoch {
-                        self.update_channel(
-                            &named.channel,
-                            named.meta.clone(),
-                            named.channel.members.clone(),
-                        )
-                        .await?;
-                    }
-                    self.cache
-                        .db
-                        .execute("DELETE FROM state WHERE name=?", [&marker])?;
-                    self.refresh().await?;
-                }
-                self.ensure_safe_epoch(named.channel.id).await
-            }
-            .await;
+            let result = async { self.ensure_safe_epoch(named.channel.id).await }.await;
             if let Err(error) = result {
                 if first_error.is_none() {
                     first_error = Some(error);
@@ -1937,68 +2105,17 @@ impl Client {
         Ok(())
     }
     async fn rotate(&mut self, channel: &Channel) -> Result<()> {
-        let key = self
-            .key(channel.id, channel.current_epoch)?
-            .rotate(&mut entropy)?;
-        let proof = sign_membership(
-            ChannelMembershipData {
-                previous: Some(channel.membership.signature.clone()),
-                epoch: key.epoch(),
-                key_commitment: key.commitment(),
-                members: channel.members.clone(),
-                issuer_device: self.profile.device_id,
-                ..channel.membership.data.clone()
-            },
-            &self.identity.keys(),
-        )?;
-        let membership = self
-            .directory
-            .verify_membership(&proof, Some(&channel.membership))?;
-        let mut wrapped_keys = Vec::new();
-        for device in self.directory.active_devices() {
-            if membership
-                .members()
-                .contains(&device.certificate().data.person_id)
-            {
-                wrapped_keys.push(wrap_channel_key(&key, &device, &membership, &mut entropy)?);
-            }
-        }
         let meta: ChannelMeta = serde_json::from_slice(&decrypt_channel_metadata(
-            &self.key(channel.id, channel.meta_epoch)?,
+            &self.key(channel.id, channel.current_epoch)?,
             &channel.meta,
         )?)?;
-        self.cache
-            .set(&format!("pending-rotation/{}", channel.id), &key.epoch())?;
-        let _: GetKeysResponse = self
-            .http
-            .send(
-                Method::PUT,
-                &format!("/channels/{}/keys", channel.id),
-                &PutKeysRequest {
-                    membership: Some(proof.clone()),
-                    epoch: key.epoch(),
-                    wrapped_keys,
-                },
-            )
+        self.publish_channel(channel, meta, channel.members.clone(), true)
             .await?;
-        // Record completed key publication before the separate metadata update.
         self.mark_protected(channel.id)?;
-        let mut rotated = channel.clone();
-        rotated.membership_history.push(rotated.membership.clone());
-        rotated.membership = proof;
-        rotated.current_epoch = key.epoch();
-        self.cache.channel(&self.directory, &rotated)?;
-        save_channel_key(self.keys.as_ref(), &key)?;
-        self.update_channel(&rotated, meta, channel.members.clone())
-            .await?;
-        self.cache.db.execute(
-            "DELETE FROM state WHERE name=?",
-            [format!("pending-rotation/{}", channel.id)],
-        )?;
         Ok(())
     }
     pub async fn revoke(&mut self, target: RevocationTarget) -> Result<()> {
-        self.refresh().await?;
+        self.begin_operation().await?;
         self.revoked_person(&target)?;
         if matches!(target, RevocationTarget::Device { device_id } if device_id == self.profile.device_id)
             || matches!(target, RevocationTarget::Person { person_id } if person_id == self.profile.person_id)
@@ -2023,7 +2140,7 @@ impl Client {
         self.refresh().await
     }
     pub async fn set_settings(&mut self, key: &str, value: &str) -> Result<SettingsChange> {
-        self.refresh().await?;
+        self.begin_operation().await?;
         let mut settings = self.settings.clone();
         match key {
             "retention" | "retention_days" => {
@@ -2067,41 +2184,42 @@ impl Client {
         Ok(response)
     }
     pub async fn search(&mut self, text: &str) -> Result<Vec<DecodedMessage>> {
-        self.refresh().await?;
-        let mut stmt = self.cache.db.prepare(
-            "SELECT raw,content FROM messages WHERE instr(lower(COALESCE(json_extract(content,'$.title'),'') || char(10) || json_extract(content,'$.body') || char(10) || COALESCE(json_extract(content,'$.summary'),'')),lower(?))>0 ORDER BY seq",
-        )?;
+        self.opening_snapshot = false;
+        self.directory = self
+            .cache
+            .get::<PinnedTrustState>("trust")?
+            .ok_or_else(|| user("local trust state missing"))?
+            .verify(self.profile.space_id, now())?;
+        let mut stmt = self.cache.db.prepare("SELECT raw FROM messages WHERE instr(lower(COALESCE(json_extract(content,'$.title'),'') || char(10) || json_extract(content,'$.body') || char(10) || COALESCE(json_extract(content,'$.summary'),'')),lower(?))>0 ORDER BY seq")?;
         let rows = stmt
-            .query_map([text], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-            })?
+            .query_map([text], |r| r.get::<_, String>(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        drop(stmt);
         let mut result = Vec::new();
-        let mut threads = BTreeMap::new();
-        for (raw, _) in rows {
+        for raw in rows {
             let message: Message = serde_json::from_str(&raw)?;
-            let root = message.envelope.thread_id.unwrap_or(message.id);
-            if let std::collections::btree_map::Entry::Vacant(entry) = threads.entry(root) {
-                entry.insert(
-                    self.sync_channel(message.envelope.channel_id, Some(root))
-                        .await?,
-                );
-            }
-            let decoded = threads
-                .get(&root)
-                .and_then(|messages| messages.iter().find(|m| m.message.id == message.id))
-                .ok_or_else(|| user("cached message missing from its thread"))?;
-            if let Some(error) = &decoded.verification_error {
-                return Err(user(format!("cannot search unverified message: {error}")));
-            }
-            result.push(decoded.clone());
+            let author = self.directory.verify_message(&message)?;
+            let content = decrypt_message(
+                &self.key(message.envelope.channel_id, message.envelope.epoch)?,
+                &author,
+                &message.envelope,
+                &message.signature,
+            )?;
+            result.push(DecodedMessage {
+                number: self.cached_reference(message.id)?.map_or(0, |r| r.number),
+                perspective: self.perspective(&message),
+                reactions: self.reactions(message.id)?,
+                author_kind: author.certificate().data.kind,
+                message,
+                content,
+                attachments: vec![],
+                verification_error: None,
+            });
         }
         Ok(result)
     }
 
     pub async fn who(&mut self) -> Result<String> {
-        self.refresh().await?;
+        self.begin_operation().await?;
         let mut output = String::new();
         for (person, name) in self.names() {
             output.push_str(&format!("@{name} ({person})\n"));

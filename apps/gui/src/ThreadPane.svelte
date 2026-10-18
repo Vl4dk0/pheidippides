@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { reactionLabel, type Preferences } from './lib/state';
+  import type { Preferences } from './lib/state';
+  import ReactionSummaryView from './ReactionSummary.svelte';
   import type { ReactionKind, Thread } from './lib/api';
   let {
     thread,
@@ -33,9 +34,9 @@
 </header>
 {#if prefs.summary}<section class="summary-card" aria-label="Thread summary">
     <small class="muted"
-      >Rolling summary · {thread.summary_covers_seq === null
+      >Rolling summary · {thread.summary_number === null
         ? 'no coverage yet'
-        : `covers up to #${thread.summary_covers_seq}`} · {thread.newer_messages}
+        : `as of #${thread.summary_number}`} · {thread.newer_messages}
       newer messages</small
     >
     <p class="body">
@@ -59,7 +60,7 @@
         >
       </header>
       {#if prefs.metadata}<small class="muted"
-          >#{message.seq} · {date(message.created_at)}</small
+          >#{message.number || '?'} · {date(message.created_at)}</small
         >{/if}
       {#if message.verification_error}
         <p class="error" role="alert">
@@ -111,7 +112,7 @@
             {/each}
           </div>
           {#if message.reactions.length}<small class="muted"
-              >{reactionLabel(message.reactions)}</small
+              ><ReactionSummaryView summary={message.reaction_summary} /></small
             >{/if}
         {/if}
       {/if}

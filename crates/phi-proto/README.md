@@ -1,6 +1,6 @@
-# Protocol major 2 contract
+# Protocol major 0 contract
 
-`Phi-Protocol: 2`, JSON, `/v1`. Request structs and query types implement
+`Phi-Protocol: 0`, JSON, `/v1`. Request structs and query types implement
 `Validate`; call it after serde parsing and before sending. Newtypes validate
 on construction/deserialization. Responses accept unknown fields, including nested fields. Request wrappers use
 `deny_unknown_fields`; their nested objects reject unknown fields using the same
@@ -53,9 +53,10 @@ opaque uploads to the thread for server retention and access control, without
 revealing encrypted attachment descriptors. Attachment senders must populate it.
 The root uses thread_id=null; replies reference the root message ID. Empty
 attachments/body are allowed. The message ciphertext limit includes the AEAD tag.
-Encrypted channel metadata is a `Ciphertext` (nonce+ciphertext); the `meta_epoch` field records which epoch encrypted it, independently of
-`current_epoch` used for new messages. Creation starts both at 0; key rotation
-advances current_epoch and metadata updates supply their meta_epoch.
+Encrypted channel metadata is a `Ciphertext` (nonce+ciphertext), encrypted at the
+channel's single `current_epoch`. Creation starts at 0; atomic PATCH supplies its
+`epoch`, new metadata and complete wraps together. No independent metadata epoch
+is stored.
 
 Limits fixed here: ciphertext 256 KiB decoded (including tag), handle 40 ASCII
 bytes, title 1024 bytes, display name 255 bytes, mentions 128, attachments 32,
@@ -77,14 +78,15 @@ from the RateLimited error on 429. Names, titles, bodies and attachment descript
 are encrypted. The host sees handles, mentions, reaction kinds, timestamps, sizes
 and the membership/routing graph.
 
-Channel create/update requests require a signed `membership`. Rotations require
-`PutKeysRequest.membership=Some(proof)`; same/old-epoch self rewraps use None.
+Channel create/update requests require a signed `membership`. All rotations use channel PATCH with complete wraps and metadata at the new
+epoch; PUT keys is only for same/historical-epoch enrollment self-rewraps.
 `Channel` returns current membership plus oldest-first membership_history. Proofs
 include the previous proof's signature, key commitment, scope, epoch, kind, members and issuer;
 updates/rotations must extend the stored proof. See phi-crypto's README for channel
 and directory pinning, #all expansion through signed invite origins, GUI enrollment
 policy, and bootstrap limits. `GrantRecordData.device_kind` is mandatory and signed.
-Text metadata fields are single-line and reject controls/bidi formatting.
+Titles/names remain single-line; summaries allow bounded multiline text. Bidi and
+non-text controls remain forbidden.
 
 M3 additions: message pages include current reactions for returned messages and
 read cursors for their threads (scoped to the authenticated person). GET
@@ -101,7 +103,7 @@ Reaction events are visible to every current member of the message's channel;
 message pages continue to include signed current reaction state. Fetch stays
 counts-only, including claims by the requesting person.
 
-Major 2 adds mandatory signed `ChannelMembershipData.key_commitment`; an epoch
+The prototype adds mandatory signed `ChannelMembershipData.key_commitment`; an epoch
 number alone does not authenticate key bytes. See phi-crypto for its exact digest
 and signature domain. `Space.settings_change` carries the latest signed settings
 proof (None until a change); clients must not use unsigned `Space.settings` for
@@ -109,3 +111,9 @@ local retention. Event `next_after` is the last delivered seq or the request's
 `after` when empty. Clients record an outcome per delivered event before advancing,
 never advance to unreturned high-water marks, and allow private-channel seq gaps.
 The HTTP route namespace remains `/v1`; the protocol header negotiates compatibility.
+
+`PROTOCOL_MAJOR` is parsed at compile time from `CARGO_PKG_VERSION_MAJOR` (0 for
+workspace 0.1.0); header and REST-prefix constants have shared production callers.
+`Space.limits` advertises per-file plaintext bytes and space quota. Upload shape
+validation does not freeze the deployment default; policy uses that advertised
+limit and the server's configured limit. Proxies must fit base64 plus AEAD/JSON.

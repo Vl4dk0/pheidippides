@@ -25,9 +25,24 @@ export const reactionSchema = z.object({
   handle: z.string(),
   created_at: integer,
 });
+export const reactionSummarySchema = z.object({
+  up: integer,
+  down: integer,
+  ack: integer,
+  claims: z.array(
+    z.object({
+      message: id,
+      person: id,
+      author: z.string(),
+      handle: z.string(),
+    }),
+  ),
+});
+export type ReactionSummary = z.infer<typeof reactionSummarySchema>;
 export const entrySchema = z.object({
   id,
   channel: z.string(),
+  to: z.string(),
   title: z.string(),
   from: z.string(),
   created_at: integer,
@@ -37,6 +52,7 @@ export const entrySchema = z.object({
   own_agent_activity: z.boolean(),
   latest_seq: integer,
   reactions: z.array(reactionSchema),
+  reaction_summary: reactionSummarySchema,
 });
 export const snapshotSchema = z.object({
   profile: profileSchema,
@@ -70,12 +86,12 @@ export const threadSchema = z.object({
   title: z.string(),
   participants: z.array(z.string()),
   summary: z.string().nullable(),
-  summary_covers_seq: integer.nullable(),
+  summary_number: integer.nullable(),
   newer_messages: integer,
   messages: z.array(
     z.object({
       id,
-      seq: integer,
+      number: integer,
       author: z.string(),
       person_id: id,
       handle: z.string(),
@@ -84,6 +100,7 @@ export const threadSchema = z.object({
       body: z.string(),
       verification_error: z.string().nullable(),
       reactions: z.array(reactionSchema),
+      reaction_summary: reactionSummarySchema,
       attachments: z.array(
         z.object({
           name: z.string(),

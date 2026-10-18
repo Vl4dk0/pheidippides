@@ -1,6 +1,6 @@
 # phi-server
 
-Ciphertext relay for protocol major 2. The server never receives decryption keys,
+Ciphertext relay for protocol major 0. The server never receives decryption keys,
 message plaintext, names, titles, or attachment filenames. Run one server process
 per data directory. `Server::open(config)?.router()` exposes the same Axum app to
 in-process clients/tests; it starts no listener or background task itself.
@@ -72,7 +72,7 @@ keys are client-owned and cannot be recovered from server backups.
 
 All paths below start with `/v1`. JSON request/response type names are exported by
 `phi-proto`. Every request, including public grant operations, needs
-`Phi-Protocol: 2`. Success is HTTP 200 and JSON. Requests reject unknown fields,
+`Phi-Protocol: 0`. Success is HTTP 200 and JSON. Requests reject unknown fields,
 including nested signed records. Typed query/path fields and size bounds are
 validated; ordinary JSON bodies are capped at 1 MiB before parsing, blob uploads
 at a configured base64-aware bound. Authentication precedes body consumption.
@@ -125,8 +125,9 @@ metadata-only PATCH updates permitted for encrypted client-side name registries.
 Removing any person (including an equal-size replacement) requires one atomic
 PATCH with the next signed membership epoch, metadata encrypted at that epoch,
 and `wrapped_keys` for every remaining active device. A rejected PATCH leaves the
-old roster, epoch, and wraps unchanged. Rotations advance exactly one epoch and wrap to every remaining active member device;
-same/older-epoch PUT may add only the authenticated device's own immutable wrap.
+old roster, epoch, and wraps unchanged. All rotations advance exactly one epoch in an atomic PATCH containing the
+signed roster/commitment, metadata and complete remaining-device wraps. PUT only
+adds the authenticated device's own same/historical-epoch enrollment wrap.
 
 Messages must use the current epoch and a root thread in the same channel.
 Required summaries are enforced via the plaintext flag for CLI devices; GUI
@@ -178,7 +179,8 @@ The server persists opaque cryptographically verified trust pins in SQLite and
 updates them in the same transaction as enrollment/revocation. Verification uses
 those prior pins, so rapid same-second enrollment/removal works without trusting
 backdated issuance. Invite person IDs are reserved uniquely, including unused
-invites. GUI enroll grants require GUI issuers; certificates must match the signed
+invites. A first GUI device may enroll from any own device; later GUI devices require a
+GUI issuer; certificates must match the signed
 grant device kind.
 
 Channel create/update/rotation verify signed membership scope, issuer, epoch and
@@ -219,10 +221,19 @@ and the authenticated person's read cursors for the returned threads, allowing
 client inbox/read composition without decrypting anything on the host. Direct
 GET message lookup has the same space/channel authorization as message pages.
 
-Protocol major 2 binds channel key commitments into signed membership proofs.
-Use upgraded clients and recreate major-1 development spaces; signatures cannot
+Protocol major 0 binds channel key commitments into signed membership proofs.
+Use upgraded clients and recreate earlier development spaces; signatures cannot
 be migrated by the host. Routes retain `/v1`. Space GET includes the last signed
 `settings_change`, persisted atomically with the settings update/event. Exact
 revocation re-publication is idempotent, allowing recovery after a lost response.
 Server-configured defaults govern server cleanup. Clients use their trusted 14-day
 baseline until an authorized signed settings update is observed.
+
+Routes are registered with typed Axum path/query/body extractors. Shared protocol
+and auth middleware precede body reads; message-rate and upload-semaphore admission
+remain pre-body, with authorization checked again in the commit DB task. Event
+notifications happen only after an event commit, not uploads/cursors/counts.
+`Space.limits` always reflects current configured attachment/quota limits. Default
+25 MiB uploads need about 33.4 MiB base64; proxy examples allow 40 MiB and must be
+raised when changing server limits. Version 0.1.0 derives protocol major 0 directly
+from Cargo's package major; `/v1` remains the route namespace.

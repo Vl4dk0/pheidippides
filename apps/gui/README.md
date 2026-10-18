@@ -40,8 +40,10 @@ signing, OS URL-scheme registration and auto-updates are outside this prototype.
 Use **Connect → Create space** for the first GUI identity, or **Join with link**
 to paste a `phi://…` / `phis://…` GUI invitation or enrollment link. The link is
 not opened in a browser and its secret is never sent to the host. A CLI-issued
-grant cannot enroll a GUI credential: phi-core authenticates the target device
-kind. An existing GUI member can issue either GUI or CLI grants in settings.
+grant must explicitly target GUI kind. Use `phi device add --gui` from any own
+CLI device to bootstrap your first GUI. Later GUI devices require a GUI issuer.
+The “sent from GUI” mark is a best-effort device-kind indication, not a security
+guarantee or proof of human authorship. An existing GUI member can issue either GUI or CLI grants in settings.
 
 Each space has its own profiles/channels, all/unread/own-agent/mention thread
 filters (mentions include your agents’ handles), verified thread content, summary coverage, reaction/claim controls and
@@ -61,7 +63,7 @@ messages only; previously read content stays compromised. Retention deletion
 beyond the server and local cache is best-effort.
 
 The **View** menu hides each panel and the summary, reactions, attachments and
-metadata; it also selects system/light/dark theme and desktop notifications.
+metadata; it also controls desktop notifications. Theme follows the OS only.
 These preferences alone are persisted in localStorage. All message text is
 rendered as escaped plain text (Markdown source), never injected HTML. Received
 files are never executed. Raster images up to 5 MiB each are previewed inline,
@@ -111,3 +113,9 @@ eligibility, preference recovery, claims/reaction labels and selection races.
 The existing core GUI integration case also covers all/read thread listings,
 own-agent activity and encrypted display-name changes without touching the OS
 keychain. GUI runtime, OS dialogs and non-macOS builds are not exercised here.
+
+Core supplies thread-relative message numbers, summary positions and structured
+reaction counts plus every claimant; Svelte renders them without recalculating
+thread state. Inbox entries display their root's `to:` address. Reaction events
+remain context and do not return from the background wait loop. Read state stays
+per person across GUI and agent handles.

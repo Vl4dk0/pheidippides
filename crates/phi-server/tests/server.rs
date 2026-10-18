@@ -584,6 +584,9 @@ async fn invite_and_enrollment_preserve_signed_directory_and_membership() -> Tes
     let (enroll, _) = f.grant(&f.root, GrantKind::Enroll, None).await?;
     let mut gui = enroll.record.data.clone();
     gui.device_kind = DeviceKind::Gui;
+    let bootstrap = GrantSecret::from_bytes([99; 32]).derive()?;
+    gui.grant_id = bootstrap.id();
+    gui.grant_pub = bootstrap.public();
     let gui = CreateGrantRequest {
         record: sign_grant(gui, &f.root.key)?,
         sealed_keys: enroll.sealed_keys,
@@ -598,7 +601,7 @@ async fn invite_and_enrollment_preserve_signed_directory_and_membership() -> Tes
         )
         .await?
         .0,
-        403
+        200
     );
 
     let list: ListChannelsResponse = ok(
@@ -612,7 +615,6 @@ async fn invite_and_enrollment_preserve_signed_directory_and_membership() -> Tes
     assert_eq!(list.channels.len(), 1);
     assert_eq!(list.channels[0].id, f.all);
     let r = PutKeysRequest {
-        membership: None,
         epoch: 0,
         wrapped_keys: vec![wrapped(f.all, person.cert.data.device_id, 0)],
     };
@@ -847,22 +849,33 @@ async fn channels_enforce_membership_and_complete_rotation() -> TestResult {
         .0,
         404
     );
-    let partial = PutKeysRequest {
-        membership: Some(next_roster(
-            &f.root.cert,
-            &f.root.key,
-            &c.membership,
-            1,
-            members.clone(),
-        )?),
-        epoch: 1,
-        wrapped_keys: vec![wrapped(cid, f.root.cert.data.device_id, 1)],
-    };
     assert_eq!(
         request(
             &f.app,
             "PUT",
             &format!("/v1/channels/{cid}/keys"),
+            Some(&f.root.token),
+            PutKeysRequest {
+                epoch: 1,
+                wrapped_keys: vec![wrapped(cid, f.root.cert.data.device_id, 1)]
+            }
+        )
+        .await?
+        .0,
+        403
+    );
+    let partial = UpdateChannelRequest {
+        membership: next_roster(&f.root.cert, &f.root.key, &c.membership, 1, members.clone())?,
+        epoch: 1,
+        meta: cipher(16),
+        members: members.clone(),
+        wrapped_keys: vec![wrapped(cid, f.root.cert.data.device_id, 1)],
+    };
+    assert_eq!(
+        request(
+            &f.app,
+            "PATCH",
+            &format!("/v1/channels/{cid}"),
             Some(&f.root.token),
             &partial
         )
@@ -879,7 +892,7 @@ async fn channels_enforce_membership_and_complete_rotation() -> TestResult {
             0,
             vec![f.root.cert.data.person_id, outsider.cert.data.person_id],
         )?,
-        meta_epoch: 0,
+        epoch: 0,
         meta: cipher(16),
         members: vec![f.root.cert.data.person_id, outsider.cert.data.person_id],
     };
@@ -904,7 +917,7 @@ async fn channels_enforce_membership_and_complete_rotation() -> TestResult {
             0,
             vec![f.root.cert.data.person_id],
         )?,
-        meta_epoch: 0,
+        epoch: 0,
         meta: cipher(16),
         members: vec![f.root.cert.data.person_id],
     };
@@ -920,7 +933,7 @@ async fn channels_enforce_membership_and_complete_rotation() -> TestResult {
         .0,
         409
     );
-    shrink.meta_epoch = 1;
+    shrink.epoch = 1;
     shrink.membership = next_roster(
         &f.root.cert,
         &f.root.key,
@@ -1361,7 +1374,47 @@ async fn multiple_long_polls_wake_and_revocation_interrupts_waiters() -> TestRes
         |r| r.get(0),
     )?;
     assert_eq!(seen, 1, "idle polls must not write last_seen");
+    let _: Blob = ok(
+        &f.app,
+        "POST",
+        "/v1/blobs",
+        Some(&f.root.token),
+        UploadBlobRequest {
+            space_id: f.sid,
+            ciphertext: Base64Bytes::new(vec![4; 32]),
+        },
+    )
+    .await?;
+    let quiet: Counts = ok(
+        &f.app,
+        "GET",
+        &f.space("/counts"),
+        Some(&f.root.token),
+        json!(null),
+    )
+    .await?;
+    assert_eq!(quiet.latest_seq, 0);
+    assert!(waiters.iter().all(|task| !task.is_finished()));
     let m = f.send(&f.root, f.all, None).await?;
+    let _: ReadCursor = ok(
+        &f.app,
+        "PUT",
+        &format!("/v1/threads/{}/cursor", m.id),
+        Some(&f.root.token),
+        PutCursorRequest {
+            last_read_seq: m.seq,
+        },
+    )
+    .await?;
+    let counts: Counts = ok(
+        &f.app,
+        "GET",
+        &f.space("/counts"),
+        Some(&f.root.token),
+        json!(null),
+    )
+    .await?;
+    assert_eq!(counts.latest_seq, m.seq);
     for task in waiters {
         let (status, value, _) = tokio::time::timeout(Duration::from_secs(5), task).await???;
         assert_eq!(status, 200);

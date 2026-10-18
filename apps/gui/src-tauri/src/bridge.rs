@@ -1,6 +1,9 @@
 use crate::key_store::{OsKeyStore, profile_id};
 use base64::{Engine, engine::general_purpose::STANDARD};
-use phi_core::{Client, DeviceOptions, Profile, ReadOptions, SendOptions, Store, WaitEntry};
+use phi_core::{
+    Client, DeviceOptions, Profile, ReactionSummary, ReadOptions, SendOptions, Store, WaitEntry,
+    reaction_summary,
+};
 use phi_proto::{
     ChannelKind, DeviceKind, MessageId, ReactionKind, RevocationTarget, SpaceId, SummaryMode,
 };
@@ -76,6 +79,7 @@ fn reactions(client: &Client, reactions: &[phi_proto::Reaction]) -> Vec<Reaction
 struct ThreadEntry {
     id: MessageId,
     channel: String,
+    to: String,
     title: String,
     from: String,
     created_at: u64,
@@ -85,6 +89,7 @@ struct ThreadEntry {
     own_agent_activity: bool,
     latest_seq: u64,
     reactions: Vec<ReactionView>,
+    reaction_summary: ReactionSummary,
 }
 #[derive(Serialize)]
 struct Snapshot {
@@ -107,7 +112,7 @@ struct AttachmentView {
 #[derive(Serialize)]
 struct MessageView {
     id: MessageId,
-    seq: u64,
+    number: usize,
     author: String,
     person_id: phi_proto::PersonId,
     handle: String,
@@ -116,6 +121,7 @@ struct MessageView {
     body: String,
     verification_error: Option<String>,
     reactions: Vec<ReactionView>,
+    reaction_summary: ReactionSummary,
     attachments: Vec<AttachmentView>,
 }
 #[derive(Serialize)]
@@ -124,7 +130,7 @@ struct ThreadView {
     title: String,
     participants: Vec<String>,
     summary: Option<String>,
-    summary_covers_seq: Option<u64>,
+    summary_number: Option<usize>,
     newer_messages: usize,
     messages: Vec<MessageView>,
 }
@@ -260,6 +266,7 @@ pub async fn execute(
                 .map(|t| ThreadEntry {
                     id: t.id,
                     channel: t.channel,
+                    to: t.to,
                     title: t.title,
                     from: t.from,
                     created_at: t
@@ -273,6 +280,7 @@ pub async fn execute(
                     own_agent_activity: t.own_agent_activity,
                     latest_seq: t.latest_seq,
                     reactions: reactions(&client, &t.reactions),
+                    reaction_summary: reaction_summary(&t.reactions, &client.names()),
                 })
                 .collect();
             serde_json::to_value(Snapshot {
@@ -350,7 +358,7 @@ pub async fn execute(
                 }
                 messages.push(MessageView {
                     id: message.message.id,
-                    seq: message.message.seq,
+                    number: message.number,
                     author: client.person_name(message.message.author_person),
                     person_id: message.message.author_person,
                     handle: message.message.envelope.handle.to_string(),
@@ -359,6 +367,7 @@ pub async fn execute(
                     body: message.content.body,
                     verification_error: message.verification_error,
                     reactions: reactions(&client, &message.reactions),
+                    reaction_summary: reaction_summary(&message.reactions, &client.names()),
                     attachments,
                 });
             }
@@ -367,7 +376,7 @@ pub async fn execute(
                 title: view.title,
                 participants: view.participants,
                 summary: view.summary,
-                summary_covers_seq: view.summary_covers_seq,
+                summary_number: view.summary_number,
                 newer_messages: view.newer_messages,
                 messages,
             })

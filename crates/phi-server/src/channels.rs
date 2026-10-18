@@ -155,7 +155,6 @@ impl Db {
             space_id: r.space_id,
             kind: r.kind,
             meta: r.meta,
-            meta_epoch: 0,
             members: r.members,
             current_epoch: 0,
         };
@@ -197,13 +196,13 @@ impl Db {
                 return Err(ApiError::conflict("membership predecessor mismatch"));
             }
             let shrinking = c.members.iter().any(|person| !r.members.contains(person));
-            let rotating = r.meta_epoch != c.current_epoch;
+            let rotating = r.epoch != c.current_epoch;
             if shrinking && !rotating {
                 return Err(ApiError::conflict(
                     "membership removal requires atomic key rotation",
                 ));
             }
-            if rotating && c.current_epoch.checked_add(1) != Some(r.meta_epoch) {
+            if rotating && c.current_epoch.checked_add(1) != Some(r.epoch) {
                 return Err(ApiError::conflict("epoch must advance by one"));
             }
             if !rotating && !r.wrapped_keys.is_empty() {
@@ -214,7 +213,7 @@ impl Db {
             }
             c.members = r.members;
             if rotating {
-                c.current_epoch = r.meta_epoch;
+                c.current_epoch = r.epoch;
                 db.complete_keys(a, &c, &r.wrapped_keys)?;
                 db.save_keys(&r.wrapped_keys)?;
             }
@@ -222,7 +221,6 @@ impl Db {
             c.membership = r.membership;
             db.signed_membership(a, &c.membership, &c)?;
             c.meta = r.meta;
-            c.meta_epoch = r.meta_epoch;
             db.conn.execute(
                 "UPDATE channels SET json=? WHERE id=?",
                 params![json(&c)?, cid.to_string()],
@@ -246,40 +244,13 @@ impl Db {
     ) -> Result<GetKeysResponse> {
         r.validate()?;
         self.transaction(|db| {
-            let mut channel = db.channel(a, cid)?;
-            if r.epoch
-                > channel
-                    .current_epoch
-                    .checked_add(1)
-                    .ok_or_else(|| ApiError::conflict("epoch exhausted"))?
-            {
-                return Err(ApiError::conflict("epoch must advance by one"));
-            }
-            db.valid_keys(a, &channel, &r.wrapped_keys)?;
-            if r.epoch > channel.current_epoch {
-                db.complete_keys(a, &channel, &r.wrapped_keys)?;
-                channel.current_epoch = r.epoch;
-                let proof = r
-                    .membership
-                    .as_ref()
-                    .ok_or_else(|| ApiError::invalid("rotation requires signed membership"))?;
-                if proof.data.previous.as_ref() != Some(&channel.membership.signature) {
-                    return Err(ApiError::conflict("membership predecessor mismatch"));
-                }
-                channel.membership_history.push(channel.membership.clone());
-                channel.membership = r
-                    .membership
-                    .ok_or_else(|| ApiError::invalid("rotation requires signed membership"))?;
-                db.signed_membership(a, &channel.membership, &channel)?;
-                db.conn.execute(
-                    "UPDATE channels SET json=? WHERE id=?",
-                    params![json(&channel)?, cid.to_string()],
-                )?;
-            } else if r.membership.is_some()
+            let channel = db.channel(a, cid)?;
+            if r.epoch > channel.current_epoch
                 || r.wrapped_keys.iter().any(|k| k.device_id != a.device())
             {
                 return Err(ApiError::forbidden());
             }
+            db.valid_keys(a, &channel, &r.wrapped_keys)?;
             db.save_keys(&r.wrapped_keys)?;
             Ok(GetKeysResponse {
                 wrapped_keys: r.wrapped_keys,

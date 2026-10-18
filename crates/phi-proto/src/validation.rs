@@ -185,7 +185,14 @@ impl Validate for MessageContent {
             single_line(title, "title")?;
         }
         if let Some(summary) = &self.summary {
-            single_line(summary, "summary")?;
+            check(
+                !summary.chars().any(|c| {
+                    (c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
+                        || matches!(c, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+                }),
+                "summary",
+                "unsupported control or bidi formatting",
+            )?;
         }
         single_line(&self.display_name, "display_name")?;
         check(
@@ -346,7 +353,6 @@ impl Validate for CreateChannelRequest {
             "signed channel fields mismatch",
         )?;
         PutKeysRequest {
-            membership: None,
             epoch: 0,
             wrapped_keys: self.wrapped_keys.clone(),
         }
@@ -362,8 +368,7 @@ impl Validate for UpdateChannelRequest {
     fn validate(&self) -> Result<(), ValidationError> {
         if !self.wrapped_keys.is_empty() {
             PutKeysRequest {
-                membership: None,
-                epoch: self.meta_epoch,
+                epoch: self.epoch,
                 wrapped_keys: self.wrapped_keys.clone(),
             }
             .validate()?;
@@ -372,7 +377,7 @@ impl Validate for UpdateChannelRequest {
         self.membership.validate()?;
         check(
             self.membership.data.members == self.members
-                && self.membership.data.epoch == self.meta_epoch,
+                && self.membership.data.epoch == self.epoch,
             "membership",
             "signed channel fields mismatch",
         )?;
@@ -381,14 +386,6 @@ impl Validate for UpdateChannelRequest {
 }
 impl Validate for PutKeysRequest {
     fn validate(&self) -> Result<(), ValidationError> {
-        if let Some(membership) = &self.membership {
-            membership.validate()?;
-            check(
-                membership.data.epoch == self.epoch,
-                "membership.epoch",
-                "signed epoch mismatch",
-            )?;
-        }
         check(
             !self.wrapped_keys.is_empty() && self.wrapped_keys.len() <= MAX_DEVICES,
             "wrapped_keys",
@@ -474,7 +471,11 @@ impl UploadBlobRequest {
 }
 impl Validate for UploadBlobRequest {
     fn validate(&self) -> Result<(), ValidationError> {
-        self.validate_with_limit(DEFAULT_MAX_ATTACHMENT_BYTES)
+        check(
+            self.ciphertext.len() >= 16,
+            "ciphertext",
+            "blob lacks authentication tag",
+        )
     }
 }
 

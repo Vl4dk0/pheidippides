@@ -1,4 +1,4 @@
-# Cryptographic architecture (protocol major 2)
+# Cryptographic architecture (protocol major 0)
 
 This crate is pure: no files, network, clocks, or OS randomness. Pass an `Entropy`
 implementation backed by the OS CSPRNG from the application, and Unix seconds to
@@ -131,9 +131,11 @@ signatures. Each person has exactly one origin: the root person or one invite
 record; another invite cannot reuse that person ID, even if the first invite is
 unused. Later certificates for that person must use enroll grants issued by that
 same person's device. Certificates must match the grant's signed `device_kind`.
-A GUI enroll grant requires a GUI issuer. A new-person invite may target either
+The first GUI certificate for a person may use any own-device issuer; subsequent
+GUI certificates require a GUI issuer. Verification allows at most one bootstrap
+GUI origin per person, including historical/revoked devices. A new-person invite may target either
 kind. Device kinds authenticate an issuer's designation, not hardware/keychain
-attestation or proof that a human typed the message.
+attestation or proof that a human typed the message; the GUI mark is best effort.
 
 Current revocation dominates attacker-controlled wall clocks. A certificate whose
 grant issuer is currently revoked is accepted **only if that exact certificate
@@ -155,12 +157,13 @@ would expose equivocation; this prototype does not add a transparency service.
 
 ## Authenticated channel membership
 
-Create/update carry `ChannelMembership`; rotations require it in `PutKeysRequest`.
+Create/update carry `ChannelMembership`; every rotation is an atomic channel
+PATCH including new-epoch metadata and complete wraps. PUT keys is enrollment
+self-rewrap only.
 Each proof signs space/channel/epoch/key commitment/kind/members/issuer and the previous roster's
 signature (`previous=null` for epoch-0 genesis). Updates and rotations must extend
 the currently stored proof; the server persists the complete oldest-first
-`Channel.membership_history` plus the current `membership`. Historical/self key
-rewraps leave membership unchanged and omit the proof from PUT keys.
+`Channel.membership_history` plus the current `membership`. Historical/self key rewraps leave membership unchanged.
 
 Before wrapping, call `VerifiedDirectory::verify_channel(channel, prior_roster)`
 and pass its `VerifiedMembership` to `wrap_channel_key`. M3 must persist each
@@ -184,8 +187,9 @@ objects from a different directory snapshot cannot be mixed.
 
 ## Text and links
 
-Titles, summaries, display names, attachment names and MIME values reject control
-characters, Unicode line/paragraph separators and bidi directional controls.
+Titles, display names, attachment names and MIME values reject control
+characters, Unicode line/paragraph separators and bidi directional controls. Summaries allow bounded multiline text while
+rejecting bidi/non-text controls.
 Attachment names remain one path segment. Markdown bodies remain multiline and
 untrusted: M3 must render them inside the untrusted content frame, never as trusted
 header/author markup. A GUI kind never grants instruction priority.
@@ -195,10 +199,13 @@ Links are `phi://authority/space_id#S` (HTTP) or `phis://...` (HTTPS), using the
 are accepted; credentials, paths, queries, percent escapes and padding are rejected.
 Encoded links use `Zeroizing<String>` and expose S only via explicit accessors.
 
-The signed commitment changes the unreleased prototype to protocol major 2.
-Major-1 peers are rejected at the protocol header. Old membership records lack the
+The signed commitment changes the unreleased prototype to protocol major 0.
+Earlier prototype peers are rejected at the protocol header. Old membership records lack the
 mandatory field/signature domain; recreate development spaces with upgraded
 components. The host cannot migrate signatures and no legacy verification exists.
 `VerifiedDirectory::certificate(id)` exposes authenticated ownership even after
 revocation; it grants no active authorization. `trust_bundle()` exports verified
 merged evidence for locally pinning a newly signed revocation before publication.
+
+The protocol header follows workspace Semver major (0 for 0.1.0), independently
+of the fixed signature/AAD format-domain suffixes listed above.

@@ -1,5 +1,5 @@
 use crate::{Result, user};
-use phi_proto::{ErrorBody, PROTOCOL_MAJOR, Validate};
+use phi_proto::{API_PREFIX, ErrorBody, PROTOCOL_HEADER, PROTOCOL_MAJOR, Validate};
 use reqwest::{Client, Method};
 use serde::{Serialize, de::DeserializeOwned};
 use std::time::Duration;
@@ -95,8 +95,8 @@ impl Http {
     ) -> Result<T> {
         let mut req = self
             .client
-            .request(method, format!("{}/v1{path}", self.base))
-            .header("Phi-Protocol", PROTOCOL_MAJOR);
+            .request(method, format!("{}{API_PREFIX}{path}", self.base))
+            .header(PROTOCOL_HEADER, PROTOCOL_MAJOR);
         if let Some(token) = &self.token {
             req = req.bearer_auth(token);
         }

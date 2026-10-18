@@ -63,3 +63,7 @@ rejects other majors with HTTP 426 and `phi` tells the user to upgrade. Minor
 and patch releases are wire-compatible, so they can be rolled out in any order.
 Older majors are never supported; on a major bump upgrade the server and all
 clients together. Take a backup first.
+
+Default 25 MiB attachment plaintext expands to about 33.4 MiB JSON/base64 plus the
+AEAD tag. Proxy examples allow 40 MiB; increase that when raising
+`limits.max_blob_bytes`. Clients learn per-file/quota limits from `Space.limits`.

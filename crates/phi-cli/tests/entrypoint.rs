@@ -37,7 +37,35 @@ async fn cli_workflow_references_wait_skill_and_exit_codes() -> phi_core::Result
     .map_err(|e| phi_core::Error::User(e.to_string()))?;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let url = format!("http://{}", listener.local_addr()?);
-    let router = server.router();
+    let phase = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0));
+    let router_phase = phase.clone();
+    let router = server.router().layer(axum::middleware::from_fn(
+        move |request: axum::extract::Request, next: axum::middleware::Next| {
+            let phase = router_phase.clone();
+            async move {
+                use axum::response::IntoResponse;
+                use std::sync::atomic::Ordering;
+                let messages = request.uri().path().starts_with("/v1/channels/")
+                    && request.uri().path().ends_with("/messages");
+                let sent = messages && request.method() == axum::http::Method::POST;
+                if messages
+                    && request.method() == axum::http::Method::GET
+                    && phase.load(Ordering::SeqCst) == 2
+                {
+                    return (
+                        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                        axum::Json(serde_json::json!({"error":"history unavailable after commit"})),
+                    )
+                        .into_response();
+                }
+                let response = next.run(request).await;
+                if sent && response.status().is_success() {
+                    let _ = phase.compare_exchange(1, 2, Ordering::SeqCst, Ordering::SeqCst);
+                }
+                response
+            }
+        },
+    ));
     let task = tokio::spawn(async move {
         let _ = axum::serve(listener, router).await;
     });
@@ -115,11 +143,11 @@ async fn cli_workflow_references_wait_skill_and_exit_codes() -> phi_core::Result
     assert!(
         events.contains("new message")
             && events.contains("reply in thread")
-            && events.contains("reaction: claim by alice/main")
+            && events.contains("claimed by alice/main")
             && events.contains(&reply)
             && events.contains(&format!("phi read {thread}"))
     );
-    assert!(!events.contains("claimed by"));
+    assert!(!events.contains("reaction:"));
     phi(binary, workspace.path(), &["unread", &reply]).await?;
     assert!(
         phi(binary, workspace.path(), &["read", raw_reply])
@@ -131,6 +159,27 @@ async fn cli_workflow_references_wait_skill_and_exit_codes() -> phi_core::Result
         search.contains(&reply)
             && search.contains("(you · agent)")
             && !search.contains("UNTRUSTED")
+    );
+    phi(binary, workspace.path(), &["react", &reply, "ack"]).await?;
+    phase.store(1, std::sync::atomic::Ordering::SeqCst);
+    let receipt = phi(
+        binary,
+        workspace.path(),
+        &[
+            "reply",
+            thread,
+            "receipt survives lookup failure",
+            "--summary",
+            "Three messages",
+        ],
+    )
+    .await?;
+    assert!(receipt.contains(&format!("thread {thread}")) && receipt.contains(" · id "));
+    phase.store(0, std::sync::atomic::Ordering::SeqCst);
+    let final_read = phi(binary, workspace.path(), &["read", thread, "--all"]).await?;
+    assert!(
+        final_read.contains(&format!("message {thread}#3"))
+            && final_read.contains("receipt survives lookup failure")
     );
     Ok(())
 }

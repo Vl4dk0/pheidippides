@@ -72,6 +72,10 @@ impl Db {
         };
         let verified = phi_crypto::verify_trust_bundle(root.data.space_id, &bundle, now(), None)?;
         let space = Space {
+            limits: ServerLimits {
+                max_attachment_bytes: self.config.limits.max_blob_bytes,
+                space_quota_bytes: self.config.limits.space_quota_bytes,
+            },
             settings_change: None,
             id: root.data.space_id,
             root_cert: root.clone(),
@@ -113,6 +117,7 @@ impl Db {
         if d.kind == GrantKind::Enroll
             && d.device_kind == DeviceKind::Gui
             && a.cert.data.kind != DeviceKind::Gui
+            && self.conn.query_row("SELECT EXISTS(SELECT 1 FROM devices WHERE space_id=? AND person_id=? AND json_extract(json,'$.cert.data.kind')='gui')", params![a.sid().to_string(), a.person().to_string()], |row| row.get::<_,bool>(0))?
         {
             return Err(ApiError::forbidden());
         }

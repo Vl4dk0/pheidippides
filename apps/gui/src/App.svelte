@@ -10,7 +10,6 @@
   import {
     filterThreads,
     parsePreferences,
-    reactionLabel,
     Selection,
     shouldNotify,
     type Filter,
@@ -18,6 +17,7 @@
   } from './lib/state';
   import ProfileForm from './ProfileForm.svelte';
   import Settings from './Settings.svelte';
+  import ReactionSummaryView from './ReactionSummary.svelte';
   import ThreadPane from './ThreadPane.svelte';
   let profiles = $state<api.Profile[]>([]);
   let selected = $state('');
@@ -62,7 +62,6 @@
   $effect(() => {
     if (mounted) {
       localStorage.setItem('phi.preferences', JSON.stringify(prefs));
-      document.documentElement.dataset.theme = prefs.theme;
     }
   });
   function report(reason: unknown) {
@@ -363,13 +362,7 @@
         <div class="menu">
           {#each toggles as key}<label class="check"
               ><input type="checkbox" bind:checked={prefs[key]} />{key}</label
-            >{/each}<label
-            >Theme<select bind:value={prefs.theme}
-              ><option value="system">System</option><option value="light"
-                >Light</option
-              ><option value="dark">Dark</option></select
-            ></label
-          ><label class="check"
+            >{/each}<label class="check"
             ><input
               type="checkbox"
               checked={prefs.notifications}
@@ -467,7 +460,7 @@
               ><strong>{entry.title || 'Untitled thread'}</strong
               >{#if entry.unread}<span aria-label="Unread" class="dot"
                 ></span>{/if}</span
-            ><small>{entry.channel} · {entry.from}</small
+            ><small>{entry.channel} · to: {entry.to} · {entry.from}</small
             >{#if prefs.metadata}<small
                 >{new Date(
                   entry.created_at * 1000,
@@ -477,7 +470,7 @@
               >{/if}{#if prefs.summary && entry.summary}<p class="excerpt">
                 {entry.summary}
               </p>{/if}{#if prefs.reactions && entry.reactions.length}<small
-                >{reactionLabel(entry.reactions)}</small
+                ><ReactionSummaryView summary={entry.reaction_summary} /></small
               >{/if}</button
           >{/each}
         {#if !visibleThreads.length}<p class="muted">

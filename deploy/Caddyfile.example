@@ -2,7 +2,7 @@
 # running with tls.mode = "off" on localhost.
 phi.example.org {
 	request_body {
-		max_size 30MB   # >= max_blob_bytes plus encryption overhead
+		max_size 40MB   # >= 4/3 * (max_blob_bytes + 16-byte tag) + JSON overhead
 	}
 	reverse_proxy 127.0.0.1:8443 {
 		# Long-poll requests wait up to 900 s; default proxy timeouts would cut

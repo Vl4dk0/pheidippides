@@ -1,10 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { entrySchema, pollSchema, threadSchema, type Entry } from './api';
+import {
+  entrySchema,
+  pollSchema,
+  threadSchema,
+  reactionSummarySchema,
+  type Entry,
+} from './api';
 import {
   defaultPreferences,
   filterThreads,
   parsePreferences,
-  reactionLabel,
   Selection,
   shouldNotify,
 } from './state';
@@ -12,6 +17,7 @@ const id = 'AAAAAAAAAAAAAAAAAAAAAA';
 const entry: Entry = {
   id,
   channel: '#all',
+  to: '#all',
   title: 'Work',
   from: 'vladko/main',
   created_at: 1,
@@ -21,6 +27,7 @@ const entry: Entry = {
   own_agent_activity: false,
   latest_seq: 1,
   reactions: [],
+  reaction_summary: { up: 0, down: 0, ack: 0, claims: [] },
 };
 describe('desktop state boundary', () => {
   it('filters channel, unread, agent activity and mentions independently, sorted by sequence', () => {
@@ -63,7 +70,7 @@ describe('desktop state boundary', () => {
     ).toBe(false);
     const message = {
       id,
-      seq: 1,
+      number: 1,
       author: 'a',
       person_id: id,
       handle: 'gui',
@@ -72,6 +79,7 @@ describe('desktop state boundary', () => {
       body: '',
       verification_error: null,
       reactions: [],
+      reaction_summary: { up: 0, down: 0, ack: 0, claims: [] },
       attachments: [
         {
           name: 'x.svg',
@@ -88,7 +96,7 @@ describe('desktop state boundary', () => {
         title: '',
         participants: [],
         summary: null,
-        summary_covers_seq: null,
+        summary_number: null,
         newer_messages: 0,
         messages: [message],
       }).success,
@@ -122,7 +130,7 @@ describe('desktop state boundary', () => {
       null,
       '{',
       '{}',
-      JSON.stringify({ ...defaultPreferences, theme: 'remote' }),
+      JSON.stringify({ ...defaultPreferences, spaces: 'invalid' }),
     ])
       expect(parsePreferences(raw)).toEqual(defaultPreferences);
     expect(
@@ -130,21 +138,25 @@ describe('desktop state boundary', () => {
         .spaces,
     ).toBe(false);
   });
-  it('summarizes reactions including claimant identity without guessing count state', () => {
-    const reaction = {
-      person_id: id,
-      author: 'bob',
-      handle: 'fixer',
-      created_at: 1,
+  it('accepts structured reaction context including multiple claimants', () => {
+    const summary = {
+      up: 0,
+      down: 0,
+      ack: 2,
+      claims: [
+        { message: id, person: id, author: 'bob', handle: 'fixer' },
+        {
+          message: 'BBBBBBBBBBBBBBBBBBBBBB',
+          person: id,
+          author: 'bob',
+          handle: 'reviewer',
+        },
+      ],
     };
+    expect(reactionSummarySchema.parse(summary).claims).toHaveLength(2);
     expect(
-      reactionLabel([
-        { ...reaction, kind: 'ack' },
-        { ...reaction, kind: 'ack' },
-        { ...reaction, kind: 'claim' },
-      ]),
-    ).toBe('ack × 2 · claimed by bob/fixer');
-    expect(reactionLabel([])).toBe('');
+      reactionSummarySchema.safeParse({ ...summary, ack: -1 }).success,
+    ).toBe(false);
   });
   it('discards stale selections after switching spaces or threads', () => {
     const selection = new Selection();

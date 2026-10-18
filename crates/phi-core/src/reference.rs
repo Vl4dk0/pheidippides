@@ -37,6 +37,10 @@ pub struct MessageReference {
 }
 impl fmt::Display for MessageReference {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}#{}", self.thread, self.number)
+        if self.number == 0 {
+            write!(f, "{} (thread {})", self.id, self.thread)
+        } else {
+            write!(f, "{}#{}", self.thread, self.number)
+        }
     }
 }

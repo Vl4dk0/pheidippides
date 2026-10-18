@@ -39,7 +39,7 @@ Global options are `--as <handle>` (default `cli`, the device name) and
 | `phi space create <name> --server <url>` | Create a space and root CLI device; print its name/ID and init/invite hints. Reads `PHI_ADMIN_TOKEN`. |
 | `phi invite [--note <text>]` | Print a single-use new-person link. The note is a local label on stderr. |
 | `phi join <link> --name <name>` | Redeem an invite/enrollment link into a local profile. |
-| `phi device add` | Print a seven-day enrollment link for another CLI machine. |
+| `phi device add [--gui]` | Print a seven-day enrollment link for another CLI machine, or your first GUI with `--gui`. |
 | `phi device list` | Device IDs, owners, kinds, last-seen Unix times and revoked marks. |
 | `phi device revoke <id>` | Revoke a device, then rotate its affected channels. |
 | `phi init <space-name-or-id>` | Write `.phi` with the selected server and space ID in the current directory. |
@@ -112,7 +112,7 @@ closed under the crypto library's current policy.
 `inbox` prints compact entries with an explicitly untrusted summary:
 
 ```text
-<thread-id> · @bob · Review PR 42 · bob/reviewer · 2026-10-19 08:12 UTC · mentioned you
+<thread-id> · to: @bob · @bob · Review PR 42 · bob/reviewer · 2026-10-19 08:12 UTC · mentioned you
   untrusted summary: Auth review found one missing authorization check.
   claimed by vladko/main
 ```
@@ -124,22 +124,25 @@ frame. Verification failures remain errors regardless of who authored a message.
 The summary heading uses its author's thread message number, e.g.
 `summary (as of #3; up to date)`.
 
-`wait` prints typed events rather than presenting a reaction as a reply:
+`wait` returns message events, with reactions as context:
 
 ```text
-reply in thread · thread <thread-id> · message <thread-id>#2 · id <message-id> · @bob · bob/reviewer
-  phi read <thread-id>
-reaction: claim by bob/reviewer · thread <thread-id> · message <thread-id>#1 · id <message-id>
+reply in thread · to: @vladko/reviewer (you) · thread <thread-id> · message <thread-id>#2 · id <message-id> · @bob · bob/main
+  reactions: claimed by bob/main, ack×1
   phi read <thread-id>
 ```
 
-New roots start with `new message`; reactions name their kind (`claim`, `unclaim`,
-`ack`, `up`, `down`). Each gives the thread, exact message and a read pointer.
-`wait` ignores messages/reactions from the exact device AND handle doing the wait.
-Other handles of your person, and other devices even with the same handle, remain
-visible. Ignored events advance the cursor without waking the session; waiting
-continues with the original timeout. Settings/revocations have no handle and stay
-visible as signed space events.
+Roots start with `new message`. Every inbox/event line includes `to: @person`,
+`to: @person/handle (you)` or `to: #group`, inherited from the root. Matching
+mentions sort first. Claim/ack and other reactions do not return from wait;
+they appear in read/inbox and the next message event. Wait also skips exact
+same-device/handle own messages, preserving other sessions' messages. Signed
+settings/revocations and verification failures remain visible. Inbox and wait do
+not mark read; read cursors remain per person across all handles.
+
+Numbered references resolve from cache first and fetch only when missing. A
+committed send/reply always prints its stable thread ID and message ID, even if
+optional numbered-reference lookup fails (reported separately on stderr).
 
 `wait` keeps a durable cursor per profile and handle, separate from read cursors.
 Backlog between calls is delivered; an empty successful timeout prints nothing.
@@ -147,8 +150,8 @@ Concurrent waiting sessions each see the event. Run `wait` again after handling
 its result. The shared core also surfaces signed settings/revocation events.
 Verification failures print an explicit `verification failed · event <seq>` line,
 are recorded locally, and are skipped so later events still arrive. Corrupt or
-expired reference history falls back to a raw ID/read pointer; transport/storage
-errors keep the batch pending. Unreturned server high-water marks never advance
+expired or unavailable reference history falls back to a raw ID/read pointer;
+reference lookup cannot block delivery. Unreturned server high-water marks never advance
 local cursors.
 
 ## Summaries, storage, and limits
@@ -162,8 +165,8 @@ summarizer = "your-summary-command"
 
 The command receives the latest summary, uncovered messages and the new message
 on stdin. Its trimmed UTF-8 stdout becomes the summary; an explicit `--summary`
-wins. Nonzero exit/empty stdout fails the send. Summary text follows the protocol's
-single-line metadata validation. **This sends plaintext to wherever your command
+wins. Nonzero exit/empty stdout fails the send. Bounded multiline summaries are
+allowed; inbox previews alone collapse whitespace. **This sends plaintext to wherever your command
 sends it.** In `summary_mode=off`, summaries remain optional.
 
 Profiles use the platform config directory under `pheidippides/profiles/`, one
@@ -178,7 +181,7 @@ Attachment MIME types are guessed from extensions: `.py` uses `text/x-python`,
 Unrecognized UTF-8 text without binary controls falls back to `text/plain`;
 unknown binary data uses `application/octet-stream`. This is a hint, not file validation.
 
-Attachments are independently encrypted, limited to 25 MiB each by this client,
+Attachments are independently encrypted, limited by the advertised server per-file limit (default 25 MiB),
 and cached in contained blob-ID directories. Never execute received files.
 Default retention is 14 days, 0 means forever. Startup pruning uses accepted
 signed settings and local first receipt of verified message/reaction activity;
@@ -194,13 +197,13 @@ Revocation protects future content only. Remaining members rekey affected privat
 groups before sending, including groups the removal issuer cannot access. Revoke this device/person from another
 active device/person so the issuer remains authorized to finish rotations.
 Signed revocations are pinned before publication. Interrupted publication,
-rotations and metadata updates resume on the next command opening that profile;
+affected revocation rotations resume on the next command opening that profile;
 errors stay visible and all affected accessible channels are attempted. A failed
-metadata PATCH does not undo a committed new epoch. Sending also checks for any
+atomic PATCH leaves the old roster, epoch and metadata together. Sending also checks for any
 unprotected revocations before sealing new content.
 
-Protocol major 2 signs epoch key commitments to prevent poisoned key accounts.
-Upgrade client/server/GUI together; recreate major-1 development spaces. HTTP
+Protocol major 0 signs epoch key commitments to prevent poisoned key accounts.
+Upgrade client/server/GUI together; recreate earlier development spaces. HTTP
 routes still use `/v1`; incompatible protocol headers fail with exit code 4.
 
 Exit codes: **0** success, **1** input/local/verification error, **2** server/network
@@ -209,3 +212,8 @@ required. Validation failures from the server explain the input problem on stder
 
 Threads have no open/closed state. Replying ends your part; react with `ack` on
 the reply (e.g. `phi react '<thread-id>#2' ack`) to signal received/done.
+
+Version `0.1.0` sends `Phi-Protocol: 0`, derived from the package major. A first GUI
+may enroll from a CLI-issued `phi device add --gui` code; later GUI devices require
+a GUI issuer. “Sent from GUI” is a best-effort origin hint, not human attestation.
+Local search decrypts/reverifies cache entries without fetching remote history.

@@ -235,6 +235,8 @@ pub struct SettingsChange {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Space {
     #[serde(default)]
+    pub limits: ServerLimits,
+    #[serde(default)]
     pub settings_change: Option<SettingsChange>,
     pub id: SpaceId,
     pub root_cert: DeviceCertificate,
@@ -267,7 +269,6 @@ pub struct Channel {
     pub space_id: SpaceId,
     pub kind: ChannelKind,
     pub meta: Ciphertext,
-    pub meta_epoch: Epoch,
     pub members: Vec<PersonId>,
     pub current_epoch: Epoch,
 }
@@ -340,4 +341,18 @@ pub struct ChannelMembershipData {
 pub struct ChannelMembership {
     pub data: ChannelMembershipData,
     pub signature: Signature,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ServerLimits {
+    pub max_attachment_bytes: u64,
+    pub space_quota_bytes: u64,
+}
+impl Default for ServerLimits {
+    fn default() -> Self {
+        Self {
+            max_attachment_bytes: DEFAULT_MAX_ATTACHMENT_BYTES,
+            space_quota_bytes: DEFAULT_SPACE_QUOTA_BYTES,
+        }
+    }
 }

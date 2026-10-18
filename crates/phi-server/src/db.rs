@@ -118,7 +118,12 @@ impl Db {
         Ok(())
     }
     pub fn space(&self, sid: SpaceId) -> Result<Space> {
-        self.one("SELECT json FROM spaces WHERE id=?", [sid.to_string()])
+        let mut space: Space = self.one("SELECT json FROM spaces WHERE id=?", [sid.to_string()])?;
+        space.limits = ServerLimits {
+            max_attachment_bytes: self.config.limits.max_blob_bytes,
+            space_quota_bytes: self.config.limits.space_quota_bytes,
+        };
+        Ok(space)
     }
     pub fn channel(&self, a: &Auth, cid: ChannelId) -> Result<Channel> {
         self.one(

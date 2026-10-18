@@ -161,6 +161,12 @@ impl VerifiedDevice {
 pub struct PinnedTrustState {
     bundle: TrustBundle,
 }
+impl PinnedTrustState {
+    /// Local reads must observe persisted revocations without requiring the host's history.
+    pub fn verify(&self, space: SpaceId, now: Timestamp) -> Result<VerifiedDirectory, CryptoError> {
+        verify_trust_bundle(space, &self.bundle, now, Some(self))
+    }
+}
 
 #[derive(Debug)]
 pub struct VerifiedDirectory {
@@ -382,14 +388,6 @@ pub fn verify_trust_bundle(
                         "enrollment must belong to the issuer's person",
                     ));
                 }
-                if grant.data.kind == GrantKind::Enroll
-                    && grant.data.device_kind == DeviceKind::Gui
-                    && issuer.data.kind != DeviceKind::Gui
-                {
-                    return Err(CryptoError::Trust(
-                        "only GUI devices can authorize GUI enrollment",
-                    ));
-                }
                 if grant.data.created_at < issuer.data.created_at {
                     return Err(CryptoError::Trust("grant predates issuer"));
                 }
@@ -502,6 +500,29 @@ pub fn verify_trust_bundle(
         &revocations,
     ))?)
     .as_bytes();
+    let mut gui_origins = BTreeSet::new();
+    for certificate in certificates
+        .values()
+        .filter(|c| c.data.kind == DeviceKind::Gui)
+    {
+        let bootstrap = match certificate.data.issuer {
+            CertificateIssuer::Device { .. } => true,
+            CertificateIssuer::Grant { grant_id } => {
+                let grant = grants
+                    .get(&grant_id)
+                    .ok_or(CryptoError::Trust("GUI grant missing"))?;
+                grant.data.kind == GrantKind::Invite
+                    || certificates
+                        .get(&grant.data.issuer_device)
+                        .is_some_and(|issuer| issuer.data.kind != DeviceKind::Gui)
+            }
+        };
+        if bootstrap && !gui_origins.insert(certificate.data.person_id) {
+            return Err(CryptoError::Trust(
+                "further GUI devices require a GUI issuer",
+            ));
+        }
+    }
     Ok(VerifiedDirectory {
         context,
         space_id: expected_space,

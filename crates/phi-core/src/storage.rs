@@ -211,6 +211,7 @@ impl Cache {
         CREATE TABLE IF NOT EXISTS state(name TEXT PRIMARY KEY,value TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS messages(id TEXT PRIMARY KEY, seq INTEGER UNIQUE NOT NULL, thread TEXT NOT NULL, channel TEXT NOT NULL, created INTEGER NOT NULL, raw TEXT NOT NULL, content TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS messages_thread ON messages(thread,seq);
+        CREATE TABLE IF NOT EXISTS message_numbers(id TEXT PRIMARY KEY,thread TEXT NOT NULL,number INTEGER NOT NULL,UNIQUE(thread,number));
         CREATE TABLE IF NOT EXISTS message_pins(id TEXT PRIMARY KEY,seq INTEGER UNIQUE NOT NULL,digest TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS reactions(message TEXT NOT NULL,person TEXT NOT NULL,handle TEXT NOT NULL,kind TEXT NOT NULL,raw TEXT NOT NULL,PRIMARY KEY(message,person,handle,kind));
         CREATE TABLE IF NOT EXISTS observations(evidence TEXT PRIMARY KEY,thread TEXT NOT NULL);
@@ -373,6 +374,13 @@ impl Cache {
             self.db.execute("UPDATE wait_outcomes SET error='server changed a previously observed event' WHERE handle=? AND seq=?", params![handle.as_str(), event.seq])?;
         }
         Ok(changed > 0)
+    }
+    pub fn number(&self, message: &Message, number: usize) -> Result<()> {
+        let changed = self.db.execute("INSERT INTO message_numbers VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET number=excluded.number WHERE message_numbers.thread=excluded.thread AND message_numbers.number=excluded.number", params![message.id.to_string(), message.envelope.thread_id.unwrap_or(message.id).to_string(), number])?;
+        if changed == 0 {
+            return Err(user("message thread position changed"));
+        }
+        Ok(())
     }
     pub fn message(&mut self, message: &Message, content: &MessageContent) -> Result<()> {
         let raw = serde_json::to_string(message)?;

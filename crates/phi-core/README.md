@@ -16,8 +16,9 @@ No daemon, GUI, listener or server process is started by the library.
   `KeyStore` receives secret bytes; callers must protect them and atomically reject
   conflicting writes to an existing account (identical writes are idempotent). GUI keychain
   implementation belongs to M5. The client can move into a Send async task.
-- `invite_for_device` controls the signed target kind. GUI enrollment requires a
-  GUI issuer. `invite(true, true)` issues a never-expiring enrollment/recovery code;
+- `invite_for_device` controls the signed target kind. A person's first GUI device
+  may enroll from any own device; further GUI devices require a GUI issuer. The
+  GUI mark indicates device kind, not guaranteed human authorship. `invite(true, true)` issues a never-expiring enrollment/recovery code;
   invite grants always expire. The CLI exposes the default seven-day grants.
 - `send`/`reply` enforce summaries, encrypt attachments and populate blob routing
   references. `read` returns `ThreadView` with decrypted paths; `inbox`, `wait`,
@@ -62,20 +63,20 @@ not already protected by their own local rotation, removing revoked people from
 group rosters. This protects private groups the removal issuer cannot discover.
 Different clients may conservatively rotate more than once; published epochs are
 monotone, and accepted key accounts are immutable. Proposed keys enter those
-accounts only after a successful PUT; server self-wraps recover committed keys
-after an interrupted response. Device ownership comes from the verified certificate
-map, including revoked certificates, never unsigned device-list projections.
-Locally signed revocations are verified, pinned and queued atomically before POST;
-open retries publication idempotently. Open also resumes affected channel rotations,
-processing later channels even if an earlier metadata update fails. A committed
-key PUT immediately marks that channel protected, with a durable metadata repair
-journal recording the intended epoch until its separate PATCH completes. This
-also retries a rotation PUT that failed before commit. Concurrent stale updates conflict.
+accounts only after a successful atomic PATCH; server self-wraps recover a
+committed key after a lost response. Device ownership comes from verified
+certificates, including revoked devices. Locally signed revocations are pinned
+and queued atomically before POST; open retries publication and all accessible
+unprotected channels. Every rotation uses the same PATCH path for roster, metadata,
+new epoch/commitment and complete remaining-device wraps. There is no rotation
+repair journal; stale concurrent proposals conflict. PUT only adds enrollment
+self-wraps for accepted epochs.
 
 Group shrink publishes its new signed roster, encrypted metadata, and complete
 remaining-device epoch wraps atomically in one PATCH. The server rejects shrink
 without rotation, including replacing one person with another at equal roster
-size. Reaction pages and wait events expose channel-wide claim/unclaim state;
+size. Reaction pages expose channel-wide claim/unclaim state; wait caches reactions
+without returning, and includes them in the next message event;
 fetch remains the specification's counts-only operation. Self-channel sends leave
 the shared person cursor unread until another session explicitly reads the thread.
 
@@ -84,7 +85,9 @@ sequences. `DecodedMessage.number` survives tail/summary trimming; `reference()`
 returns the full thread/number plus immutable message ID. `MessageRef` parses raw
 IDs and `<thread>#<positive number>`; `resolve_message` selects that exact message,
 while `resolve_thread` normalizes it (or a raw reply ID) to the root. Resolution
-uses current verified thread history without advancing its read cursor. Signed
+uses cached verified positions first and fetches history only when a position is
+missing, without advancing read state. Send receipts always include the thread ID
+and survive failed optional reference formatting. Signed
 sequence/coverage data remain signed independently of these display positions.
 
 `MessagePerspective` distinguishes the exact device+handle (`You`), another
@@ -93,24 +96,35 @@ views omit the foreign-content wrapper only for verified own-person content;
 verification failures remain visible. Summary headings use the summary message's
 thread number and the number of uncovered messages shown below.
 
-`wait` still verifies/caches events but omits messages and reactions from its own
-exact device+handle, advancing past them and continuing to the original deadline.
-Other handles/devices remain visible. Settings/revocations lack handles and are
-retained. `format_wait_entry` prints typed message/reply/reaction lines with full
-thread/message references, raw IDs and a read pointer. `wait_text` resolves and
-renders the batch before committing its cursor. Transport/storage failures can be
-retried; unavailable or corrupt reference history is recorded and rendered with a
-raw ID/read pointer so it cannot wedge otherwise valid events.
-Neither operation marks a thread read.
+`wait` omits exact device+handle own messages and all reaction-only activity,
+continuing to the original deadline. Settings/revocations and rejected-event
+outcomes remain visible. Message events and inbox entries carry the root's `to:`
+address, tag matching person/handles `(you)`, prioritize matching mentions, and
+include current thread reaction context. Neither listing nor waiting marks read;
+read state stays per person. Missing/corrupt reference history falls back to a raw
+ID/read pointer. `ReactionSummary` shares counts and every claimant with frontends;
+thread views provide thread numbers and summary positions.
+
+Open builds one verified snapshot (one directory fetch). Resolution reuses it;
+the first operation consumes it, and later operations refresh. Mutations refresh
+when their resulting directory/channel state is needed. Local `search` verifies
+and decrypts cached signed rows directly; server-expired history stays searchable
+until local pruning. Search does not download bodies or attachments.
 MIME guessing recognizes source/config extensions and falls back to plain text
 for unrecognized UTF-8 text without binary controls.
 
-Protocol major 2 signs a domain-separated key commitment in every channel roster.
+Protocol major 0 signs a domain-separated key commitment in every channel roster.
 Refresh and join stage unwrapped keys, require their epoch/hash in the accepted
 membership history, and validate encrypted metadata/peer context before writing
 immutable key accounts. Roster pins and epoch commitments commit in one SQLite
 transaction; keys follow only after that acceptance. SQLite and an OS keychain
 cannot share a transaction, so self-wrap recovery completes interrupted writes
 without putting channel secrets in the plaintext trust-state journal.
-Major-1 peers/stores are incompatible; recreate development spaces with all
+Earlier prototype peers/stores are incompatible; recreate development spaces with all
 components upgraded. There is no legacy unsigned acceptance path.
+
+The workspace remains `0.1.0`; `PROTOCOL_MAJOR` is derived from its crate major,
+so this prototype sends 0. Cryptographic preimage domain suffixes (`v1`/`v2`) and
+the `/v1` HTTP namespace are fixed format labels, independent of package version.
+Server-advertised attachment/quota limits replace client hard-coded policy;
+multiline summaries remain multiline except in compact previews.

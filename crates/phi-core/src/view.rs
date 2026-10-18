@@ -45,6 +45,7 @@ pub struct ThreadView {
 pub struct InboxEntry {
     pub id: MessageId,
     pub channel: String,
+    pub to: String,
     pub title: String,
     pub from: String,
     pub created_at: u64,
@@ -58,7 +59,6 @@ pub struct InboxEntry {
 #[derive(Clone, Debug)]
 pub enum WaitEntry {
     Message(InboxEntry),
-    Reaction(Reaction),
     Settings(SettingsChange),
     Revocation(Revocation),
     VerificationFailure { seq: Seq, description: String },
@@ -158,33 +158,57 @@ pub(crate) fn summary_input(history: &[DecodedMessage]) -> String {
     }
     input
 }
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub struct ReactionSummary {
+    pub up: usize,
+    pub down: usize,
+    pub ack: usize,
+    pub claims: Vec<ClaimSummary>,
+}
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct ClaimSummary {
+    pub message: MessageId,
+    pub person: PersonId,
+    pub author: String,
+    pub handle: Handle,
+}
+pub fn reaction_summary(
+    reactions: &[Reaction],
+    names: &BTreeMap<PersonId, String>,
+) -> ReactionSummary {
+    let mut summary = ReactionSummary::default();
+    for reaction in reactions.iter().filter(|r| !r.data.remove) {
+        match reaction.data.kind {
+            ReactionKind::Up => summary.up += 1,
+            ReactionKind::Down => summary.down += 1,
+            ReactionKind::Ack => summary.ack += 1,
+            ReactionKind::Claim => summary.claims.push(ClaimSummary {
+                message: reaction.data.message_id,
+                person: reaction.data.person_id,
+                author: names
+                    .get(&reaction.data.person_id)
+                    .cloned()
+                    .unwrap_or_else(|| reaction.data.person_id.to_string()),
+                handle: reaction.data.handle.clone(),
+            }),
+        }
+    }
+    summary
+}
 pub fn format_reactions(reactions: &[Reaction], names: &BTreeMap<PersonId, String>) -> String {
+    let summary = reaction_summary(reactions, names);
     let mut output = Vec::new();
-    for (kind, label) in [
-        (ReactionKind::Up, "up"),
-        (ReactionKind::Down, "down"),
-        (ReactionKind::Ack, "ack"),
+    for (count, label) in [
+        (summary.up, "up"),
+        (summary.down, "down"),
+        (summary.ack, "ack"),
     ] {
-        let count = reactions
-            .iter()
-            .filter(|r| !r.data.remove && r.data.kind == kind)
-            .count();
         if count > 0 {
             output.push(format!("{label}×{count}"));
         }
     }
-    for reaction in reactions
-        .iter()
-        .filter(|r| !r.data.remove && r.data.kind == ReactionKind::Claim)
-    {
-        output.push(format!(
-            "claimed by {}/{}",
-            names
-                .get(&reaction.data.person_id)
-                .cloned()
-                .unwrap_or_else(|| reaction.data.person_id.to_string()),
-            reaction.data.handle
-        ));
+    for claim in summary.claims {
+        output.push(format!("claimed by {}/{}", claim.author, claim.handle));
     }
     output.join(", ")
 }
@@ -254,9 +278,14 @@ pub fn format_message(message: &DecodedMessage, names: &BTreeMap<PersonId, Strin
         MessagePerspective::Other => kind.into(),
     };
     let reactions = format_reactions(&message.reactions, names);
+    let position = if message.number == 0 {
+        "?".into()
+    } else {
+        message.number.to_string()
+    };
     let mut output = format!(
         "\n── #{} · message {reference} · id {} · {author}/{} ({perspective}) · {} · reactions: {}\n",
-        message.number,
+        position,
         m.id,
         m.envelope.handle,
         timestamp(m.created_at),
@@ -287,8 +316,9 @@ pub fn format_message(message: &DecodedMessage, names: &BTreeMap<PersonId, Strin
 impl InboxEntry {
     pub fn text(&self, names: &BTreeMap<PersonId, String>) -> String {
         let mut output = format!(
-            "{} · {} · {} · {} · {}{}\n",
+            "{} · to: {} · {} · {} · {} · {}{}\n",
             self.id,
+            self.to,
             self.channel,
             self.title,
             self.from,
@@ -302,7 +332,13 @@ impl InboxEntry {
         if let Some(summary) = &self.summary {
             output.push_str(&format!(
                 "  untrusted summary: {}\n",
-                summary.chars().take(320).collect::<String>()
+                summary
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .chars()
+                    .take(320)
+                    .collect::<String>()
             ));
         }
         let reactions = format_reactions(&self.reactions, names);

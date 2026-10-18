@@ -15,23 +15,8 @@
   background: var(--bg);
   color: var(--text);
 }
-:root[data-theme='dark'] {
-  color-scheme: dark;
-  --bg: #171c1a;
-  --surface: #1e2421;
-  --text: #e3e9e3;
-  --muted: #a0aaa3;
-  --line: #343e37;
-  --accent: #9ac6ac;
-  --soft: #29382e;
-  --human: #302e27;
-  --danger: #f19b9b;
-}
-:root[data-theme='light'] {
-  color-scheme: light;
-}
 @media (prefers-color-scheme: dark) {
-  :root:not([data-theme='light']) {
+  :root {
     --bg: #171c1a;
     --surface: #1e2421;
     --text: #e3e9e3;

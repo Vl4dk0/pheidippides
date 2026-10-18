@@ -12,6 +12,7 @@ use phi_server::{
     Server,
     config::{Config, Creation},
 };
+use rusqlite::OptionalExtension;
 use std::{
     path::PathBuf,
     sync::{Arc, Mutex},
@@ -27,28 +28,29 @@ struct Faults {
     unsigned_retention: Option<u32>,
     backdate_messages: bool,
     fail_metadata: Option<ChannelId>,
-    fail_rotation: Option<ChannelId>,
     fail_revocations: bool,
     fail_message: Option<MessageId>,
     lose_revocation_response: bool,
+    directory_reads: usize,
 }
 async fn hostile_host(
     State(faults): State<Arc<Mutex<Faults>>>,
     request: Request,
     next: Next,
 ) -> Response {
-    let Ok(faults) = faults.lock().map(|f| f.clone()) else {
+    let path = request.uri().path().to_owned();
+    let Ok(faults) = faults.lock().map(|mut f| {
+        if path.ends_with("/devices") {
+            f.directory_reads += 1;
+        }
+        f.clone()
+    }) else {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
-    let path = request.uri().path().to_owned();
     if (faults
         .fail_metadata
         .is_some_and(|id| path == format!("/v1/channels/{id}"))
         && request.method() == Method::PATCH)
-        || (faults
-            .fail_rotation
-            .is_some_and(|id| path == format!("/v1/channels/{id}/keys"))
-            && request.method() == Method::PUT)
         || (faults.fail_revocations
             && path.ends_with("/revocations")
             && request.method() == Method::POST)
@@ -305,6 +307,20 @@ async fn create_invite_join_attachment_fetch_read_reply() -> Result<()> {
             .await
             .is_err()
     );
+    let mut reads_before = 0;
+    f.faults(|faults| reads_before = faults.directory_reads)?;
+    let mut fresh = Client::open(f.store("alice"), alice.profile.clone(), None).await?;
+    let resolved = fresh
+        .resolve_thread(format!("{}#1", root.id).parse()?)
+        .await?;
+    fresh.read(resolved, ReadOptions::default()).await?;
+    f.faults(|faults| {
+        assert_eq!(
+            faults.directory_reads,
+            reads_before + 1,
+            "opening/resolution/read share one verified snapshot"
+        )
+    })?;
     for suffix in ["0", "-1", "abc", "1#2"] {
         ensure!(
             format!("{}#{suffix}", root.id)
@@ -325,7 +341,7 @@ async fn claim_exclusivity_reactions_unread_and_person_cursor() -> Result<()> {
     bob.react(root.id, ReactionKind::Claim, false).await?;
     ensure!(bob.fetch().await?.contains("1 claimed by you"));
     let events = carol.wait(0).await?;
-    ensure!(events.iter().any(|e|matches!(e,WaitEntry::Reaction(r) if r.data.message_id==root.id && r.data.kind==ReactionKind::Claim)));
+    ensure!(events.is_empty());
     let view = carol.read(root.id, ReadOptions::default()).await?;
     ensure!(view.text().contains("claimed by bob/cli"));
     ensure!(
@@ -338,9 +354,7 @@ async fn claim_exclusivity_reactions_unread_and_person_cursor() -> Result<()> {
     let view = alice.read(root.id, ReadOptions::default()).await?;
     ensure!(view.text().contains("claimed by bob/cli") && view.text().contains("ack×1"));
     bob.react(root.id, ReactionKind::Claim, true).await?;
-    ensure!(carol.wait(0).await?.iter().any(
-        |e| matches!(e,WaitEntry::Reaction(r) if r.data.kind==ReactionKind::Claim && r.data.remove)
-    ));
+    ensure!(carol.wait(0).await?.is_empty());
     ensure!(
         !carol
             .read(root.id, ReadOptions::default())
@@ -384,7 +398,7 @@ async fn wait_backlog_wakes_on_reply_and_keeps_per_handle_cursor() -> Result<()>
         output.push_str(&alice.format_wait_entry(event).await?);
     }
     ensure!(
-        output.contains("reaction: claim by bob/cli")
+        output.contains("claimed by bob/cli")
             && output.contains("reply in thread")
             && output.contains(&format!("{}#2", root.id))
             && output.contains(&own.id.to_string())
@@ -423,8 +437,47 @@ async fn wait_backlog_wakes_on_reply_and_keeps_per_handle_cursor() -> Result<()>
     ensure!(bob.wait(1).await?.is_empty());
     ensure!(started.elapsed() >= Duration::from_millis(900));
     let ack = alice.wait_text(0).await?;
-    ensure!(ack.contains("reaction: ack by bob/cli") && ack.contains(&format!("{}#3", root.id)));
+    ensure!(ack.is_empty());
+    bob.reply(root.id, options("next message carries reaction context"))
+        .await?;
+    let next = alice.wait_text(0).await?;
+    ensure!(next.contains("ack×1") && next.contains("to: @bob"));
     ensure!(alice.wait_text(0).await?.is_empty());
+    let mut reviewer = Client::open(f.store("bob"), bob.profile.clone(), Some("reviewer")).await?;
+    reviewer.wait(0).await?;
+    alice
+        .send("@bob/other", "Other handle", options("not for reviewer"))
+        .await?;
+    let targeted = bob
+        .send(
+            "@bob/reviewer",
+            "For reviewer",
+            options("own other session"),
+        )
+        .await?;
+    alice
+        .send("#all", "General", options("for everyone"))
+        .await?;
+    let entries = reviewer.wait(0).await?;
+    ensure!(
+        matches!(&entries[0], WaitEntry::Message(entry) if entry.id == targeted.id && entry.to == "@bob/reviewer (you)")
+    );
+    ensure!(
+        entries
+            .iter()
+            .any(|e| matches!(e, WaitEntry::Message(entry) if entry.to == "@bob/other"))
+    );
+    let inbox = reviewer.inbox().await?;
+    ensure!(inbox[0].id == targeted.id && inbox[0].to == "@bob/reviewer (you)");
+    bob.react(targeted.id, ReactionKind::Ack, false).await?;
+    let start = std::time::Instant::now();
+    ensure!(reviewer.wait(1).await?.is_empty());
+    ensure!(start.elapsed() >= Duration::from_millis(900));
+    bob.reply(targeted.id, options("carries context")).await?;
+    let entries = reviewer.wait(0).await?;
+    ensure!(
+        matches!(&entries[0], WaitEntry::Message(entry) if entry.reactions.iter().any(|r| r.data.kind == ReactionKind::Ack))
+    );
     Ok(())
 }
 #[tokio::test]
@@ -473,6 +526,26 @@ async fn summaries_required_off_explicit_and_local_summarizer() -> Result<()> {
             .send("#all", "Failure", SendOptions::default())
             .await
             .is_err()
+    );
+    alice.profile.summarizer = None;
+    alice.profile.summarizer = Some("printf 'first line\nsecond line\n'".into());
+    let multiline = alice
+        .send(
+            "#all",
+            "Multiline",
+            SendOptions {
+                body: "body".into(),
+                ..Default::default()
+            },
+        )
+        .await?;
+    ensure!(
+        alice
+            .read(multiline.id, ReadOptions::default())
+            .await?
+            .summary
+            .as_deref()
+            == Some("first line\nsecond line")
     );
     alice.profile.summarizer = None;
     alice.set_settings("summary_mode", "off").await?;
@@ -621,21 +694,22 @@ async fn enrollment_history_revoke_device_rotates_and_invalidates_token() -> Res
     );
     // Every channel was processed even though the all-channel metadata PATCH failed.
     alice.refresh().await?;
-    ensure!(alice.channels.iter().all(|c| c.channel.current_epoch == 1));
-    let protected: String = cache.query_row(
-        "SELECT value FROM state WHERE name=?",
-        [format!("protected/{all}")],
-        |r| r.get(0),
-    )?;
-    ensure!(protected != "[]");
+    ensure!(alice.channels.iter().all(|c| if c.channel.id == all {
+        c.channel.current_epoch == 0
+    } else {
+        c.channel.current_epoch == 1
+    }));
+    let protected: Option<String> = cache
+        .query_row(
+            "SELECT value FROM state WHERE name=?",
+            [format!("protected/{all}")],
+            |r| r.get(0),
+        )
+        .optional()?;
+    ensure!(protected.is_none());
     f.faults(|faults| faults.fail_metadata = None)?;
     alice = Client::open(f.store("alice"), alice.profile.clone(), None).await?;
-    ensure!(
-        alice
-            .channels
-            .iter()
-            .all(|c| c.channel.meta_epoch == 1 && c.channel.current_epoch == 1)
-    );
+    ensure!(alice.channels.iter().all(|c| c.channel.current_epoch == 1));
     ensure!(matches!(laptop.counts().await, Err(Error::Auth)));
     let new = alice.send("#all", "New key", options("private")).await?;
     ensure!(new.envelope.epoch == 1);
@@ -671,6 +745,7 @@ async fn removal_rotates_all_dm_and_group_and_isolates_removed_person() -> Resul
         .await?;
     ensure!(root.envelope.epoch == 1);
     alice.read(root.id, ReadOptions::default()).await?;
+    remaining_members_rekey_private_channels_unknown_to_removal_issuer().await?;
     Ok(())
 }
 #[tokio::test]
@@ -685,16 +760,25 @@ async fn groups_add_remove_rotate_and_enroll_after_rotation() -> Result<()> {
             options("private old history"),
         )
         .await?;
-    f.faults(|faults| faults.fail_rotation = Some(group))?;
+    f.faults(|faults| faults.fail_metadata = Some(group))?;
     ensure!(alice.group_member("backend", "@bob", false).await.is_err());
-    f.faults(|faults| faults.fail_rotation = None)?;
+    f.faults(|faults| faults.fail_metadata = None)?;
     alice = Client::open(f.store("alice"), alice.profile.clone(), None).await?;
     ensure!(
         alice
             .channels
             .iter()
             .find(|c| c.channel.id == group)
-            .is_some_and(|c| c.channel.current_epoch == 1 && c.channel.meta_epoch == 1)
+            .is_some_and(|c| c.channel.current_epoch == 0
+                && !c.channel.members.contains(&bob.profile.person_id))
+    );
+    alice.group_member("backend", "@bob", false).await?;
+    ensure!(
+        alice
+            .channels
+            .iter()
+            .find(|c| c.channel.id == group)
+            .is_some_and(|c| c.channel.current_epoch == 1)
     );
     let root = alice.send("#backend", "Group", options("shared")).await?;
     ensure!(
@@ -883,6 +967,8 @@ async fn local_cache_search_and_retention_prune_on_startup() -> Result<()> {
     ensure!(reopened.search("searchable").await?.is_empty());
     reopened.read(root.id, ReadOptions::default()).await?;
     ensure!(reopened.search("searchable").await?.len() == 1);
+    f.server.sweep(u64::MAX / 2).await?;
+    ensure!(reopened.search("searchable").await?.len() == 1);
     Ok(())
 }
 #[tokio::test]
@@ -891,6 +977,7 @@ async fn http_errors_admin_token_rate_limit_protocol_and_auth() -> Result<()> {
         c.allow_space_creation = Creation::Token;
         c.admin_token = Some("admin-secret".into());
         c.limits.messages_per_min = 1;
+        c.limits.max_blob_bytes = 32;
     })
     .await?;
     ensure!(
@@ -906,7 +993,16 @@ async fn http_errors_admin_token_rate_limit_protocol_and_auth() -> Result<()> {
         Some("admin-secret".into()),
     )
     .await?;
-    alice.send("#all", "First", options("one")).await?;
+    ensure!(alice.limits.max_attachment_bytes == 32);
+    let file = f.dir.path().join("limit.txt");
+    std::fs::write(&file, [b'x'; 33])?;
+    let mut too_large = options("over advertised limit");
+    too_large.files.push(file.clone());
+    ensure!(alice.send("#all", "Too large", too_large).await.is_err());
+    std::fs::write(&file, [b'x'; 32])?;
+    let mut allowed = options("one");
+    allowed.files.push(file);
+    alice.send("#all", "First", allowed).await?;
     let error = alice
         .send("#all", "Second", options("two"))
         .await
@@ -1150,15 +1246,7 @@ async fn tampered_message_attachment_and_sequence_are_rejected() -> Result<()> {
         rusqlite::params![serde_json::to_string(&tampered)?, root.id.to_string()],
     )?;
     ensure!(alice.read(root.id, ReadOptions::default()).await.is_err());
-    // Transport failures preserve the batch; unavailable authenticated history
-    // produces an ID/read pointer instead of wedging otherwise valid events.
-    f.faults(|faults| faults.fail_message = Some(root.id))?;
-    ensure!(bob.wait_text(0).await.is_err());
-    f.faults(|faults| faults.fail_message = None)?;
-    let output = bob.wait_text(0).await?;
-    ensure!(
-        output.contains("reaction: ack by alice/cli") && output.contains("reference unavailable")
-    );
+    ensure!(bob.wait_text(0).await?.is_empty());
     connection.execute(
         "UPDATE messages SET json=? WHERE id=?",
         rusqlite::params![original, root.id.to_string()],
@@ -1246,15 +1334,25 @@ fn gui_device(keys: MemoryKeys) -> DeviceOptions {
 async fn gui_keystore_boundary_and_authenticated_device_kind() -> Result<()> {
     let f = Fixture::new().await?;
     let keys = MemoryKeys::default();
-    let mut gui = Client::create_for_device(
-        f.store("gui"),
-        &f.url,
-        "gui-space",
-        "alice",
-        None,
-        gui_device(keys.clone()),
-    )
-    .await?;
+    let mut origin = Client::create(f.store("origin"), &f.url, "gui-space", "alice", None).await?;
+    let first = origin
+        .invite_for_device(true, false, DeviceKind::Gui)
+        .await?;
+    let competing = origin
+        .invite_for_device(true, false, DeviceKind::Gui)
+        .await?;
+    let mut gui =
+        Client::join_for_device(f.store("gui"), &first, "alice", gui_device(keys.clone())).await?;
+    ensure!(
+        Client::join_for_device(
+            f.store("competing-gui"),
+            &competing,
+            "alice",
+            gui_device(MemoryKeys::default())
+        )
+        .await
+        .is_err()
+    );
     ensure!(
         !f.store("gui")
             .profile_dir(&gui.profile)
@@ -1330,7 +1428,6 @@ async fn gui_keystore_boundary_and_authenticated_device_kind() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
 async fn remaining_members_rekey_private_channels_unknown_to_removal_issuer() -> Result<()> {
     let f = Fixture::new().await?;
     let (mut alice, mut bob) = f.pair().await?;

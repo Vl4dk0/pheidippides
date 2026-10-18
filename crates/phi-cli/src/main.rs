@@ -1,6 +1,6 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use phi_core::*;
-use phi_proto::{DeviceId, ReactionKind, RevocationTarget};
+use phi_proto::{DeviceId, DeviceKind, ReactionKind, RevocationTarget};
 use std::{
     io::{self, Read},
     path::PathBuf,
@@ -136,7 +136,10 @@ enum SpaceCommand {
 }
 #[derive(Subcommand)]
 enum DeviceCommand {
-    Add,
+    Add {
+        #[arg(long)]
+        gui: bool,
+    },
     List,
     Revoke {
         #[arg(allow_hyphen_values = true)]
@@ -259,8 +262,22 @@ async fn run(cli: Cli) -> Result<()> {
                     println!("{}", client.invite(false, false).await?.as_str());
                 }
                 Command::Device { command } => match command {
-                    DeviceCommand::Add => {
-                        println!("{}", client.invite(true, false).await?.as_str())
+                    DeviceCommand::Add { gui } => {
+                        println!(
+                            "{}",
+                            client
+                                .invite_for_device(
+                                    true,
+                                    false,
+                                    if gui {
+                                        DeviceKind::Gui
+                                    } else {
+                                        DeviceKind::Cli
+                                    }
+                                )
+                                .await?
+                                .as_str()
+                        )
                     }
                     DeviceCommand::List => {
                         for device in &client.devices {
@@ -303,20 +320,18 @@ async fn run(cli: Cli) -> Result<()> {
                 }
                 Command::Send { to, title, message } => {
                     let message = client.send(&to, &title, message.options()?).await?;
-                    let reference = client.message_reference(message.id).await?;
-                    println!(
-                        "thread {} · message {reference} · id {}",
-                        reference.thread, reference.id
-                    );
+                    if let Err(error) = client.message_reference(message.id).await {
+                        eprintln!("message committed; numbered reference unavailable: {error}");
+                    }
+                    print!("{}", client.sent_text(&message));
                 }
                 Command::Reply { thread, message } => {
                     let thread = client.resolve_thread(thread).await?;
                     let message = client.reply(thread, message.options()?).await?;
-                    let reference = client.message_reference(message.id).await?;
-                    println!(
-                        "thread {} · message {reference} · id {}",
-                        reference.thread, reference.id
-                    );
+                    if let Err(error) = client.message_reference(message.id).await {
+                        eprintln!("message committed; numbered reference unavailable: {error}");
+                    }
+                    print!("{}", client.sent_text(&message));
                 }
                 Command::React { message, kind } => {
                     let message = client.resolve_message(message).await?;

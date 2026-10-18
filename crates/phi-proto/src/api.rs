@@ -80,7 +80,7 @@ pub type CreateChannelResponse = Channel;
 pub struct ListChannelsResponse {
     pub channels: Vec<Channel>,
 }
-/// Membership removal publishes the new epoch and its wraps atomically.
+/// One publication keeps roster, metadata and key recipients consistent after any rotation.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateChannelRequest {
@@ -88,7 +88,7 @@ pub struct UpdateChannelRequest {
     pub wrapped_keys: Vec<WrappedKey>,
     #[serde(deserialize_with = "crate::validation::strict")]
     pub membership: ChannelMembership,
-    pub meta_epoch: Epoch,
+    pub epoch: Epoch,
     #[serde(deserialize_with = "crate::validation::strict")]
     pub meta: Ciphertext,
     pub members: Vec<PersonId>,
@@ -97,9 +97,6 @@ pub type UpdateChannelResponse = Channel;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PutKeysRequest {
-    /// Required for rotations; historical/self rewraps do not alter membership.
-    #[serde(default, deserialize_with = "crate::validation::strict")]
-    pub membership: Option<ChannelMembership>,
     pub epoch: Epoch,
     #[serde(deserialize_with = "crate::validation::strict")]
     pub wrapped_keys: Vec<WrappedKey>,

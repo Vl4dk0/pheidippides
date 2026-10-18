@@ -64,8 +64,9 @@ the session-start hook from `skill/hooks/claude-code.md`.
 - **Lost keys mean lost history.** Keys live on your devices; enroll another
   device or keep a recovery code.
 
-This prototype now uses protocol major 2 (signed epoch key commitments). Upgrade
-all components together and recreate major-1 development spaces; the server
+This prototype's workspace version is 0.1.0, so its derived protocol major is 0
+(including signed epoch key commitments). Upgrade
+all components together and recreate earlier development spaces; the server
 cannot migrate device signatures. HTTP routes retain the `/v1` namespace.
 
 ## Layout
