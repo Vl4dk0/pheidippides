@@ -1404,39 +1404,61 @@ impl Client {
         members: Vec<PersonId>,
     ) -> Result<Channel> {
         meta.members = members.clone();
+        let shrinking = channel
+            .members
+            .iter()
+            .any(|person| !members.contains(person));
+        let key = if shrinking {
+            self.key(channel.id, channel.current_epoch)?
+                .rotate(&mut entropy)?
+        } else {
+            self.key(channel.id, channel.current_epoch)?
+        };
         let membership = sign_membership(
             ChannelMembershipData {
                 previous: Some(channel.membership.signature.clone()),
                 space_id: self.profile.space_id,
                 channel_id: channel.id,
-                epoch: channel.current_epoch,
+                epoch: key.epoch(),
                 kind: channel.kind,
                 members: members.clone(),
                 issuer_device: self.profile.device_id,
             },
             &self.identity.keys(),
         )?;
-        self.directory
+        let verified = self
+            .directory
             .verify_membership(&membership, Some(&channel.membership))?;
-        let meta = encrypt_channel_metadata(
-            &self.key(channel.id, channel.current_epoch)?,
-            &serde_json::to_vec(&meta)?,
-            &mut entropy,
-        )?;
+        let mut wrapped_keys = Vec::new();
+        if shrinking {
+            for device in self.directory.active_devices() {
+                if members.contains(&device.certificate().data.person_id) {
+                    wrapped_keys.push(wrap_channel_key(&key, &device, &verified, &mut entropy)?);
+                }
+            }
+        }
+        let meta = encrypt_channel_metadata(&key, &serde_json::to_vec(&meta)?, &mut entropy)?;
         let response: UpdateChannelResponse = self
             .http
             .send(
                 Method::PATCH,
                 &format!("/channels/{}", channel.id),
                 &UpdateChannelRequest {
-                    membership,
-                    meta_epoch: channel.current_epoch,
+                    wrapped_keys,
+                    membership: membership.clone(),
+                    meta_epoch: key.epoch(),
                     meta,
                     members,
                 },
             )
             .await?;
+        if response.id != channel.id || response.membership != membership {
+            return Err(user("server changed membership publication"));
+        }
         self.cache.channel(&self.directory, &response)?;
+        if shrinking {
+            save_channel_key(self.keys.as_ref(), &key)?;
+        }
         Ok(response)
     }
     pub async fn group_member(&mut self, name: &str, person: &str, remove: bool) -> Result<()> {
@@ -1465,7 +1487,9 @@ impl Client {
         let channel = self
             .update_channel(&channel.channel, channel.meta, members)
             .await?;
-        self.rotate(&channel).await?;
+        if !remove {
+            self.rotate(&channel).await?;
+        }
         self.refresh().await
     }
     async fn ensure_safe_epoch(&mut self, channel_id: ChannelId) -> Result<()> {
@@ -1505,6 +1529,7 @@ impl Client {
                 _ => None,
             })
             .collect();
+        let original_epoch = named.channel.current_epoch;
         let channel = if named.channel.kind == ChannelKind::Group
             && named.channel.members.iter().any(|p| removed.contains(p))
         {
@@ -1522,7 +1547,9 @@ impl Client {
         };
         // An issuer may not know another person's private groups. Their remaining members
         // must rekey before sending, even if another client may already have rotated once.
-        self.rotate(&channel).await?;
+        if channel.current_epoch == original_epoch {
+            self.rotate(&channel).await?;
+        }
         self.refresh().await
     }
     async fn rotate(&mut self, channel: &Channel) -> Result<()> {
@@ -1632,6 +1659,7 @@ impl Client {
             .map(|c| c.channel.clone())
             .collect();
         for channel in channels {
+            let original_epoch = channel.current_epoch;
             let channel = if matches!(target, RevocationTarget::Person { .. })
                 && channel.kind == ChannelKind::Group
             {
@@ -1645,7 +1673,9 @@ impl Client {
             } else {
                 channel
             };
-            self.rotate(&channel).await?;
+            if channel.current_epoch == original_epoch {
+                self.rotate(&channel).await?;
+            }
         }
         self.refresh().await
     }

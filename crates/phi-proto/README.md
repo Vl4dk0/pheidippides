@@ -92,3 +92,11 @@ read cursors for their threads (scoped to the authenticated person). GET
 Channel PATCH supports metadata-only updates on all/self/DM channels while their
 member sets stay fixed; this keeps encrypted #all person-name metadata durable.
 Group membership updates retain the existing semantics.
+
+Group membership removal uses one `UpdateChannelRequest` carrying the next signed
+membership epoch, metadata encrypted with its new key, and `wrapped_keys` for every
+remaining active device. The default empty wraps remain valid for metadata-only
+or additive membership updates at the current epoch. Stale predecessors conflict.
+Reaction events are visible to every current member of the message's channel;
+message pages continue to include signed current reaction state. Fetch stays
+counts-only, including claims by the requesting person.

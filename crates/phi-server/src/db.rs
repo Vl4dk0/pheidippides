@@ -62,6 +62,13 @@ impl Store {
         let conn = Connection::open(config.data_dir.join("phi.db"))?;
         conn.busy_timeout(std::time::Duration::from_secs(30))?;
         conn.execute_batch(include_str!("schema.sql"))?;
+        if conn.query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))? < 1 {
+            conn.execute_batch("BEGIN IMMEDIATE;
+                INSERT OR IGNORE INTO message_mentions
+                SELECT m.id,json_extract(j.value,'$.person_id'),COALESCE(json_extract(j.value,'$.handle'),'')
+                FROM messages m,json_each(m.json,'$.envelope.mentions') j;
+                PRAGMA user_version=1; COMMIT;")?;
+        }
         Ok(Self(Arc::new(Mutex::new(Db { conn, config }))))
     }
     pub async fn call<T: Send + 'static>(
@@ -100,15 +107,15 @@ impl Db {
                 [token_hash(token.ok_or_else(ApiError::unauthorized)?)],
             )?
             .ok_or_else(ApiError::unauthorized)?;
-        let mut device = device;
-        if device.last_seen_at != Some(now()) {
-            device.last_seen_at = Some(now());
-            self.conn.execute(
-                "UPDATE devices SET json=? WHERE id=?",
-                params![json(&device)?, device.cert.data.device_id.to_string()],
-            )?;
-        }
         Ok(Auth { cert: device.cert })
+    }
+    pub fn touch(&self, a: &Auth) -> Result<()> {
+        self.conn.execute(
+            "UPDATE devices SET json=json_set(json,'$.last_seen_at',?) WHERE id=?
+            AND COALESCE(json_extract(json,'$.last_seen_at'),0)<?",
+            params![now(), a.device().to_string(), now().saturating_sub(60)],
+        )?;
+        Ok(())
     }
     pub fn space(&self, sid: SpaceId) -> Result<Space> {
         self.one("SELECT json FROM spaces WHERE id=?", [sid.to_string()])
@@ -259,7 +266,7 @@ impl Db {
         }
         Ok(())
     }
-    pub fn sweep(&mut self, at: u64) -> Result<u64> {
+    pub fn sweep(&mut self, at: u64) -> Result<(u64, Vec<String>)> {
         let spaces: Vec<Space> = self.list("SELECT json FROM spaces", [])?;
         let mut deleted = 0;
         for space in spaces {
@@ -295,14 +302,6 @@ impl Db {
             q.query_map([], |r| r.get(0))?
                 .collect::<std::result::Result<_, _>>()?
         };
-        for id in garbage {
-            match std::fs::remove_file(self.config.data_dir.join("blobs").join(&id)) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e.into()),
-            }
-            self.conn.execute("DELETE FROM blob_gc WHERE id=?", [id])?;
-        }
-        Ok(deleted)
+        Ok((deleted, garbage))
     }
 }

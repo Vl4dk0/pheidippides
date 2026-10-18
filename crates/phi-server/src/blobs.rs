@@ -6,83 +6,102 @@ use phi_proto::*;
 use rusqlite::params;
 use std::io::Write;
 
-impl Db {
-    pub fn upload(&mut self, a: &Auth, r: UploadBlobRequest) -> Result<Blob> {
-        a.space(r.space_id)?;
-        r.validate_with_limit(self.config.limits.max_blob_bytes)
+pub(crate) struct StagedBlob {
+    pub blob: Blob,
+    path: std::path::PathBuf,
+    keep: bool,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+impl StagedBlob {
+    pub fn write(
+        config: &crate::config::Config,
+        r: UploadBlobRequest,
+        permit: tokio::sync::OwnedSemaphorePermit,
+    ) -> Result<Self> {
+        r.validate_with_limit(config.limits.max_blob_bytes)
             .map_err(|e| {
                 ApiError(ErrorBody::TooLarge {
                     message: e.to_string(),
                 })
             })?;
-        let size = r.ciphertext.len() as u64;
-        let used: u64 = self.conn.query_row(
-            "SELECT COALESCE(SUM(size),0) FROM blobs WHERE space_id=?",
-            [a.sid().to_string()],
-            |r| r.get(0),
-        )?;
-        if used
-            .checked_add(size)
-            .is_none_or(|v| v > self.config.limits.space_quota_bytes)
-        {
-            return Err(ApiError(ErrorBody::TooLarge {
-                message: "space blob quota exceeded".into(),
-            }));
-        }
         let blob = Blob {
             id: BlobId::from_bytes(random()?),
-            space_id: a.sid(),
-            size,
+            space_id: r.space_id,
+            size: r.ciphertext.len() as u64,
             created_at: now(),
         };
-        let path = self.config.data_dir.join("blobs").join(blob.id.to_string());
+        let path = config.data_dir.join("blobs").join(blob.id.to_string());
         let mut file = std::fs::OpenOptions::new()
             .create_new(true)
             .write(true)
             .open(&path)?;
-        let stored = (|| -> Result<()> {
-            file.write_all(r.ciphertext.as_bytes())?;
-            file.sync_all()?;
-            self.conn.execute(
+        let staged = Self {
+            blob,
+            path,
+            keep: false,
+            _permit: permit,
+        };
+        file.write_all(r.ciphertext.as_bytes())?;
+        file.sync_all()?;
+        Ok(staged)
+    }
+    pub fn persist(&mut self) {
+        self.keep = true;
+    }
+}
+impl Drop for StagedBlob {
+    fn drop(&mut self) {
+        if !self.keep {
+            if let Err(error) = std::fs::remove_file(&self.path) {
+                tracing::error!(%error,"incomplete blob cleanup failed");
+            }
+        }
+    }
+}
+impl Db {
+    pub fn commit_blob(&mut self, a: &Auth, blob: &Blob) -> Result<()> {
+        a.space(blob.space_id)?;
+        self.transaction(|db| {
+            let used: u64 = db.conn.query_row(
+                "SELECT COALESCE(SUM(size),0) FROM blobs WHERE space_id=?",
+                [a.sid().to_string()],
+                |r| r.get(0),
+            )?;
+            if used
+                .checked_add(blob.size)
+                .is_none_or(|n| n > db.config.limits.space_quota_bytes)
+            {
+                return Err(ApiError(ErrorBody::TooLarge {
+                    message: "space blob quota exceeded".into(),
+                }));
+            }
+            db.conn.execute(
                 "INSERT INTO blobs VALUES(?,?,?,?,?,?)",
                 params![
                     blob.id.to_string(),
                     a.sid().to_string(),
                     a.device().to_string(),
-                    size,
+                    blob.size,
                     blob.created_at,
-                    json(&blob)?
+                    json(blob)?
                 ],
             )?;
             Ok(())
-        })();
-        if let Err(error) = stored {
-            if let Err(cleanup) = std::fs::remove_file(path) {
-                tracing::error!(error=%cleanup,"failed to remove incomplete blob");
-            }
-            return Err(error);
-        }
-        Ok(blob)
+        })
     }
-    pub fn download(&self, a: &Auth, id: BlobId) -> Result<DownloadBlobResponse> {
-        let blob: Blob = self.one(
-            "
-            SELECT b.json FROM blobs b WHERE b.id=? AND b.space_id=? AND
+    pub fn blob(&self, a: &Auth, id: BlobId) -> Result<Blob> {
+        self.one(
+            "SELECT b.json FROM blobs b WHERE b.id=? AND b.space_id=? AND
             (b.uploader=? OR EXISTS(SELECT 1 FROM blob_refs br JOIN threads t ON
-            t.id=br.thread_id JOIN members m ON m.channel_id=t.channel_id WHERE
-            br.blob_id=b.id AND m.person_id=?))
-        ",
+            t.id=br.thread_id JOIN members m ON m.channel_id=t.channel_id
+            WHERE br.blob_id=b.id AND m.person_id=?))",
             params![
                 id.to_string(),
                 a.sid().to_string(),
                 a.device().to_string(),
                 a.person().to_string()
             ],
-        )?;
-        let ciphertext = Base64Bytes::new(std::fs::read(
-            self.config.data_dir.join("blobs").join(id.to_string()),
-        )?);
-        Ok(DownloadBlobResponse { blob, ciphertext })
+        )
     }
     pub fn rate_limit(&self, a: &Auth) -> Result<()> {
         let limits = self.space(a.sid())?.settings.rate_limits;

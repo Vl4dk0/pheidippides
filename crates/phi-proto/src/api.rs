@@ -80,10 +80,12 @@ pub type CreateChannelResponse = Channel;
 pub struct ListChannelsResponse {
     pub channels: Vec<Channel>,
 }
-/// PATCH /v1/channels/{cid}: membership/meta change, followed by rotation on removal.
+/// Membership removal publishes the new epoch and its wraps atomically.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateChannelRequest {
+    #[serde(default, deserialize_with = "crate::validation::strict")]
+    pub wrapped_keys: Vec<WrappedKey>,
     #[serde(deserialize_with = "crate::validation::strict")]
     pub membership: ChannelMembership,
     pub meta_epoch: Epoch,

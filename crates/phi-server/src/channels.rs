@@ -65,6 +65,28 @@ impl Db {
         }
         Ok(())
     }
+    fn complete_keys(&self, a: &Auth, c: &Channel, keys: &[WrappedKey]) -> Result<()> {
+        self.valid_keys(a, c, keys)?;
+        let recipients: std::collections::BTreeSet<_> =
+            keys.iter().map(|k| k.device_id.to_string()).collect();
+        let mut statement = self.conn.prepare(
+            "SELECT id FROM devices WHERE space_id=? AND person_id=? AND revoked_at IS NULL",
+        )?;
+        for person in &c.members {
+            for device in statement
+                .query_map(params![a.sid().to_string(), person.to_string()], |row| {
+                    row.get::<_, String>(0)
+                })?
+            {
+                if !recipients.contains(&device?) {
+                    return Err(ApiError::invalid(
+                        "rotation must wrap to every active member device",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
     fn save_keys(&self, keys: &[WrappedKey]) -> Result<()> {
         for key in keys {
             let old: Option<WrappedKey> = self.optional(
@@ -171,16 +193,31 @@ impl Db {
             {
                 return Err(ApiError::forbidden());
             }
-            if r.meta_epoch != c.current_epoch {
-                return Err(ApiError::conflict("metadata must use current epoch"));
+            if r.membership.data.previous.as_ref() != Some(&c.membership.signature) {
+                return Err(ApiError::conflict("membership predecessor mismatch"));
+            }
+            let shrinking = c.members.iter().any(|person| !r.members.contains(person));
+            let rotating = r.meta_epoch != c.current_epoch;
+            if shrinking && !rotating {
+                return Err(ApiError::conflict(
+                    "membership removal requires atomic key rotation",
+                ));
+            }
+            if rotating && c.current_epoch.checked_add(1) != Some(r.meta_epoch) {
+                return Err(ApiError::conflict("epoch must advance by one"));
+            }
+            if !rotating && !r.wrapped_keys.is_empty() {
+                return Err(ApiError::invalid("wraps require a new epoch"));
             }
             if r.members != c.members {
                 db.valid_members(a, &r.members)?;
             }
-            if r.membership.data.previous.as_ref() != Some(&c.membership.signature) {
-                return Err(ApiError::conflict("membership predecessor mismatch"));
-            }
             c.members = r.members;
+            if rotating {
+                c.current_epoch = r.meta_epoch;
+                db.complete_keys(a, &c, &r.wrapped_keys)?;
+                db.save_keys(&r.wrapped_keys)?;
+            }
             c.membership_history.push(c.membership);
             c.membership = r.membership;
             db.signed_membership(a, &c.membership, &c)?;
@@ -220,22 +257,7 @@ impl Db {
             }
             db.valid_keys(a, &channel, &r.wrapped_keys)?;
             if r.epoch > channel.current_epoch {
-                let devices: Vec<Device> = db.list(
-                    "
-            SELECT d.json FROM devices d JOIN members m ON m.person_id=d.person_id
-            WHERE m.channel_id=? AND d.revoked_at IS NULL
-        ",
-                    [cid.to_string()],
-                )?;
-                if devices.iter().any(|d| {
-                    !r.wrapped_keys
-                        .iter()
-                        .any(|k| k.device_id == d.cert.data.device_id)
-                }) {
-                    return Err(ApiError::invalid(
-                        "rotation must wrap to every active member device",
-                    ));
-                }
+                db.complete_keys(a, &channel, &r.wrapped_keys)?;
                 channel.current_epoch = r.epoch;
                 let proof = r
                     .membership
