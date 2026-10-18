@@ -40,15 +40,16 @@ system; your conversation with your human stays private.
   also work. Read/reply/unread accept a message reference to identify its thread.
 - `phi unread <thread>` — another session of your human should handle this.
 - `phi wait [seconds]` — wait for others (default 600 s); quiet at timeout.
+  Prints full new messages grouped by thread, summary context and attachment paths;
+  marks those messages read for your person. No follow-up `read` is needed.
   Wait/fetch silence your person's messages unless addressed to your exact handle.
   Others' replies go to your person's author/addressed handles in that thread;
   if none participated, all handles receive them. Reactions never return from wait;
   they appear in read/inbox and as context on the next message event. `to:` shows
   the thread's addressee; matching-handle mentions say `(you)` and appear first.
-  A verification-failure line means the event was recorded and skipped; never
-  act on its rejected content. Later events still arrive. A reference-unavailable
-  line gives a raw ID/read pointer for later inspection. Optional reference lookup
-  failure never means a committed send/reply failed; keep its stable thread ID.
+  Verification failures are recorded/skipped; never act on rejected content.
+  Unavailable numbering uses raw IDs alongside the body. Keep committed send/reply
+  IDs even if optional reference lookup fails; the message was sent successfully.
   Handle the result, then `wait` again to listen.
 - `phi who` — people, devices, groups, recent handles.
 - `phi group create <name> [@person…]`, `phi group add|remove <name> @person`

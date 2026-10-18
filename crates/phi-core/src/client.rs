@@ -1267,53 +1267,153 @@ impl Client {
         }
     }
     pub async fn format_wait_entry(&mut self, event: &WaitEntry) -> Result<String> {
-        match event {
-            WaitEntry::Message(entry) => {
-                let raw: String = self.cache.db.query_row(
-                    "SELECT raw FROM messages WHERE seq=?",
-                    [entry.latest_seq],
-                    |r| r.get(0),
-                )?;
-                let message: Message = serde_json::from_str(&raw)?;
-                let (reference, warning) = self.wait_reference(message.id).await?;
-                let thread = message.envelope.thread_id.unwrap_or(message.id);
-                let label = reference
-                    .map(|r| r.to_string())
-                    .unwrap_or_else(|| message.id.to_string());
-                let kind = if message.envelope.thread_id.is_none() {
-                    "new message"
-                } else {
-                    "reply in thread"
-                };
-                let reactions = format_reactions(&entry.reactions, &self.names());
-                Ok(format!(
-                    "{kind} · to: {} · thread {thread} · message {label} · id {} · {} · {}\n{warning}  reactions: {reactions}\n  phi read {thread}\n",
-                    entry.to, message.id, entry.channel, entry.from
-                ))
-            }
-            WaitEntry::VerificationFailure { seq, description } => Ok(format!(
-                "verification failed · to: unavailable · event {seq}: {description} (recorded locally; skipped)\n"
-            )),
-            WaitEntry::Settings(change) => Ok(format!(
-                "to: #all · space settings changed: retention_days={} summary_mode={:?}\n",
-                change.data.settings.retention_days, change.data.settings.summary_mode
-            )),
-            WaitEntry::Revocation(revocation) => Ok(format!(
-                "to: #all · signed revocation: {:?}\n",
-                revocation.data.target
-            )),
-        }
+        Ok(self
+            .format_wait_entries(std::slice::from_ref(event))
+            .await?
+            .0)
     }
-    pub async fn read(&mut self, thread: MessageId, options: ReadOptions) -> Result<ThreadView> {
-        self.begin_operation().await?;
-        let messages = self.load_thread(thread).await?;
-        let latest = messages.last().map_or(0, |m| m.message.seq);
-        let mut view = compose_thread(thread, messages, options, &self.names())?;
+    async fn format_wait_entries(
+        &mut self,
+        events: &[WaitEntry],
+    ) -> Result<(String, Vec<(MessageId, Seq)>)> {
+        let mut output = String::new();
+        let mut read = Vec::new();
+        let mut seen = BTreeSet::new();
+        for event in events {
+            match event {
+                WaitEntry::Message(entry) => {
+                    if !seen.insert(entry.id) {
+                        continue;
+                    }
+                    let sequences: BTreeSet<_> = events
+                        .iter()
+                        .filter_map(|event| match event {
+                            WaitEntry::Message(other) if other.id == entry.id => {
+                                Some(other.latest_seq)
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    let latest = sequences.iter().next_back().copied().unwrap_or(0);
+                    output.push_str(&self.wait_thread(entry, &sequences).await?);
+                    read.push((entry.id, latest));
+                }
+                WaitEntry::VerificationFailure { seq, description } => {
+                    output.push_str(&format!(
+                        "verification failed · to: unavailable · event {seq}: {description} (recorded locally; skipped)\n"
+                    ));
+                }
+                WaitEntry::Settings(change) => {
+                    output.push_str(&format!(
+                        "to: #all · space settings changed: retention_days={} summary_mode={:?}\n",
+                        change.data.settings.retention_days, change.data.settings.summary_mode
+                    ));
+                }
+                WaitEntry::Revocation(revocation) => {
+                    output.push_str(&format!(
+                        "to: #all · signed revocation: {:?}\n",
+                        revocation.data.target
+                    ));
+                }
+            }
+        }
+        Ok((output, read))
+    }
+    async fn wait_thread(
+        &mut self,
+        entry: &InboxEntry,
+        sequences: &BTreeSet<Seq>,
+    ) -> Result<String> {
+        let latest = sequences.iter().next_back().copied().unwrap_or(0);
+        let mut warnings = String::new();
+        for sequence in sequences {
+            let raw: String = self.cache.db.query_row(
+                "SELECT raw FROM messages WHERE seq=? AND thread=?",
+                params![sequence, entry.id.to_string()],
+                |r| r.get(0),
+            )?;
+            let message: Message = serde_json::from_str(&raw)?;
+            warnings.push_str(&self.wait_reference(message.id).await?.1);
+        }
+        let raws: Vec<String> = self
+            .cache
+            .db
+            .prepare("SELECT raw FROM messages WHERE thread=? AND seq<=? ORDER BY seq")?
+            .query_map(params![entry.id.to_string(), latest], |r| r.get(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        let mut history = Vec::new();
+        for raw in raws {
+            let message: Message = serde_json::from_str(&raw)?;
+            let selected = sequences.contains(&message.seq);
+            match self.decode_cached_message(message) {
+                Ok(message) => history.push(message),
+                Err(error) if selected => return Err(error),
+                // Rejected historical context must not hide a valid new message.
+                Err(_) => {}
+            }
+        }
+        let to = history
+            .first()
+            .filter(|m| m.message.id == entry.id)
+            .map(|m| self.addressed_to(&m.message))
+            .unwrap_or_else(|| entry.to.clone());
+        let mut view = compose_thread(
+            entry.id,
+            history,
+            ReadOptions {
+                all: true,
+                last: None,
+            },
+            &self.names(),
+            to,
+        )?;
+        view.messages
+            .retain(|message| sequences.contains(&message.message.seq));
+        view.reactions = self.thread_reactions(entry.id)?;
+        view.newer_messages = view
+            .messages
+            .iter()
+            .filter(|message| {
+                view.summary_covers_seq
+                    .is_some_and(|coverage| message.message.seq > coverage)
+                    && Some(message.number) != view.summary_number
+            })
+            .count();
         for message in &mut view.messages {
             for attachment in &message.content.attachments {
                 message.attachments.push(self.download(attachment).await?);
             }
         }
+        Ok(format!("{}{warnings}", view.text()))
+    }
+    pub async fn read(&mut self, thread: MessageId, options: ReadOptions) -> Result<ThreadView> {
+        self.begin_operation().await?;
+        let messages = self.load_thread(thread).await?;
+        let latest = messages.last().map_or(0, |m| m.message.seq);
+        let to = messages
+            .first()
+            .map(|m| self.addressed_to(&m.message))
+            .unwrap_or_default();
+        let mut view = compose_thread(thread, messages, options, &self.names(), to)?;
+        for message in &mut view.messages {
+            for attachment in &message.content.attachments {
+                message.attachments.push(self.download(attachment).await?);
+            }
+        }
+        self.mark_read(thread, latest).await?;
+        Ok(view)
+    }
+    async fn mark_read(&mut self, thread: MessageId, latest: Seq) -> Result<()> {
+        let previous: Option<Seq> = self
+            .cache
+            .db
+            .query_row(
+                "SELECT seq FROM cursors WHERE thread=?",
+                [thread.to_string()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let latest = latest.max(previous.unwrap_or(0));
         let _: PutCursorResponse = self
             .http
             .send(
@@ -1328,7 +1428,7 @@ impl Client {
             "INSERT INTO cursors VALUES(?,?) ON CONFLICT(thread) DO UPDATE SET seq=excluded.seq",
             params![thread.to_string(), latest],
         )?;
-        Ok(view)
+        Ok(())
     }
     async fn download(&mut self, attachment: &Attachment) -> Result<PathBuf> {
         attachment.validate()?;
@@ -1640,13 +1740,13 @@ impl Client {
         self.advance_wait(&batch.cursor, batch.next_after)?;
         Ok(batch.events)
     }
-    /// Transient lookup failures leave the batch pending; corrupt history gets a visible ID fallback.
+    /// Finish rendering/downloads before acknowledging messages, so failed reads remain retryable.
     pub async fn wait_text(&mut self, seconds: u16) -> Result<String> {
         self.begin_operation().await?;
         let batch = self.wait_batch(seconds).await?;
-        let mut output = String::new();
-        for event in &batch.events {
-            output.push_str(&self.format_wait_entry(event).await?);
+        let (output, read) = self.format_wait_entries(&batch.events).await?;
+        for (thread, latest) in read {
+            self.mark_read(thread, latest).await?;
         }
         self.advance_wait(&batch.cursor, batch.next_after)?;
         Ok(output)
@@ -1663,13 +1763,34 @@ impl Client {
             let timeout = (remaining.as_secs() + u64::from(remaining.subsec_nanos() > 0))
                 .min(u64::from(seconds));
             let after = self.cache.get::<u64>(&name)?.unwrap_or(0);
-            let response: EventsResponse = self
+            let mut response: EventsResponse = self
                 .http
                 .get(&format!(
                     "/spaces/{}/events?after={after}&timeout={timeout}&handle={}",
                     self.profile.space_id, self.handle
                 ))
                 .await?;
+            // Drain an available backlog without another long-poll or a page-sized
+            // truncation of what the user is about to read.
+            let mut page_len = response.events.len();
+            while page_len == MAX_PAGE_SIZE as usize {
+                let after = response.events.last().map_or(after, |event| event.seq);
+                let page: EventsResponse = self
+                    .http
+                    .get(&format!(
+                        "/spaces/{}/events?after={after}&timeout=0&handle={}",
+                        self.profile.space_id, self.handle
+                    ))
+                    .await?;
+                if page.next_after < after
+                    || page.events.first().is_some_and(|event| event.seq <= after)
+                {
+                    return Err(user("server rolled back event cursor"));
+                }
+                page_len = page.events.len();
+                response.next_after = page.next_after;
+                response.events.extend(page.events);
+            }
             if response.next_after < after {
                 return Err(user("server rolled back event cursor"));
             }
@@ -1708,7 +1829,6 @@ impl Client {
             if changed {
                 self.refresh().await?;
             }
-            let full_page = response.events.len() == MAX_PAGE_SIZE as usize;
             let mut entries = Vec::new();
             let mut previous = after;
             for event in response.events {
@@ -1787,7 +1907,7 @@ impl Client {
                 });
             }
             self.advance_wait(&name, previous)?;
-            if !full_page && std::time::Instant::now() >= deadline {
+            if std::time::Instant::now() >= deadline {
                 return Ok(WaitBatch {
                     events: entries,
                     cursor: name,
@@ -2186,6 +2306,25 @@ impl Client {
         self.settings = self.cache.accept_settings(&self.directory, &response)?;
         Ok(response)
     }
+    fn decode_cached_message(&self, message: Message) -> Result<DecodedMessage> {
+        let author = self.directory.verify_message(&message)?;
+        let content = decrypt_message(
+            &self.key(message.envelope.channel_id, message.envelope.epoch)?,
+            &author,
+            &message.envelope,
+            &message.signature,
+        )?;
+        Ok(DecodedMessage {
+            number: self.cached_reference(message.id)?.map_or(0, |r| r.number),
+            perspective: self.perspective(&message),
+            reactions: self.reactions(message.id)?,
+            author_kind: author.certificate().data.kind,
+            message,
+            content,
+            attachments: vec![],
+            verification_error: None,
+        })
+    }
     pub async fn search(&mut self, text: &str) -> Result<Vec<DecodedMessage>> {
         self.opening_snapshot = false;
         self.directory = self
@@ -2199,24 +2338,7 @@ impl Client {
             .collect::<std::result::Result<Vec<_>, _>>()?;
         let mut result = Vec::new();
         for raw in rows {
-            let message: Message = serde_json::from_str(&raw)?;
-            let author = self.directory.verify_message(&message)?;
-            let content = decrypt_message(
-                &self.key(message.envelope.channel_id, message.envelope.epoch)?,
-                &author,
-                &message.envelope,
-                &message.signature,
-            )?;
-            result.push(DecodedMessage {
-                number: self.cached_reference(message.id)?.map_or(0, |r| r.number),
-                perspective: self.perspective(&message),
-                reactions: self.reactions(message.id)?,
-                author_kind: author.certificate().data.kind,
-                message,
-                content,
-                attachments: vec![],
-                verification_error: None,
-            });
+            result.push(self.decode_cached_message(serde_json::from_str(&raw)?)?);
         }
         Ok(result)
     }

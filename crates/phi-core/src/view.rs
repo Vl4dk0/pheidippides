@@ -31,6 +31,7 @@ pub struct ReadOptions {
 #[derive(Clone, Debug)]
 pub struct ThreadView {
     pub id: MessageId,
+    pub to: String,
     pub title: String,
     pub participants: Vec<String>,
     pub summary: Option<String>,
@@ -39,6 +40,7 @@ pub struct ThreadView {
     pub summary_perspective: Option<MessagePerspective>,
     pub newer_messages: usize,
     pub messages: Vec<DecodedMessage>,
+    pub reactions: Vec<Reaction>,
     pub names: BTreeMap<PersonId, String>,
 }
 #[derive(Clone, Debug)]
@@ -69,6 +71,7 @@ pub(crate) fn compose_thread(
     messages: Vec<DecodedMessage>,
     options: ReadOptions,
     names: &BTreeMap<PersonId, String>,
+    to: String,
 ) -> Result<ThreadView> {
     if options.all && options.last.is_some() {
         return Err(user("choose --all or --last, not both"));
@@ -76,7 +79,7 @@ pub(crate) fn compose_thread(
     let title = messages
         .first()
         .and_then(|m| m.content.title.clone())
-        .ok_or_else(|| user("thread has no root title"))?;
+        .unwrap_or_else(|| "[thread title unavailable]".into());
     let participants = messages
         .iter()
         .filter(|m| m.verification_error.is_none())
@@ -99,6 +102,7 @@ pub(crate) fn compose_thread(
     let summary_id = summary_message.map(|m| m.message.id);
     let summary_number = summary_message.map(|m| m.number);
     let summary_perspective = summary_message.map(|m| m.perspective);
+    let reactions = messages.iter().flat_map(|m| m.reactions.clone()).collect();
     let newer_messages = messages
         .iter()
         .filter(|m| {
@@ -122,6 +126,7 @@ pub(crate) fn compose_thread(
         .collect();
     Ok(ThreadView {
         id,
+        to,
         title,
         participants,
         summary,
@@ -130,6 +135,7 @@ pub(crate) fn compose_thread(
         summary_perspective,
         newer_messages,
         messages,
+        reactions,
         names: names.clone(),
     })
 }
@@ -224,11 +230,16 @@ impl DecodedMessage {
 impl ThreadView {
     pub fn text(&self) -> String {
         let mut output = format!(
-            "thread {} · {}\nparticipants: {}\n",
+            "thread {} · {} · to: {}\nparticipants: {}\n",
             self.id,
             self.title,
+            self.to,
             self.participants.join(", ")
         );
+        let reactions = format_reactions(&self.reactions, &self.names);
+        if !reactions.is_empty() {
+            output.push_str(&format!("reactions: {reactions}\n"));
+        }
         if let Some(summary) = &self.summary {
             let status = if self.newer_messages == 0 {
                 "up to date".into()
@@ -250,12 +261,23 @@ impl ThreadView {
             }
         }
         for message in &self.messages {
-            output.push_str(&format_message(message, &self.names));
+            output.push_str(&format_addressed_message(
+                message,
+                &self.names,
+                Some(&self.to),
+            ));
         }
         output
     }
 }
 pub fn format_message(message: &DecodedMessage, names: &BTreeMap<PersonId, String>) -> String {
+    format_addressed_message(message, names, None)
+}
+fn format_addressed_message(
+    message: &DecodedMessage,
+    names: &BTreeMap<PersonId, String>,
+    to: Option<&str>,
+) -> String {
     let m = &message.message;
     let reference = message.reference();
     if let Some(error) = &message.verification_error {
@@ -284,9 +306,10 @@ pub fn format_message(message: &DecodedMessage, names: &BTreeMap<PersonId, Strin
         message.number.to_string()
     };
     let mut output = format!(
-        "\n── #{} · message {reference} · id {} · {author}/{} ({perspective}) · {} · reactions: {}\n",
+        "\n── #{} · message {reference} · id {}{} · {author}/{} ({perspective}) · {} · reactions: {}\n",
         position,
         m.id,
+        to.map(|to| format!(" · to: {to}")).unwrap_or_default(),
         m.envelope.handle,
         timestamp(m.created_at),
         if reactions.is_empty() {

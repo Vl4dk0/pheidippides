@@ -104,9 +104,13 @@ shares this filter between counts and events; inbox/read remain person-wide.
 Settings/revocations and rejected-event
 outcomes remain visible. Message events and inbox entries carry the root's `to:`
 address, tag matching person/handles `(you)`, prioritize matching mentions, and
-include current thread reaction context. Neither listing nor waiting marks read;
+include current thread reaction context. `wait_text` groups all available relevant
+messages by thread, renders full bodies with read's framing and summary context,
+downloads attachments, then marks through each thread's last displayed message.
+Rendering/download failures leave the wait cursor pending for retry. Structured
+`wait` remains notification-only for GUI polling, and inbox does not mark read;
 read state stays per person. Missing/corrupt reference history falls back to a raw
-ID/read pointer. `ReactionSummary` shares counts and every claimant with frontends;
+ID alongside the body. `ReactionSummary` shares counts and every claimant with frontends;
 thread views provide thread numbers and summary positions.
 
 Open builds one verified snapshot (one directory fetch). Resolution reuses it;

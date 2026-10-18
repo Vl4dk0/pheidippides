@@ -257,6 +257,24 @@ async fn create_invite_join_attachment_fetch_read_reply() -> Result<()> {
     ensure!(bob.fetch().await?.contains("1 mention"));
     let inbox = bob.inbox().await?;
     ensure!(inbox.len() == 1 && inbox[0].mentioned && inbox[0].title == "Review PR");
+    let waited = bob.wait_text(0).await?;
+    ensure!(waited.contains("UNTRUSTED") && waited.contains("to: @bob/cli (you)"));
+    let downloaded = f.store("bob").cache_dir(&bob.profile).join("blobs");
+    let paths = std::fs::read_dir(&downloaded)?.collect::<std::io::Result<Vec<_>>>()?;
+    let image = paths
+        .into_iter()
+        .map(|entry| entry.path().join("shot.png"))
+        .find(|path| path.exists());
+    ensure!(
+        image
+            .as_ref()
+            .is_some_and(|path| waited.contains(&path.display().to_string()))
+    );
+    ensure!(
+        std::fs::read(image.ok_or_else(|| anyhow::anyhow!("missing downloaded image"))?)?
+            == b"image bytes"
+    );
+    ensure!(bob.fetch().await?.is_empty());
     let view = bob.read(root.id, ReadOptions::default()).await?;
     ensure!(view.text().contains("UNTRUSTED") && view.text().contains("alice/cli (agent)"));
     ensure!(std::fs::read(&view.messages[0].attachments[0])? == b"image bytes");
@@ -384,9 +402,11 @@ async fn wait_backlog_wakes_on_reply_and_keeps_per_handle_cursor() -> Result<()>
     ensure!(events.iter().any(|e| matches!(e, WaitEntry::Message(_))));
     let output = bob.format_wait_entry(&events[0]).await?;
     ensure!(
-        output.starts_with("new message")
+        output.starts_with(&format!("thread {} · Task", root.id))
             && output.contains(&format!("{}#1", root.id))
-            && output.contains(&format!("phi read {}", root.id))
+            && output.contains("hello")
+            && output.contains("<UNTRUSTED: message")
+            && !output.contains("phi read")
     );
     ensure!(bob.wait(0).await?.is_empty());
     f.faults(|faults| faults.inflate_cursor = false)?;
@@ -404,7 +424,7 @@ async fn wait_backlog_wakes_on_reply_and_keeps_per_handle_cursor() -> Result<()>
     }
     ensure!(
         output.contains("claimed by bob/cli")
-            && output.contains("reply in thread")
+            && output.contains("my reply")
             && output.contains(&format!("{}#2", root.id))
             && output.contains(&own.id.to_string())
     );
@@ -503,6 +523,66 @@ async fn wait_backlog_wakes_on_reply_and_keeps_per_handle_cursor() -> Result<()>
     ensure!(
         matches!(&entries[0], WaitEntry::Message(entry) if entry.reactions.iter().any(|r| r.data.kind == ReactionKind::Ack))
     );
+    let batch = alice
+        .send("@bob/reviewer", "Whole batch", options("batch root body"))
+        .await?;
+    let sibling = alice
+        .send("#all", "Parallel batch", options("parallel root body"))
+        .await?;
+    alice.reply(batch.id, options("batch first reply")).await?;
+    let last = alice.reply(batch.id, options("batch final reply")).await?;
+    let sibling_last = alice
+        .reply(sibling.id, options("parallel reply body"))
+        .await?;
+    alice
+        .send("@bob/other", "Unrelated", options("not displayed"))
+        .await?;
+    let output = reviewer.wait_text(0).await?;
+    ensure!(
+        output
+            .matches(&format!("thread {} · Whole batch", batch.id))
+            .count()
+            == 1
+    );
+    ensure!(
+        [
+            "batch root body",
+            "batch first reply",
+            "batch final reply",
+            "summary (as of #3; up to date)"
+        ]
+        .iter()
+        .all(|body| output.contains(body))
+    );
+    let sibling_header = format!("thread {} · Parallel batch", sibling.id);
+    ensure!(output.matches(&sibling_header).count() == 1);
+    ensure!(output.find("batch final reply") < output.find(&sibling_header));
+    ensure!(output.contains("parallel root body") && output.contains("parallel reply body"));
+    ensure!(!output.contains("not displayed") && !output.contains("phi read"));
+    let cache =
+        rusqlite::Connection::open(f.store("bob").cache_dir(&bob.profile).join("cache.db"))?;
+    let cursor: u64 = cache.query_row(
+        "SELECT seq FROM cursors WHERE thread=?",
+        [batch.id.to_string()],
+        |r| r.get(0),
+    )?;
+    ensure!(cursor == last.seq);
+    let sibling_cursor: u64 = cache.query_row(
+        "SELECT seq FROM cursors WHERE thread=?",
+        [sibling.id.to_string()],
+        |r| r.get(0),
+    )?;
+    ensure!(sibling_cursor == sibling_last.seq);
+    let mut same_person =
+        Client::open(f.store("bob"), bob.profile.clone(), Some("another")).await?;
+    ensure!(
+        same_person
+            .inbox()
+            .await?
+            .iter()
+            .all(|entry| entry.id != batch.id && entry.id != sibling.id)
+    );
+    ensure!(reviewer.wait_text(0).await?.is_empty());
     Ok(())
 }
 #[tokio::test]
@@ -1258,7 +1338,20 @@ async fn tampered_message_attachment_and_sequence_are_rejected() -> Result<()> {
     let mut opts = options("signed body");
     opts.files.push(path);
     let root = alice.send("#all", "Signed", opts).await?;
-    bob.wait(0).await?;
+    let blobs = std::fs::read_dir(f.dir.path().join("server/blobs"))?
+        .collect::<std::io::Result<Vec<_>>>()?;
+    let blob = blobs
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("missing uploaded blob"))?
+        .path();
+    let ciphertext = std::fs::read(&blob)?;
+    std::fs::write(&blob, b"tampered")?;
+    ensure!(bob.wait_text(0).await.is_err());
+    ensure!(bob.counts().await?.unread_threads == 1);
+    std::fs::write(&blob, ciphertext)?;
+    let output = bob.wait_text(0).await?;
+    ensure!(output.contains("signed body") && output.contains("attachments:"));
+    ensure!(bob.counts().await?.unread_threads == 0);
     alice.react(root.id, ReactionKind::Ack, false).await?;
     let connection = rusqlite::Connection::open(f.dir.path().join("server/phi.db"))?;
     let original = serde_json::to_string(&root)?;

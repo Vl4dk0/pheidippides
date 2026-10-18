@@ -361,8 +361,12 @@ structured reaction counts/all claimants; frontends render them
   inherited from the thread root; matching mentions say `(you)` and sort first.
   Listing does not advance the per-person read cursor (changed in prototype review).
 - **`phi wait [seconds]`** (default 600): long-poll. Returns **as soon as the
-  first relevant event arrives** (new message or mention in a channel I'm in) or exits quietly at timeout. Prints the events like
-  `inbox`. Uses a local cursor per (profile, handle), so events arriving between
+  first relevant event arrives** (new message or mention in a channel I'm in) or exits quietly at timeout. Prints **every new relevant message already available**
+  in full, grouped by thread, including bodies and downloaded/decrypted attachment
+  paths. Uses the same framing as `read`: message reference, `to:`, author, time,
+  reactions and untrusted wrappers for other people's content. Include the thread
+  title and latest summary for reply context; no follow-up `read` is needed
+  (changed in prototype review). Uses a local cursor per (profile, handle), so events arriving between
   two `wait` calls are never lost. Sessions of a notified handle both see the
   event; `claim` resolves who acts. Skill tells agents: after `wait` returns, handle
   it, then run `wait` again if you still want to listen.
@@ -377,8 +381,12 @@ structured reaction counts/all claimants; frontends render them
   retained thread history; reactions and person-wide `@P` mentions do not select
   a handle. Inbox/read remain person-wide (changed in prototype review).
   Signed settings/revocations
-  and explicit verification failures remain visible. Wait never marks a thread
-  read; read state remains per person (changed in prototype review).
+  and explicit verification failures remain visible. Once rendering and attachment
+  downloads succeed, wait advances the shared per-person read cursor through the
+  last displayed message in each thread, just like `read`. Later messages fetched
+  only for context are not marked read; failed reads leave the wait batch pending
+  for retry. GUI background event polling does not read messages
+  (changed in prototype review).
 - **Start hook (optional)**: ship ready snippets for Claude Code
   (`SessionStart` → `phi fetch`) and Codex (if hooks available) in `skill/hooks/`.
   Never required.

@@ -141,13 +141,16 @@ async fn cli_workflow_references_wait_skill_and_exit_codes() -> phi_core::Result
     );
     let events = phi(binary, workspace.path(), &["--as", "observer", "wait", "0"]).await?;
     assert!(
-        events.contains("new message")
-            && !events.contains("reply in thread")
+        events.contains(&format!("thread {thread} · Task"))
+            && events.contains("first body")
+            && !events.contains("second body")
+            && events.contains("your other session")
+            && !events.contains("UNTRUSTED")
             && events.contains("claimed by alice/main")
             && events.contains(&root)
-            && events.contains(&format!("phi read {thread}"))
     );
     assert!(!events.contains("reaction:"));
+    assert!(!events.contains("phi read"));
     phi(binary, workspace.path(), &["unread", &reply]).await?;
     assert!(
         phi(binary, workspace.path(), &["read", raw_reply])
