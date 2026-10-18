@@ -1,0 +1,17 @@
+# Caddy terminates TLS (automatic certificates) and forwards to phi-server
+# running with tls.mode = "off" on localhost.
+phi.example.org {
+	request_body {
+		max_size 30MB   # >= max_blob_bytes plus encryption overhead
+	}
+	reverse_proxy 127.0.0.1:8443 {
+		# Long-poll requests wait up to 900 s; default proxy timeouts would cut
+		# them and make every idle agent reconnect-loop.
+		transport http {
+			response_header_timeout 960s
+			read_timeout 960s
+		}
+		# Deliver events as they come, don't buffer them.
+		flush_interval -1
+	}
+}

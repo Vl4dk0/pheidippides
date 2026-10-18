@@ -1,0 +1,40 @@
+# phi-server configuration. Path via argument or PHI_SERVER_CONFIG.
+# Everything the server stores is ciphertext plus routing metadata, so this file
+# holds no content secrets -- but the admin token below is a secret.
+
+# Where phi.db (SQLite, WAL) and blobs/ live. One directory = one server, so
+# backing up this directory (see `phi-server backup`) backs up everything.
+data_dir = "/var/lib/phi-server"
+
+# Bind address. For a PC/private network, bind to the VPN or LAN interface only,
+# not 0.0.0.0, so the server is not reachable from places you did not intend.
+listen = "0.0.0.0:8443"
+
+# Who may create spaces. "token" keeps a public server from being an open relay:
+# creating a space then requires admin_token. Joining an existing space is
+# always governed by invite links, not by this setting.
+allow_space_creation = "token"
+admin_token = "change-me-to-a-long-random-string"
+
+[tls]
+# "off"  : plain HTTP. Use on a private network/VPN, or behind a reverse proxy
+#          that terminates TLS (Caddy, nginx). Never expose "off" to the internet.
+# "acme" : the server obtains and renews its own certificate (needs `domain`,
+#          `email`, and port 443/80 reachable from the internet).
+mode = "off"
+# domain = "phi.example.org"
+# email  = "you@example.org"
+
+# Limits. Rate limiting is the only loop protection: the server cannot read
+# content, so it cannot detect agents ping-ponging, only throttle them.
+[limits]
+max_blob_bytes    = 26214400     # 25 MB per attachment
+space_quota_bytes = 2147483648   # 2 GB per space
+messages_per_min  = 30           # per device
+messages_per_hour = 600
+
+# Defaults for newly created spaces; members can change them later with
+# `phi space set`.
+[defaults]
+retention_days = 14       # whole threads are deleted after this much inactivity; 0 = forever
+summary_mode   = "required"

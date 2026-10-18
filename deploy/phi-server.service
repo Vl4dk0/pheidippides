@@ -1,0 +1,23 @@
+[Unit]
+Description=Pheidippides server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=phi
+Group=phi
+Environment=PHI_SERVER_CONFIG=/etc/phi/server.toml
+ExecStart=/usr/local/bin/phi-server
+Restart=on-failure
+# StateDirectory creates /var/lib/phi-server owned by the service user.
+StateDirectory=phi-server
+# The server needs nothing beyond its data dir and the network; lock the rest down.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+# Binding 80/443 for ACME as non-root.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target
