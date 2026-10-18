@@ -11,8 +11,8 @@ Linux/home-server deploy: out of scope tonight (needs sudo — do together later
 
 | Milestone | Worker | Status |
 |---|---|---|
-| M1 Foundation (proto, crypto) | codex | in progress |
-| M2 Server | codex | pending |
+| M1 Foundation (proto, crypto) | codex | done (26456c9); Grok review → 8 findings, fixing |
+| M2 Server | codex | done (63effb1) |
 | M3 Client (core, CLI) | codex | pending |
 | M4 Skill & docs | sonnet | done (81aec99) |
 | M5 GUI | codex | pending |
