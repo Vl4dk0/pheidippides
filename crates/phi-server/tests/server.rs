@@ -1226,7 +1226,7 @@ async fn counts_mentions_claims_and_read_cursors_are_per_person() -> TestResult 
         json!(null),
     )
     .await?;
-    assert_eq!((c.unread_threads, c.mentions), (1, 0));
+    assert_eq!((c.unread_threads, c.mentions), (0, 0));
     let _: ReadCursor = ok(
         &f.app,
         "PUT",
@@ -1273,6 +1273,43 @@ async fn counts_mentions_claims_and_read_cursors_are_per_person() -> TestResult 
     )
     .await?;
     assert_eq!((c.unread_threads, c.mentions, c.claimed_by_you), (1, 1, 1));
+    // An explicit reply address enrolls another handle without changing the
+    // person-wide read cursor; both notification endpoints use that evidence.
+    let addressed: Message = ok(
+        &f.app,
+        "POST",
+        &format!("/v1/channels/{}/messages", f.all),
+        Some(&f.root.token),
+        f.message(
+            &f.root,
+            f.all,
+            Some(m.id),
+            vec![Mention {
+                person_id: p.cert.data.person_id,
+                handle: Some("other".parse()?),
+            }],
+        )?,
+    )
+    .await?;
+    let c: Counts = ok(
+        &f.app,
+        "GET",
+        &f.space("/counts?handle=other"),
+        Some(&p.token),
+        json!(null),
+    )
+    .await?;
+    assert_eq!((c.unread_threads, c.mentions), (1, 1));
+    let events: EventsResponse = ok(
+        &f.app,
+        "GET",
+        &f.space(&format!("/events?after={}&timeout=0&handle=other", m.seq)),
+        Some(&device.token),
+        json!(null),
+    )
+    .await?;
+    assert!(events.events.iter().any(|event| matches!(&event.event,
+        EventData::Message(message) if message.id == addressed.id)));
     Ok(())
 }
 #[tokio::test]

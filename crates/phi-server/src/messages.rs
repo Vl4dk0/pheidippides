@@ -3,7 +3,31 @@ use crate::{
     error::{ApiError, Result},
 };
 use phi_proto::*;
-use rusqlite::params;
+use rusqlite::{named_params, params};
+
+// Notification routing shares one predicate so counts and long-polls agree without
+// changing person-wide read cursors or restricting access to other conversations.
+const NOTIFICATION_MESSAGE: &str = "
+    (:handle IS NULL OR EXISTS (
+        SELECT 1 FROM message_mentions direct WHERE direct.message_id=m.id
+        AND direct.person_id=:person AND direct.handle=:handle
+    ) OR (m.author_person<>:person AND (
+        NOT EXISTS (
+            SELECT 1 FROM messages participant WHERE participant.thread_id=m.thread_id
+            AND (participant.author_person=:person OR EXISTS (
+                SELECT 1 FROM message_mentions addressed WHERE addressed.message_id=participant.id
+                AND addressed.person_id=:person AND addressed.handle<>''
+            ))
+        ) OR EXISTS (
+            SELECT 1 FROM messages participant WHERE participant.thread_id=m.thread_id
+            AND ((participant.author_person=:person
+                AND json_extract(participant.json,'$.envelope.handle')=:handle) OR EXISTS (
+                SELECT 1 FROM message_mentions addressed WHERE addressed.message_id=participant.id
+                AND addressed.person_id=:person AND addressed.handle=:handle
+            ))
+        )
+    )))
+";
 
 impl Db {
     pub fn send(&mut self, a: &Auth, cid: ChannelId, r: SendMessageRequest) -> Result<Message> {
@@ -316,25 +340,24 @@ impl Db {
             latest_seq: self.latest(a.sid())?,
             ..Counts::default()
         };
-        let mut statement = self.conn.prepare(
+        let mut statement = self.conn.prepare(&format!(
             "
             SELECT m.channel_id,COUNT(DISTINCT m.thread_id),COALESCE(SUM((SELECT
             COUNT(*) FROM message_mentions mm WHERE mm.message_id=m.id
-            AND mm.person_id=? AND (? IS NULL OR mm.handle='' OR mm.handle=?))),0) FROM messages m JOIN members
+            AND mm.person_id=:person AND (:handle IS NULL OR mm.handle='' OR mm.handle=:handle))),0) FROM messages m JOIN members
             cm ON cm.channel_id=m.channel_id LEFT JOIN cursors c ON
             c.thread_id=m.thread_id AND c.person_id=cm.person_id WHERE
-            cm.person_id=? AND m.space_id=? AND m.seq>COALESCE(c.seq,0) GROUP BY
+            cm.person_id=:person AND m.space_id=:space AND m.seq>COALESCE(c.seq,0)
+            AND {NOTIFICATION_MESSAGE} GROUP BY
             m.channel_id
         ",
-        )?;
+        ))?;
         let rows = statement.query_map(
-            params![
-                a.person().to_string(),
-                q.handle.as_ref().map(|h| h.as_str()),
-                q.handle.as_ref().map(|h| h.as_str()),
-                a.person().to_string(),
-                a.sid().to_string()
-            ],
+            named_params! {
+                ":person": a.person().to_string(),
+                ":handle": q.handle.as_ref().map(|h| h.as_str()),
+                ":space": a.sid().to_string(),
+            },
             |r| {
                 Ok((
                     r.get::<_, String>(0)?,
@@ -371,16 +394,22 @@ impl Db {
     pub fn events(&self, a: &Auth, q: &EventsQuery) -> Result<EventsResponse> {
         q.validate()?;
         let events: Vec<Event> = self.list(
-            "
-            SELECT e.json FROM events e WHERE e.space_id=? AND e.seq>? AND
+            &format!(
+                "
+            SELECT e.json FROM events e LEFT JOIN messages m
+            ON m.space_id=e.space_id AND m.seq=e.seq
+            WHERE e.space_id=:space AND e.seq>:after AND
             ((e.channel_id IS NULL) OR EXISTS(SELECT 1 FROM members m WHERE
-            m.channel_id=e.channel_id AND m.person_id=?)) ORDER BY e.seq LIMIT 1000
-        ",
-            params![
-                a.sid().to_string(),
-                q.after.min(i64::MAX as u64),
-                a.person().to_string()
-            ],
+            m.channel_id=e.channel_id AND m.person_id=:person))
+            AND (m.id IS NULL OR {NOTIFICATION_MESSAGE}) ORDER BY e.seq LIMIT 1000
+        "
+            ),
+            named_params! {
+                ":space": a.sid().to_string(),
+                ":after": q.after.min(i64::MAX as u64),
+                ":person": a.person().to_string(),
+                ":handle": q.handle.as_ref().map(|h| h.as_str()),
+            },
         )?;
         let next_after = events.last().map_or(q.after, |event| event.seq);
         Ok(EventsResponse { events, next_after })

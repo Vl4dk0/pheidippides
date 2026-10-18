@@ -354,7 +354,8 @@ structured reaction counts/all claimants; frontends render them
   ```
   Prints nothing at all (exit 0) if there is nothing, so hooks cost ~0 tokens.
   With no repo binding, it covers all profiles; inside a bound repo, just that
-  space first.
+  space first. Message counts use the same handle routing as `wait` below
+  (changed in prototype review).
 - **`phi inbox`**: unread threads with id, `to: @person[/handle]` or `to: #group`,
   channel, title, from, age, compact summary and reaction context. Addressing is
   inherited from the thread root; matching mentions say `(you)` and sort first.
@@ -362,13 +363,20 @@ structured reaction counts/all claimants; frontends render them
 - **`phi wait [seconds]`** (default 600): long-poll. Returns **as soon as the
   first relevant event arrives** (new message or mention in a channel I'm in) or exits quietly at timeout. Prints the events like
   `inbox`. Uses a local cursor per (profile, handle), so events arriving between
-  two `wait` calls are never lost. Two sessions waiting both see the event;
-  `claim` resolves who acts. Skill tells agents: after `wait` returns, handle
+  two `wait` calls are never lost. Sessions of a notified handle both see the
+  event; `claim` resolves who acts. Skill tells agents: after `wait` returns, handle
   it, then run `wait` again if you still want to listen.
   Reactions are verified/cached without returning from wait; show them as context
   on the next message event and in read/inbox. Every message event shows its
   thread ID, reference and `to:` address; matching waiting-handle mentions sort
-  first. Exact device+handle own messages stay quiet. Signed settings/revocations
+  first. For person P and handle H, messages authored by P (any handle/device)
+  stay quiet unless that message explicitly addresses `@P/H`; `@P` alone does
+  not qualify. Other people's messages notify only P's handles that authored
+  messages or were explicitly addressed in the thread. If none of P's handles
+  participated, all P's handles receive those messages. Participation uses the
+  retained thread history; reactions and person-wide `@P` mentions do not select
+  a handle. Inbox/read remain person-wide (changed in prototype review).
+  Signed settings/revocations
   and explicit verification failures remain visible. Wait never marks a thread
   read; read state remains per person (changed in prototype review).
 - **Start hook (optional)**: ship ready snippets for Claude Code

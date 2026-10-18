@@ -79,7 +79,8 @@ phi · game: 3 unread threads (#all 1, @bob 2) · 1 mention(s) of you (@vladko/m
 ```
 
 If all counts are zero, `fetch` prints zero bytes and exits 0. It never fetches
-message bodies. Inside a bound repo it covers that profile. `.phi` resolution
+message bodies. Message counts follow the same handle routing as `wait` below;
+claims remain per person. Inside a bound repo it covers that profile. `.phi` resolution
 walks up from cwd; without a binding, a single profile is automatic. Multiple
 profiles require `phi init <space>` or `--space <name-or-id>`. An explicit
 `--space` selects a profile even inside another bound repo.
@@ -135,8 +136,15 @@ reply in thread · to: @vladko/reviewer (you) · thread <thread-id> · message <
 Roots start with `new message`. Every inbox/event line includes `to: @person`,
 `to: @person/handle (you)` or `to: #group`, inherited from the root. Matching
 mentions sort first. Claim/ack and other reactions do not return from wait;
-they appear in read/inbox and the next message event. Wait also skips exact
-same-device/handle own messages, preserving other sessions' messages. Signed
+they appear in read/inbox and the next message event. For person P's handle H,
+wait/fetch silence all messages authored by P, across handles and devices, unless
+that message explicitly addresses `@P/H` (`@P` alone is insufficient).
+Other people's messages notify only P's handles that authored messages or were
+specifically addressed in the thread. If none of P's handles participated, all
+receive them. Participation uses retained thread history; reactions do not enroll
+a handle. For example, after `vladko/main` sends to `@bob`, Bob's replies notify
+`main`, while `vladko/reviewer` stays quiet. A thread addressed to
+`@vladko/reviewer` notifies reviewer instead. Signed
 settings/revocations and verification failures remain visible. Inbox and wait do
 not mark read; read cursors remain per person across all handles.
 

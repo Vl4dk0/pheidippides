@@ -99,7 +99,7 @@ async fn cli_workflow_references_wait_skill_and_exit_codes() -> phi_core::Result
         workspace.path(),
         &[
             "send",
-            "#all",
+            "@alice/observer",
             "Task",
             "first body",
             "--summary",
@@ -142,9 +142,9 @@ async fn cli_workflow_references_wait_skill_and_exit_codes() -> phi_core::Result
     let events = phi(binary, workspace.path(), &["--as", "observer", "wait", "0"]).await?;
     assert!(
         events.contains("new message")
-            && events.contains("reply in thread")
+            && !events.contains("reply in thread")
             && events.contains("claimed by alice/main")
-            && events.contains(&reply)
+            && events.contains(&root)
             && events.contains(&format!("phi read {thread}"))
     );
     assert!(!events.contains("reaction:"));

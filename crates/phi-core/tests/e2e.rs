@@ -392,6 +392,11 @@ async fn wait_backlog_wakes_on_reply_and_keeps_per_handle_cursor() -> Result<()>
     f.faults(|faults| faults.inflate_cursor = false)?;
     bob.react(root.id, ReactionKind::Claim, false).await?;
     let own = bob.reply(root.id, options("my reply")).await?;
+    let mut alice_reviewer =
+        Client::open(f.store("alice"), alice.profile.clone(), Some("reviewer")).await?;
+    ensure!(alice_reviewer.wait(0).await?.is_empty());
+    ensure!(alice_reviewer.fetch().await?.is_empty());
+    ensure!(alice.counts().await?.unread_threads == 1);
     let events = alice.wait(0).await?;
     let mut output = String::new();
     for event in &events {
@@ -423,12 +428,8 @@ async fn wait_backlog_wakes_on_reply_and_keeps_per_handle_cursor() -> Result<()>
     }
     ensure!(bob.wait(0).await?.is_empty());
     let mut second = Client::open(f.store("bob"), bob.profile.clone(), Some("second")).await?;
-    let entries = second.wait(0).await?;
-    ensure!(
-        entries
-            .iter()
-            .any(|e| matches!(e, WaitEntry::Message(entry) if entry.latest_seq == own.seq))
-    );
+    ensure!(second.wait(0).await?.is_empty());
+    ensure!(second.counts().await?.unread_threads == 0);
     let mut reopened = Client::open(f.store("bob"), bob.profile.clone(), None).await?;
     ensure!(reopened.wait(0).await?.is_empty());
     // An own-only backlog consumes the original timeout instead of waking the session.
@@ -445,7 +446,7 @@ async fn wait_backlog_wakes_on_reply_and_keeps_per_handle_cursor() -> Result<()>
     ensure!(alice.wait_text(0).await?.is_empty());
     let mut reviewer = Client::open(f.store("bob"), bob.profile.clone(), Some("reviewer")).await?;
     reviewer.wait(0).await?;
-    alice
+    let other = alice
         .send("@bob/other", "Other handle", options("not for reviewer"))
         .await?;
     let targeted = bob
@@ -455,7 +456,7 @@ async fn wait_backlog_wakes_on_reply_and_keeps_per_handle_cursor() -> Result<()>
             options("own other session"),
         )
         .await?;
-    alice
+    let general = alice
         .send("#all", "General", options("for everyone"))
         .await?;
     let entries = reviewer.wait(0).await?;
@@ -465,15 +466,39 @@ async fn wait_backlog_wakes_on_reply_and_keeps_per_handle_cursor() -> Result<()>
     ensure!(
         entries
             .iter()
-            .any(|e| matches!(e, WaitEntry::Message(entry) if entry.to == "@bob/other"))
+            .all(|e| !matches!(e, WaitEntry::Message(entry) if entry.id == other.id))
     );
+    ensure!(
+        entries
+            .iter()
+            .any(|e| matches!(e, WaitEntry::Message(entry) if entry.id == general.id))
+    );
+    ensure!(reviewer.counts().await?.unread_threads == 2);
+    // Inbox remains person-wide; notification routing does not change read state.
     let inbox = reviewer.inbox().await?;
     ensure!(inbox[0].id == targeted.id && inbox[0].to == "@bob/reviewer (you)");
     bob.react(targeted.id, ReactionKind::Ack, false).await?;
     let start = std::time::Instant::now();
     ensure!(reviewer.wait(1).await?.is_empty());
     ensure!(start.elapsed() >= Duration::from_millis(900));
-    bob.reply(targeted.id, options("carries context")).await?;
+    let started = std::time::Instant::now();
+    let unrelated = async {
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        bob.reply(targeted.id, options("own untargeted reply"))
+            .await?;
+        alice.reply(root.id, options("reply for bob/cli")).await
+    };
+    let (waiting, sent) = tokio::join!(reviewer.wait(1), unrelated);
+    sent?;
+    ensure!(waiting?.is_empty());
+    ensure!(started.elapsed() >= Duration::from_millis(900));
+    let direct = alice
+        .send("@bob/reviewer", "Called reviewer", options("please review"))
+        .await?;
+    ensure!(reviewer.wait(0).await?.len() == 1);
+    bob.react(direct.id, ReactionKind::Ack, false).await?;
+    ensure!(reviewer.wait(0).await?.is_empty());
+    alice.reply(direct.id, options("carries context")).await?;
     let entries = reviewer.wait(0).await?;
     ensure!(
         matches!(&entries[0], WaitEntry::Message(entry) if entry.reactions.iter().any(|r| r.data.kind == ReactionKind::Ack))
@@ -616,13 +641,7 @@ async fn enrollment_history_revoke_device_rotates_and_invalidates_token() -> Res
         laptop.profile.person_id == alice.profile.person_id
             && laptop.profile.display_name == "alice"
     );
-    ensure!(
-        laptop
-            .wait(0)
-            .await?
-            .iter()
-            .any(|e| matches!(e, WaitEntry::Message(_)))
-    );
+    ensure!(laptop.wait(0).await?.is_empty());
     let own_history = laptop.read(root.id, ReadOptions::default()).await?.text();
     ensure!(own_history.contains("your other session") && !own_history.contains("UNTRUSTED"));
     ensure!(
@@ -880,7 +899,7 @@ async fn names_slug_collisions_self_channel_and_secret_link_refusal() -> Result<
             options("message to another session"),
         )
         .await?;
-    ensure!(alice.counts().await?.unread_threads == 1);
+    ensure!(alice.counts().await?.unread_threads == 0);
     let mut other_session =
         Client::open(f.store("alice"), alice.profile.clone(), Some("second")).await?;
     ensure!(!other_session.fetch().await?.is_empty());
@@ -906,6 +925,17 @@ async fn names_slug_collisions_self_channel_and_secret_link_refusal() -> Result<
             .as_ref()
             .is_some_and(|h| h.as_str() == "second")
     );
+    let called = alice
+        .send(
+            "@alice/cli",
+            "Explicit self-call",
+            options("for this handle"),
+        )
+        .await?;
+    ensure!(alice.counts().await?.unread_threads == 1);
+    ensure!(alice.wait(0).await?.iter().any(|event| matches!(event,
+        WaitEntry::Message(entry) if entry.id == called.id)));
+    ensure!(other_session.wait(0).await?.is_empty());
     for body in ["phi://host/space#secret", "PHIS://host/space#secret"] {
         ensure!(alice.send("#all", "Unsafe", options(body)).await.is_err());
     }

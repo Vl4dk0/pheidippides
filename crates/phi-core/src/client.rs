@@ -1812,8 +1812,11 @@ impl Client {
                     &message.signature,
                 )?;
                 self.cache.message(&message, &content)?;
-                if message.author_device == self.profile.device_id
-                    && message.envelope.handle == self.handle
+                if message.author_person == self.profile.person_id
+                    && !message.envelope.mentions.iter().any(|mention| {
+                        mention.person_id == self.profile.person_id
+                            && mention.handle.as_ref() == Some(&self.handle)
+                    })
                 {
                     return Ok(None);
                 }

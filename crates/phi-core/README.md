@@ -96,8 +96,12 @@ views omit the foreign-content wrapper only for verified own-person content;
 verification failures remain visible. Summary headings use the summary message's
 thread number and the number of uncovered messages shown below.
 
-`wait` omits exact device+handle own messages and all reaction-only activity,
-continuing to the original deadline. Settings/revocations and rejected-event
+`wait`/`fetch` silence own-person messages unless explicitly addressed to the
+waiting handle. Other people's messages route to the person's author/addressed
+handles in the retained thread, or all handles if none participated. The server
+shares this filter between counts and events; inbox/read remain person-wide.
+`wait` omits all reaction-only activity, continuing to the original deadline.
+Settings/revocations and rejected-event
 outcomes remain visible. Message events and inbox entries carry the root's `to:`
 address, tag matching person/handles `(you)`, prioritize matching mentions, and
 include current thread reaction context. Neither listing nor waiting marks read;
