@@ -107,6 +107,9 @@ pub struct SendMessageRequest {
     pub envelope: MessageEnvelope,
     pub signature: Signature,
     pub has_summary: bool,
+    /// Routing references let retention collect attachments without decrypting content.
+    #[serde(default)]
+    pub blob_ids: Vec<BlobId>,
 }
 pub type SendMessageResponse = Message;
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

@@ -4,12 +4,29 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
-[[bin]]
-name = "phi-server"
-path = "src/main.rs"
-
 [dependencies]
 phi-proto.workspace = true
+phi-crypto.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+blake3.workspace = true
+getrandom.workspace = true
+anyhow = "1"
+axum = "0.8"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "time", "sync"] }
+rusqlite = { version = "0.37", features = ["bundled", "backup"] }
+clap = { version = "4", features = ["derive", "env"] }
+toml = "0.9"
+serde_urlencoded = "0.7"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rustls-acme = { version = "0.15", default-features = false, features = ["axum", "ring", "tls12", "webpki-roots"] }
+futures-util = "0.3"
+axum-server = { version = "0.8", default-features = false }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+tempfile = "3"
 
 [lints]
 workspace = true

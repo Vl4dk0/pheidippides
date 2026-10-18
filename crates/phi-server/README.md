@@ -1,0 +1,185 @@
+# phi-server
+
+Ciphertext relay for protocol major 1. The server never receives decryption keys,
+message plaintext, names, titles, or attachment filenames. Run one server process
+per data directory. `Server::open(config)?.router()` exposes the same Axum app to
+in-process clients/tests; it starts no listener or background task itself.
+
+## Configuration and operation
+
+```sh
+phi-server --config /etc/phi/server.toml
+PHI_SERVER_CONFIG=/etc/phi/server.toml phi-server
+phi-server --config /etc/phi/server.toml backup /path/to/new-backup
+```
+
+The default config path is `server.toml`. See
+[`deploy/server.example.toml`](../../deploy/server.example.toml). Unknown config
+fields fail startup. Every field can be overridden using `PHI_SERVER_` plus its
+uppercase name; use `__` for nested fields, e.g. `PHI_SERVER_DATA_DIR`,
+`PHI_SERVER_TLS__MODE`, `PHI_SERVER_TLS__DOMAIN`,
+`PHI_SERVER_LIMITS__MAX_BLOB_BYTES`, `PHI_SERVER_DEFAULTS__RETENTION_DAYS`.
+A config file is required; overrides apply afterward.
+
+| Field | Default / requirement |
+|---|---|
+| `data_dir` | `data` (SQLite `phi.db`, `blobs/`, ACME cache `acme/`) |
+| `listen` | `127.0.0.1:8443` |
+| `allow_space_creation` | `token`; alternative `anyone` |
+| `admin_token` | required nonempty secret when creation is `token` |
+| `tls.mode` | `off` (plain HTTP behind proxy or on private network); `acme` |
+| `tls.domain`, `tls.email` | required in ACME mode |
+| `limits.max_blob_bytes` | 26,214,400 plaintext bytes per attachment, plus 16-byte AEAD tag |
+| `limits.space_quota_bytes` | 2,147,483,648 total stored ciphertext bytes per space |
+| `limits.messages_per_min`, `limits.messages_per_hour` | 30 / 600 per device |
+| `defaults.retention_days` | 14; 0 keeps history forever |
+| `defaults.summary_mode` | `required`; alternative `off` |
+
+ACME uses production Let's Encrypt and TLS-ALPN-01: public port **443** must
+reach `listen` directly, preserving ALPN. Port 80 is unnecessary. Configure
+`listen = "0.0.0.0:443"`, or forward public 443 to 8443. Certificates/accounts
+are cached under `data_dir/acme`. TLS off does not add TLS headers or trust proxy
+identity; authorization always uses bearer tokens. SIGINT/SIGTERM stop serving.
+
+SQLite uses WAL and indexes space sequences, channel/thread sequences,
+membership, claims, and retention activity. Blocking SQLite/filesystem work runs
+on Tokio's blocking pool under a process-wide database lock. Idle long-polls
+hold no database lock/connection or blocking worker: they share one watch sender
+per accessed, authenticated space. Request work is serialized, appropriate for
+the specified low message throughput. No per-waiter polling timer/query loop.
+
+Hourly retention also runs at startup. A thread's server activity includes
+messages and reaction changes. Sweeps cascade roots/replies, reactions, cursors,
+events and blob references; unreferenced blobs older than the retention window
+are collected, including abandoned uploads. Shared blobs survive while any
+retained thread references them. Durable garbage records retry interrupted file
+cleanup. Retention is best effort beyond the server; transcripts and downloaded
+client copies may remain.
+
+Backup requires a **new** destination directory. SQLite's online backup API
+copies the database, then copies every referenced blob while a reserved SQLite
+writer lock prevents a separately running server from changing the snapshot's
+files. Reads and idle waits can continue; writes wait. Restore by using the backup
+as `data_dir`. A failed backup may leave an incomplete destination; it is never
+reported as successful. ACME cache is excluded and can be reissued. Device private
+keys are client-owned and cannot be recovered from server backups.
+
+## HTTP API
+
+All paths below start with `/v1`. JSON request/response type names are exported by
+`phi-proto`. Every request, including public grant operations, needs
+`Phi-Protocol: 1`. Success is HTTP 200 and JSON. Requests reject unknown fields,
+including nested signed records. Typed query/path fields and size bounds are
+validated; ordinary JSON bodies are capped at 1 MiB before parsing, blob uploads
+at a configured base64-aware bound. Blob JSON buffers ciphertext in memory.
+
+| Method/path | Body or query | Response |
+|---|---|---|
+| POST `/spaces` | `CreateSpaceRequest` | `CreateSpaceResponse` |
+| GET `/spaces/{sid}` | — | `GetSpaceResponse` |
+| PATCH `/spaces/{sid}/settings` | `UpdateSettingsRequest` | `UpdateSettingsResponse` |
+| POST `/spaces/{sid}/grants` | `CreateGrantRequest` | `CreateGrantResponse` |
+| GET `/grants/{grant_id}` | — | `GetGrantResponse` |
+| POST `/grants/{grant_id}/redeem` | `RedeemGrantRequest` | `RedeemGrantResponse` |
+| GET `/spaces/{sid}/devices` | — | `ListDevicesResponse` |
+| POST `/spaces/{sid}/revocations` | `CreateRevocationRequest` | `CreateRevocationResponse` |
+| POST `/spaces/{sid}/channels` | `CreateChannelRequest` | `CreateChannelResponse` |
+| GET `/spaces/{sid}/channels` | — | `ListChannelsResponse` |
+| PATCH `/channels/{cid}` | `UpdateChannelRequest` | `UpdateChannelResponse` |
+| PUT `/channels/{cid}/keys` | `PutKeysRequest` | `GetKeysResponse` |
+| GET `/channels/{cid}/keys/mine` | — | `GetKeysResponse` |
+| POST `/channels/{cid}/messages` | `SendMessageRequest` | `SendMessageResponse` |
+| GET `/channels/{cid}/messages` | `MessagesQuery` | `ListMessagesResponse` |
+| POST `/messages/{mid}/reactions` | `ReactionRequest`, `remove=false` | `ReactionResponse` |
+| DELETE `/messages/{mid}/reactions/{kind}` | `ReactionRequest`, `remove=true` | `ReactionResponse` |
+| PUT `/threads/{tid}/cursor` | `PutCursorRequest` | `PutCursorResponse` |
+| GET `/spaces/{sid}/counts` | `CountsQuery` | `CountsResponse` |
+| GET `/spaces/{sid}/events` | `EventsQuery` | `EventsResponse` |
+| POST `/blobs` | `UploadBlobRequest` | `UploadBlobResponse` |
+| GET `/blobs/{id}` | — | `DownloadBlobResponse` |
+
+`Authorization: Bearer <device_token>` is required except for space creation and
+grant GET/redeem. Space creation uses the **admin token** in that same header
+when configured `token`. Tokens are 32 random bytes, canonical base64url;
+only BLAKE3 hashes are stored. Revocation immediately invalidates all targeted
+device/person tokens, including active waits. Inaccessible scoped resources
+return 404. Grant IDs are opaque 256-bit capabilities to signed public data and
+ciphertext, never the invite secret S. No endpoint lists spaces across tokens.
+
+Initial creation requires a valid self-signed root and creator-only all/self
+channels. Invites add their new person to #all; enrollment adds another device
+to the issuer's person. Clients create additional self/DM/group channels, and
+redeemers PUT their rewrapped keys. All membership is person-based. Group PATCH
+may change membership/meta; all, self, and DM membership is fixed. Rotations
+advance exactly one epoch and wrap to every remaining active member device;
+same/older-epoch PUT may add only the authenticated device's own immutable wrap.
+
+Messages must use the current epoch and a root thread in the same channel.
+Required summaries are enforced via the plaintext flag for CLI devices; GUI
+devices are exempt. The host cannot verify summary contents. Sending advances
+the author's person cursor; PUT cursor explicitly sets it, including backwards
+for unread, but cannot exceed the newest thread message. Counts return unread
+threads, unread matching mentions (general mentions always count; no handle means
+all handles), and all claims by the person. Claims are unique per message;
+the same person can remove one from any handle, with a signed removal request.
+
+Message pages are ascending by seq, default 100, maximum 1000. `next_after` is
+the final returned message seq. Events default to a 600-second wait, capped at
+900; `timeout=0` reads backlog immediately. Events include all messages in joined
+channels, reactions on the caller's messages, and space settings/revocations.
+The optional handle is validated; highlighting targeted mentions is a client
+responsibility, since every channel message is relevant. Events return at most
+1000 rows and a cursor that safely skips inaccessible events without skipping
+an unreturned relevant event. Clients keep separate cursors per profile/handle.
+Concurrent waiters all observe events; notification registration precedes reads.
+
+**Attachment senders must fill `SendMessageRequest.blob_ids`** with the uploaded
+IDs embedded in encrypted content. It defaults to `[]` for wire compatibility,
+is limited to 32 distinct IDs, and exists solely for access control and thread
+retention. IDs are unsigned routing metadata; clients verify encrypted attachment
+descriptors. Blob downloads require uploader ownership or membership in a thread's
+channel referencing the blob. Sharing a blob requires the same access. Per-file
+limits include 16 extra tag bytes; quotas count complete stored ciphertext.
+
+Two persistent token buckets gate successful message inserts atomically (minute
+and hour); effective rates are the smaller of server limits and signed space
+settings. Restarting does not reset buckets. HTTP 429 includes `Retry-After`
+in seconds. Other operations do not consume message tokens.
+
+## Verification and limits
+
+The server verifies root hash/self-signature; issuer-signed grant records;
+complete certificate/grant/revocation chains at redemption; current issuer status,
+expiry and atomic single use; signed revocations/settings/reactions and their
+authenticated identities; and message envelope signatures. Grant keys may cover
+only the issuer's permitted channels (#all for invites; all owned channels for
+enrollment), with current keys required. Revocation targets must exist in the
+same space. Clients remain the real verifiers: verify the complete directory,
+message signatures, revocations, and encrypted content independently. The host
+cannot detect rolled-back/omitted records or truthful summaries.
+
+Existing M1 edge case: `phi-crypto::verify_trust_bundle` treats certificate
+creation at exactly the revocation's Unix second as issuance after revocation.
+A legitimate same-second enroll/revoke can therefore be rejected by chain
+validation. Crypto semantics are unchanged in M2; review timestamp tie handling
+before relying on rapid enrollment/revocation flows.
+
+Known metadata leak: handles, mentions, reaction kinds, timestamps, ciphertext
+sizes, membership/routing graph, attachment IDs/thread associations, device kinds
+and public keys. Already read content remains compromised after revocation.
+Clients must rotate affected channels after removing a person/device; the server
+cannot generate their encryption keys.
+
+Errors use `phi_proto::ErrorBody` (no plaintext or bearer tokens in logs):
+
+| HTTP | `error` | Meaning |
+|---|---|---|
+| 400 | `invalid` | precise schema, format, signature, or contextual validation failure |
+| 401 | `unauthorized` | missing, unknown, or revoked device token |
+| 403 | `forbidden` | admin token, grant expiry, or ownership restriction |
+| 404 | `not_found` | nonexistent or inaccessible scoped resource |
+| 409 | `conflict` | duplicate ID/reaction, used grant, existing claim/wrap, invalid epoch progression |
+| 413 | `too_large` | HTTP body, per-file limit, or space quota |
+| 426 | `upgrade` | missing/invalid/mismatching major; includes `required_major` |
+| 429 | `rate_limited` | token bucket empty; includes `retry_after` and `Retry-After` |
+| 500 | `internal` | generic storage failure; details stay in structured server logs |

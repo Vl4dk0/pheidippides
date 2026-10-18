@@ -44,6 +44,9 @@ Member self/DM channels are created using the standard channel endpoint.
 Messages contain a nested `envelope` with the exact signed routing fields.
 Servers derive author IDs from the authenticated device, assign seq/created_at,
 and set summary_covers_seq to the assigned message seq iff has_summary=true.
+`SendMessageRequest.blob_ids` (default empty, at most 32 distinct IDs) links
+opaque uploads to the thread for server retention and access control, without
+revealing encrypted attachment descriptors. Attachment senders must populate it.
 The root uses thread_id=null; replies reference the root message ID. Empty
 attachments/body are allowed. The message ciphertext limit includes the AEAD tag.
 Encrypted channel metadata is a `Ciphertext` (nonce+ciphertext); the `meta_epoch` field records which epoch encrypted it, independently of

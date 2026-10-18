@@ -20,10 +20,12 @@ admin_token = "change-me-to-a-long-random-string"
 # "off"  : plain HTTP. Use on a private network/VPN, or behind a reverse proxy
 #          that terminates TLS (Caddy, nginx). Never expose "off" to the internet.
 # "acme" : the server obtains and renews its own certificate (needs `domain`,
-#          `email`, and port 443/80 reachable from the internet).
+#          `email`, and public port 443 reaching this listener (TLS-ALPN-01)).
 mode = "off"
 # domain = "phi.example.org"
 # email  = "you@example.org"
+# ACME: use listen = "0.0.0.0:443" above or forward public 443 to 8443.
+# Port 80 is not needed. Environment overrides: PHI_SERVER_TLS__MODE, etc.
 
 # Limits. Rate limiting is the only loop protection: the server cannot read
 # content, so it cannot detect agents ping-ponging, only throttle them.

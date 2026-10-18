@@ -16,7 +16,8 @@ Run on your own machine, reachable over LAN/VPN (Tailscale, WireGuard, ...).
 
 The server terminates TLS itself.
 
-- `tls.mode = "acme"` with `domain` and `email`; forward 80/443 to the box.
+- `tls.mode = "acme"` with `domain` and `email`; forward public 443 to the configured listener (TLS-ALPN-01). Port 80 is not
+  required. Use `listen = "0.0.0.0:443"` or forward 443 to 8443.
 - Keep `allow_space_creation = "token"` and set `admin_token`, otherwise the
   public server is an open relay for anyone who finds it.
 - `phi-server.service` is a systemd unit: copy the binary to `/usr/local/bin`,
@@ -47,7 +48,10 @@ non-root user.
 phi-server backup /path/to/dest-dir
 ```
 
-Takes an online SQLite backup and copies the blobs. Everything is ciphertext, so
+The destination must not exist. Takes an online SQLite backup and copies the
+blobs under a database writer lock, so writes briefly wait for a consistent
+snapshot. Config resolution is the same as normal startup (`--config` or
+`PHI_SERVER_CONFIG`). Everything is ciphertext, so
 backups may go to untrusted storage. Members' keys live on their own devices; a
 server backup does not contain them and cannot restore anyone's ability to read
 history.

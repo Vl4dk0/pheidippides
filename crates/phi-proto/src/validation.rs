@@ -364,7 +364,13 @@ impl Validate for PutKeysRequest {
 }
 impl Validate for SendMessageRequest {
     fn validate(&self) -> Result<(), ValidationError> {
-        self.envelope.validate()
+        self.envelope.validate()?;
+        check(
+            self.blob_ids.len() <= MAX_ATTACHMENTS
+                && self.blob_ids.iter().collect::<BTreeSet<_>>().len() == self.blob_ids.len(),
+            "blob_ids",
+            "at most 32 distinct blob references",
+        )
     }
 }
 impl Validate for MessagesQuery {
