@@ -58,3 +58,27 @@ without rotation, including replacing one person with another at equal roster
 size. Reaction pages and wait events expose channel-wide claim/unclaim state;
 fetch remains the specification's counts-only operation. Self-channel sends leave
 the shared person cursor unread until another session explicitly reads the thread.
+
+Text views number messages within their thread, independently of space event
+sequences. `DecodedMessage.number` survives tail/summary trimming; `reference()`
+returns the full thread/number plus immutable message ID. `MessageRef` parses raw
+IDs and `<thread>#<positive number>`; `resolve_message` selects that exact message,
+while `resolve_thread` normalizes it (or a raw reply ID) to the root. Resolution
+uses current verified thread history without advancing its read cursor. Signed
+sequence/coverage data and the wire protocol are unchanged.
+
+`MessagePerspective` distinguishes the exact device+handle (`You`), another
+session of the same person (`YourOtherSession`), and other people (`Other`). Text
+views omit the foreign-content wrapper only for verified own-person content;
+verification failures remain visible. Summary headings use the summary message's
+thread number and the number of uncovered messages shown below.
+
+`wait` still verifies/caches events but omits messages and reactions from its own
+exact device+handle, advancing past them and continuing to the original deadline.
+Other handles/devices remain visible. Settings/revocations lack handles and are
+retained. `format_wait_entry` prints typed message/reply/reaction lines with full
+thread/message references, raw IDs and a read pointer. `wait_text` resolves and
+renders the batch before committing its cursor, so failed lookups can be retried.
+Neither operation marks a thread read.
+MIME guessing recognizes source/config extensions and falls back to plain text
+for unrecognized UTF-8 text without binary controls.

@@ -66,6 +66,12 @@ impl DeviceOptions {
     }
 }
 
+struct WaitBatch {
+    events: Vec<WaitEntry>,
+    cursor: String,
+    next_after: Seq,
+}
+
 pub struct Client {
     pub profile: Profile,
     pub handle: Handle,
@@ -836,7 +842,7 @@ impl Client {
                 .await?;
             attachments.push(Attachment {
                 blob_id: blob.id,
-                mime: mime(&name).into(),
+                mime: mime(&name, &plaintext).into(),
                 name,
                 size: plaintext.len() as u64,
                 key,
@@ -985,6 +991,8 @@ impl Client {
                     }
                 };
                 decoded.push(DecodedMessage {
+                    number: 0,
+                    perspective: self.perspective(&message),
                     message,
                     content,
                     attachments: vec![],
@@ -1022,7 +1030,19 @@ impl Client {
                 break;
             }
         }
+        let mut numbers = BTreeMap::new();
         for message in &mut decoded {
+            let next = numbers
+                .entry(
+                    message
+                        .message
+                        .envelope
+                        .thread_id
+                        .unwrap_or(message.message.id),
+                )
+                .or_insert(0);
+            *next += 1;
+            message.number = *next;
             message.reactions = self.reactions(message.message.id)?;
         }
         Ok(decoded)
@@ -1058,6 +1078,114 @@ impl Client {
             ));
         }
         Ok(messages)
+    }
+    fn perspective(&self, message: &Message) -> MessagePerspective {
+        if message.author_person != self.profile.person_id {
+            MessagePerspective::Other
+        } else if message.author_device == self.profile.device_id
+            && message.envelope.handle == self.handle
+        {
+            MessagePerspective::You
+        } else {
+            MessagePerspective::YourOtherSession
+        }
+    }
+    pub async fn resolve_message(&mut self, reference: MessageRef) -> Result<MessageId> {
+        match reference {
+            MessageRef::Id(id) => Ok(id),
+            MessageRef::InThread { thread, number } => {
+                self.refresh().await?;
+                let messages = self.load_thread(thread).await?;
+                let message = messages.get(number.get() - 1).ok_or_else(|| {
+                    user(format!(
+                        "thread {thread} has {} messages; no message #{number}",
+                        messages.len()
+                    ))
+                })?;
+                if let Some(error) = &message.verification_error {
+                    return Err(user(format!("cannot resolve unverified message: {error}")));
+                }
+                Ok(message.message.id)
+            }
+        }
+    }
+    pub async fn resolve_thread(&mut self, reference: MessageRef) -> Result<MessageId> {
+        let id = self.resolve_message(reference).await?;
+        self.refresh().await?;
+        let message: Message = self.http.get(&format!("/messages/{id}")).await?;
+        self.directory.verify_message(&message)?;
+        if message.id != id {
+            return Err(user("message lookup changed the requested ID"));
+        }
+        Ok(message.envelope.thread_id.unwrap_or(id))
+    }
+    pub async fn message_reference(&mut self, id: MessageId) -> Result<MessageReference> {
+        let thread = self.resolve_thread(MessageRef::Id(id)).await?;
+        let message = self
+            .load_thread(thread)
+            .await?
+            .into_iter()
+            .find(|m| m.message.id == id)
+            .ok_or_else(|| user("message missing from its thread"))?;
+        if let Some(error) = &message.verification_error {
+            return Err(user(format!(
+                "cannot reference unverified message: {error}"
+            )));
+        }
+        Ok(message.reference())
+    }
+    pub async fn format_wait_entry(&mut self, event: &WaitEntry) -> Result<String> {
+        match event {
+            WaitEntry::Message(entry) => {
+                let raw: String = self.cache.db.query_row(
+                    "SELECT raw FROM messages WHERE seq=?",
+                    [entry.latest_seq],
+                    |r| r.get(0),
+                )?;
+                let message: Message = serde_json::from_str(&raw)?;
+                let reference = self.message_reference(message.id).await?;
+                let kind = if reference.number == 1 {
+                    "new message"
+                } else {
+                    "reply in thread"
+                };
+                Ok(format!(
+                    "{kind} · thread {} · message {reference} · id {} · {} · {}\n  phi read {}\n",
+                    reference.thread, reference.id, entry.channel, entry.from, reference.thread
+                ))
+            }
+            WaitEntry::Reaction(reaction) => {
+                let reference = self.message_reference(reaction.data.message_id).await?;
+                let kind = match (reaction.data.kind, reaction.data.remove) {
+                    (ReactionKind::Claim, true) => "unclaim",
+                    (ReactionKind::Claim, false) => "claim",
+                    (ReactionKind::Ack, _) => "ack",
+                    (ReactionKind::Up, _) => "up",
+                    (ReactionKind::Down, _) => "down",
+                };
+                let kind = if reaction.data.remove && reaction.data.kind != ReactionKind::Claim {
+                    format!("remove {kind}")
+                } else {
+                    kind.into()
+                };
+                Ok(format!(
+                    "reaction: {kind} by {}/{} · thread {} · message {reference} · id {}\n  phi read {}\n",
+                    self.person_name(reaction.data.person_id),
+                    reaction.data.handle,
+                    reference.thread,
+                    reference.id,
+                    reference.thread
+                ))
+            }
+            WaitEntry::Settings(change) => Ok(format!(
+                "#all · space settings changed: retention_days={} summary_mode={:?}\n",
+                change.data.settings.retention_days, change.data.settings.summary_mode
+            )),
+            WaitEntry::Revocation(revocation) => Ok(format!(
+                "#all · signed revocation: {:?}\n",
+                revocation.data.target
+            )),
+        }
     }
     pub async fn read(&mut self, thread: MessageId, options: ReadOptions) -> Result<ThreadView> {
         self.refresh().await?;
@@ -1328,99 +1456,151 @@ impl Client {
         Ok(())
     }
     pub async fn wait(&mut self, seconds: u16) -> Result<Vec<WaitEntry>> {
+        let batch = self.wait_batch(seconds).await?;
+        self.advance_wait(&batch.cursor, batch.next_after)?;
+        Ok(batch.events)
+    }
+    /// Rendering can require reference lookups; failed rendering must leave the event pending.
+    pub async fn wait_text(&mut self, seconds: u16) -> Result<String> {
+        let batch = self.wait_batch(seconds).await?;
+        let mut output = String::new();
+        for event in &batch.events {
+            output.push_str(&self.format_wait_entry(event).await?);
+        }
+        self.advance_wait(&batch.cursor, batch.next_after)?;
+        Ok(output)
+    }
+    async fn wait_batch(&mut self, seconds: u16) -> Result<WaitBatch> {
         if seconds > 900 {
             return Err(user("wait supports 0–900 seconds"));
         }
         let name = format!("wait/{}", self.handle);
-        let after = self.cache.get::<u64>(&name)?.unwrap_or(0);
-        let response: EventsResponse = self
-            .http
-            .get(&format!(
-                "/spaces/{}/events?after={after}&timeout={seconds}&handle={}",
-                self.profile.space_id, self.handle
-            ))
-            .await?;
-        if response.next_after < after {
-            return Err(user("server rolled back event cursor"));
-        }
-        if response.events.is_empty() {
-            self.advance_wait(&name, response.next_after)?;
-            return Ok(vec![]);
-        }
-        self.refresh().await?;
-        let mut entries = Vec::new();
-        let mut previous = after;
-        for event in response.events {
-            if event.space_id != self.profile.space_id
-                || event.seq <= previous
-                || event.seq > response.next_after
-            {
-                return Err(user("invalid event sequence or scope"));
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(u64::from(seconds));
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            let timeout = (remaining.as_secs() + u64::from(remaining.subsec_nanos() > 0))
+                .min(u64::from(seconds));
+            let after = self.cache.get::<u64>(&name)?.unwrap_or(0);
+            let response: EventsResponse = self
+                .http
+                .get(&format!(
+                    "/spaces/{}/events?after={after}&timeout={timeout}&handle={}",
+                    self.profile.space_id, self.handle
+                ))
+                .await?;
+            if response.next_after < after {
+                return Err(user("server rolled back event cursor"));
             }
-            previous = event.seq;
-            let entry = match event.event {
-                EventData::Message(message) => {
-                    let author = self.directory.verify_message(&message)?;
-                    let content = decrypt_message(
-                        &self.key(message.envelope.channel_id, message.envelope.epoch)?,
-                        &author,
-                        &message.envelope,
-                        &message.signature,
-                    )?;
-                    self.cache.message(&message, &content)?;
-                    WaitEntry::Message(InboxEntry {
-                        id: message.envelope.thread_id.unwrap_or(message.id),
-                        channel: self.channel_name(message.envelope.channel_id),
-                        title: content.title.unwrap_or_else(|| {
-                            format!(
-                                "reply to {}",
-                                message
-                                    .envelope
-                                    .thread_id
-                                    .map(|id| id.to_string())
-                                    .unwrap_or_default()
-                            )
-                        }),
-                        from: format!(
-                            "{}/{}",
-                            self.person_name(message.author_person),
-                            message.envelope.handle
-                        ),
-                        created_at: message.created_at,
-                        summary: content.summary,
-                        mentioned: message.envelope.mentions.iter().any(|m| {
-                            m.person_id == self.profile.person_id
-                                && (self.profile.kind == DeviceKind::Gui
-                                    || m.handle.as_ref().is_none_or(|h| h == &self.handle))
-                        }),
-                        unread: true,
-                        own_agent_activity: message.author_person == self.profile.person_id
-                            && author.certificate().data.kind == DeviceKind::Cli,
-                        reactions: vec![],
-                        latest_seq: message.seq,
-                    })
+            if response.events.is_empty() {
+                self.advance_wait(&name, response.next_after)?;
+                return Ok(WaitBatch {
+                    events: vec![],
+                    cursor: name,
+                    next_after: response.next_after,
+                });
+            }
+            self.refresh().await?;
+            let full_page = response.events.len() == MAX_PAGE_SIZE as usize;
+            let mut entries = Vec::new();
+            let mut previous = after;
+            for event in response.events {
+                if event.space_id != self.profile.space_id
+                    || event.seq <= previous
+                    || event.seq > response.next_after
+                {
+                    return Err(user("invalid event sequence or scope"));
                 }
-                EventData::Reaction(reaction) => {
-                    self.directory.verify_reaction(&reaction)?;
-                    self.save_reaction(&reaction)?;
-                    WaitEntry::Reaction(reaction)
-                }
-                EventData::Settings(change) => {
-                    self.directory.verify_settings(&change)?;
-                    WaitEntry::Settings(change)
-                }
-                EventData::Revocation(revocation) => {
-                    if !self.directory.revocations().contains(&revocation) {
-                        return Err(user("unverified revocation event"));
+                previous = event.seq;
+                let entry = match event.event {
+                    EventData::Message(message) => {
+                        let author = self.directory.verify_message(&message)?;
+                        let content = decrypt_message(
+                            &self.key(message.envelope.channel_id, message.envelope.epoch)?,
+                            &author,
+                            &message.envelope,
+                            &message.signature,
+                        )?;
+                        self.cache.message(&message, &content)?;
+                        if message.author_device == self.profile.device_id
+                            && message.envelope.handle == self.handle
+                        {
+                            continue;
+                        }
+                        WaitEntry::Message(InboxEntry {
+                            id: message.envelope.thread_id.unwrap_or(message.id),
+                            channel: self.channel_name(message.envelope.channel_id),
+                            title: content.title.unwrap_or_else(|| {
+                                format!(
+                                    "reply to {}",
+                                    message
+                                        .envelope
+                                        .thread_id
+                                        .map(|id| id.to_string())
+                                        .unwrap_or_default()
+                                )
+                            }),
+                            from: format!(
+                                "{}/{}",
+                                self.person_name(message.author_person),
+                                message.envelope.handle
+                            ),
+                            created_at: message.created_at,
+                            summary: content.summary,
+                            mentioned: message.envelope.mentions.iter().any(|m| {
+                                m.person_id == self.profile.person_id
+                                    && (self.profile.kind == DeviceKind::Gui
+                                        || m.handle.as_ref().is_none_or(|h| h == &self.handle))
+                            }),
+                            unread: true,
+                            own_agent_activity: message.author_person == self.profile.person_id
+                                && author.certificate().data.kind == DeviceKind::Cli,
+                            reactions: vec![],
+                            latest_seq: message.seq,
+                        })
                     }
-                    WaitEntry::Revocation(revocation)
-                }
-            };
-            entries.push(entry);
+                    EventData::Reaction(reaction) => {
+                        self.directory.verify_reaction(&reaction)?;
+                        self.save_reaction(&reaction)?;
+                        if reaction.data.device_id == self.profile.device_id
+                            && reaction.data.handle == self.handle
+                        {
+                            continue;
+                        }
+                        WaitEntry::Reaction(reaction)
+                    }
+                    EventData::Settings(change) => {
+                        self.directory.verify_settings(&change)?;
+                        WaitEntry::Settings(change)
+                    }
+                    EventData::Revocation(revocation) => {
+                        if !self.directory.revocations().contains(&revocation) {
+                            return Err(user("unverified revocation event"));
+                        }
+                        WaitEntry::Revocation(revocation)
+                    }
+                };
+                entries.push(entry);
+            }
+            // Advance only after the whole response verified. Errors preserve the backlog for inspection.
+            if !entries.is_empty() {
+                return Ok(WaitBatch {
+                    events: entries,
+                    cursor: name,
+                    next_after: response.next_after,
+                });
+            }
+            self.advance_wait(&name, response.next_after)?;
+            if !full_page && std::time::Instant::now() >= deadline {
+                return Ok(WaitBatch {
+                    events: entries,
+                    cursor: name,
+                    next_after: response.next_after,
+                });
+            }
+            // Ignored self-events still consume the cursor; keep waiting for someone else
+            // with the original deadline, rather than returning a false notification.
         }
-        // Advance only after the whole response verified. Errors preserve the backlog for inspection.
-        self.advance_wait(&name, response.next_after)?;
-        Ok(entries)
     }
     fn advance_wait(&self, name: &str, sequence: u64) -> Result<()> {
         self.cache.db.execute("INSERT INTO state VALUES(?,?) ON CONFLICT(name) DO UPDATE SET value=CAST(MAX(CAST(state.value AS INTEGER),CAST(excluded.value AS INTEGER)) AS TEXT)", params![name, sequence.to_string()])?;
@@ -1779,27 +1959,30 @@ impl Client {
                 Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        rows.into_iter()
-            .map(|(raw, _)| {
-                let message: Message = serde_json::from_str(&raw)?;
-                let author = self.directory.verify_message(&message)?;
-                let content = decrypt_message(
-                    &self.key(message.envelope.channel_id, message.envelope.epoch)?,
-                    &author,
-                    &message.envelope,
-                    &message.signature,
-                )?;
-                Ok(DecodedMessage {
-                    message,
-                    content,
-                    attachments: vec![],
-                    reactions: vec![],
-                    author_kind: author.certificate().data.kind,
-                    verification_error: None,
-                })
-            })
-            .collect()
+        drop(stmt);
+        let mut result = Vec::new();
+        let mut threads = BTreeMap::new();
+        for (raw, _) in rows {
+            let message: Message = serde_json::from_str(&raw)?;
+            let root = message.envelope.thread_id.unwrap_or(message.id);
+            if let std::collections::btree_map::Entry::Vacant(entry) = threads.entry(root) {
+                entry.insert(
+                    self.sync_channel(message.envelope.channel_id, Some(root))
+                        .await?,
+                );
+            }
+            let decoded = threads
+                .get(&root)
+                .and_then(|messages| messages.iter().find(|m| m.message.id == message.id))
+                .ok_or_else(|| user("cached message missing from its thread"))?;
+            if let Some(error) = &decoded.verification_error {
+                return Err(user(format!("cannot search unverified message: {error}")));
+            }
+            result.push(decoded.clone());
+        }
+        Ok(result)
     }
+
     pub async fn who(&mut self) -> Result<String> {
         self.refresh().await?;
         let mut output = String::new();
@@ -1990,7 +2173,7 @@ fn reject_links(body: &str) -> Result<()> {
     }
     Ok(())
 }
-fn mime(name: &str) -> &'static str {
+fn mime(name: &str, bytes: &[u8]) -> &'static str {
     match name
         .rsplit('.')
         .next()
@@ -2003,8 +2186,19 @@ fn mime(name: &str) -> &'static str {
         "gif" => "image/gif",
         "webp" => "image/webp",
         "pdf" => "application/pdf",
-        "txt" | "md" => "text/plain",
+        "py" | "pyw" | "pyi" => "text/x-python",
+        "txt" | "md" | "toml" | "rs" | "ts" | "tsx" | "js" | "jsx" | "yaml" | "yml" | "sh"
+        | "css" | "csv" | "log" | "ini" | "cfg" => "text/plain",
+        "html" | "htm" => "text/html",
+        "svg" => "image/svg+xml",
         "json" => "application/json",
+        _ if std::str::from_utf8(bytes).is_ok_and(|text| {
+            text.chars()
+                .all(|c| !c.is_control() || matches!(c, '\n' | '\r' | '\t'))
+        }) =>
+        {
+            "text/plain"
+        }
         _ => "application/octet-stream",
     }
 }

@@ -1,6 +1,6 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use phi_core::*;
-use phi_proto::{DeviceId, MessageId, ReactionKind, RevocationTarget};
+use phi_proto::{DeviceId, ReactionKind, RevocationTarget};
 use std::{
     io::{self, Read},
     path::PathBuf,
@@ -17,7 +17,7 @@ const SKILL: &str = include_str!("../../../skill/SKILL.md");
 struct Cli {
     #[arg(long = "as", global = true)]
     handle: Option<String>,
-    #[arg(long, global = true)]
+    #[arg(long, global = true, allow_hyphen_values = true)]
     space: Option<String>,
     #[command(subcommand)]
     command: Command,
@@ -42,13 +42,15 @@ enum Command {
         command: DeviceCommand,
     },
     Init {
+        #[arg(allow_hyphen_values = true)]
         space: String,
     },
     Who,
     Fetch,
     Inbox,
     Read {
-        thread: MessageId,
+        #[arg(allow_hyphen_values = true)]
+        thread: MessageRef,
         #[arg(long, conflicts_with = "last")]
         all: bool,
         #[arg(long)]
@@ -61,16 +63,19 @@ enum Command {
         message: MessageArgs,
     },
     Reply {
-        thread: MessageId,
+        #[arg(allow_hyphen_values = true)]
+        thread: MessageRef,
         #[command(flatten)]
         message: MessageArgs,
     },
     React {
-        message: MessageId,
+        #[arg(allow_hyphen_values = true)]
+        message: MessageRef,
         kind: ReactionArg,
     },
     Unread {
-        thread: MessageId,
+        #[arg(allow_hyphen_values = true)]
+        thread: MessageRef,
     },
     Wait {
         #[arg(default_value_t = 600)]
@@ -133,7 +138,10 @@ enum SpaceCommand {
 enum DeviceCommand {
     Add,
     List,
-    Revoke { id: DeviceId },
+    Revoke {
+        #[arg(allow_hyphen_values = true)]
+        id: DeviceId,
+    },
 }
 #[derive(Subcommand)]
 enum GroupCommand {
@@ -197,7 +205,10 @@ async fn run(cli: Cli) -> Result<()> {
                 std::env::var("PHI_ADMIN_TOKEN").ok(),
             )
             .await?;
-            println!("{}", client.profile.space_id);
+            println!(
+                "created space {} ({})\nnext: phi init {}\n      phi invite",
+                client.profile.name, client.profile.space_id, client.profile.name
+            );
         }
         Command::Join { link, name } => {
             let client = Client::join(store, &link, &name).await?;
@@ -283,19 +294,32 @@ async fn run(cli: Cli) -> Result<()> {
                         print!("{}", entry.text(&client.names()));
                     }
                 }
-                Command::Read { thread, all, last } => print!(
-                    "{}",
-                    client.read(thread, ReadOptions { all, last }).await?.text()
-                ),
+                Command::Read { thread, all, last } => {
+                    let thread = client.resolve_thread(thread).await?;
+                    print!(
+                        "{}",
+                        client.read(thread, ReadOptions { all, last }).await?.text()
+                    );
+                }
                 Command::Send { to, title, message } => {
                     let message = client.send(&to, &title, message.options()?).await?;
-                    println!("{} · #{}", message.id, message.seq);
+                    let reference = client.message_reference(message.id).await?;
+                    println!(
+                        "thread {} · message {reference} · id {}",
+                        reference.thread, reference.id
+                    );
                 }
                 Command::Reply { thread, message } => {
+                    let thread = client.resolve_thread(thread).await?;
                     let message = client.reply(thread, message.options()?).await?;
-                    println!("{} · #{}", message.id, message.seq);
+                    let reference = client.message_reference(message.id).await?;
+                    println!(
+                        "thread {} · message {reference} · id {}",
+                        reference.thread, reference.id
+                    );
                 }
                 Command::React { message, kind } => {
+                    let message = client.resolve_message(message).await?;
                     let (kind, remove) = match kind {
                         ReactionArg::Up => (ReactionKind::Up, false),
                         ReactionArg::Down => (ReactionKind::Down, false),
@@ -307,30 +331,11 @@ async fn run(cli: Cli) -> Result<()> {
                     println!("reaction recorded");
                 }
                 Command::Unread { thread } => {
+                    let thread = client.resolve_thread(thread).await?;
                     client.unread(thread).await?;
                     println!("marked unread");
                 }
-                Command::Wait { seconds } => {
-                    for event in client.wait(seconds).await? {
-                        match event {
-                            WaitEntry::Message(entry) => print!("{}", entry.text(&client.names())),
-                            WaitEntry::Reaction(reaction) => println!(
-                                "{} · {}{}",
-                                reaction.data.message_id,
-                                if reaction.data.remove { "removed " } else { "" },
-                                format_reactions(std::slice::from_ref(&reaction), &client.names())
-                            ),
-                            WaitEntry::Settings(change) => println!(
-                                "#all · space settings changed: retention_days={} summary_mode={:?}",
-                                change.data.settings.retention_days,
-                                change.data.settings.summary_mode
-                            ),
-                            WaitEntry::Revocation(revocation) => {
-                                println!("#all · signed revocation: {:?}", revocation.data.target)
-                            }
-                        }
-                    }
-                }
+                Command::Wait { seconds } => print!("{}", client.wait_text(seconds).await?),
                 Command::Group { command } => match command {
                     GroupCommand::Create { name, persons } => {
                         println!("{}", client.group_create(&name, &persons).await?);
@@ -452,5 +457,31 @@ mod tests {
         }
         assert!(Cli::try_parse_from(["phi", "read", id, "--all", "--last", "2"]).is_err());
         assert!(Cli::try_parse_from(["phi", "join", "link"]).is_err());
+        for command in ["read", "reply", "react", "unread"] {
+            let reference = format!("{id}#2");
+            let mut argv = vec!["phi", command, reference.as_str()];
+            if command == "react" {
+                argv.push("ack");
+            }
+            assert!(Cli::try_parse_from(argv).is_ok());
+        }
+        assert!(Cli::try_parse_from(["phi", "react", &format!("{id}#0"), "ack"]).is_err());
+        assert!(Cli::try_parse_from(["phi", "space", "create", "game"]).is_err());
+        let id = "-AAAAAAAAAAAAAAAAAAAAA";
+        let reference = format!("{id}#2");
+        for args in [
+            vec!["init", id],
+            vec!["read", id, "--all"],
+            vec!["read", "--all", id],
+            vec!["react", &reference, "ack"],
+            vec!["reply", &reference, "body"],
+            vec!["unread", &reference],
+            vec!["device", "revoke", id],
+            vec!["--space", id, "who"],
+        ] {
+            let mut argv = vec!["phi"];
+            argv.extend(args);
+            assert!(Cli::try_parse_from(argv.clone()).is_ok(), "{argv:?}");
+        }
     }
 }

@@ -78,6 +78,16 @@ async fn create_invite_join_attachment_fetch_read_reply() -> Result<()> {
     std::fs::write(&path, b"image bytes")?;
     let mut message = options("Please review repo foo at abc123.");
     message.files.push(path);
+    for (name, bytes) in [
+        ("renderer.PY", b"print('hello')\n".as_slice()),
+        ("settings.toml", b"enabled = true\n".as_slice()),
+        ("notes.custom", b"plain text\n".as_slice()),
+        ("opaque.bin", b"\0\xff".as_slice()),
+    ] {
+        let path = f.dir.path().join(name);
+        std::fs::write(&path, bytes)?;
+        message.files.push(path);
+    }
     let root = alice.send("@bob/cli", "Review PR", message).await?;
     ensure!(bob.fetch().await?.contains("1 unread threads"));
     ensure!(bob.fetch().await?.contains("1 mention"));
@@ -86,6 +96,23 @@ async fn create_invite_join_attachment_fetch_read_reply() -> Result<()> {
     let view = bob.read(root.id, ReadOptions::default()).await?;
     ensure!(view.text().contains("UNTRUSTED") && view.text().contains("alice/cli (agent)"));
     ensure!(std::fs::read(&view.messages[0].attachments[0])? == b"image bytes");
+    let mimes: Vec<_> = view.messages[0]
+        .content
+        .attachments
+        .iter()
+        .map(|a| a.mime.as_str())
+        .collect();
+    ensure!(
+        mimes
+            == [
+                "image/png",
+                "text/x-python",
+                "text/plain",
+                "text/plain",
+                "application/octet-stream"
+            ]
+    );
+    ensure!(view.messages[0].reference().to_string() == format!("{}#1", root.id));
     ensure!(bob.fetch().await?.is_empty());
     let reply = bob.reply(root.id, options("Looks good")).await?;
     let view = alice
@@ -99,6 +126,30 @@ async fn create_invite_join_attachment_fetch_read_reply() -> Result<()> {
         .await?;
     ensure!(view.messages.len() == 2 && view.summary_covers_seq == Some(root.seq));
     ensure!(view.messages[1].message.id == reply.id && view.newer_messages == 0);
+    ensure!(view.text().contains("summary (as of #2; up to date)"));
+    let own = format_message(&view.messages[0], &alice.names());
+    ensure!(own.contains("(you · agent)") && !own.contains("UNTRUSTED"));
+    let foreign = format_message(&view.messages[1], &alice.names());
+    ensure!(foreign.contains("UNTRUSTED") && foreign.contains(&reply.id.to_string()));
+    let reference: MessageRef = format!("{}#2", root.id).parse()?;
+    ensure!(alice.resolve_message(reference).await? == reply.id);
+    ensure!(alice.resolve_thread(reference).await? == root.id);
+    ensure!(alice.resolve_thread(MessageRef::Id(reply.id)).await? == root.id);
+    let target = alice.resolve_message(reference).await?;
+    alice.react(target, ReactionKind::Ack, false).await?;
+    ensure!(
+        alice
+            .resolve_message(format!("{}#999", root.id).parse()?)
+            .await
+            .is_err()
+    );
+    for suffix in ["0", "-1", "abc", "1#2"] {
+        ensure!(
+            format!("{}#{suffix}", root.id)
+                .parse::<MessageRef>()
+                .is_err()
+        );
+    }
     Ok(())
 }
 #[tokio::test]
@@ -151,13 +202,29 @@ async fn wait_backlog_wakes_on_reply_and_keeps_per_handle_cursor() -> Result<()>
     let f = Fixture::new().await?;
     let (mut alice, mut bob) = f.pair().await?;
     let root = alice.send("@bob", "Task", options("hello")).await?;
+    ensure!(alice.wait(0).await?.is_empty());
+    let events = bob.wait(0).await?;
+    ensure!(events.iter().any(|e| matches!(e, WaitEntry::Message(_))));
+    let output = bob.format_wait_entry(&events[0]).await?;
     ensure!(
-        bob.wait(0)
-            .await?
-            .iter()
-            .any(|e| matches!(e, WaitEntry::Message(_)))
+        output.starts_with("new message")
+            && output.contains(&format!("{}#1", root.id))
+            && output.contains(&format!("phi read {}", root.id))
     );
     ensure!(bob.wait(0).await?.is_empty());
+    bob.react(root.id, ReactionKind::Claim, false).await?;
+    let own = bob.reply(root.id, options("my reply")).await?;
+    let events = alice.wait(0).await?;
+    let mut output = String::new();
+    for event in &events {
+        output.push_str(&alice.format_wait_entry(event).await?);
+    }
+    ensure!(
+        output.contains("reaction: claim by bob/cli")
+            && output.contains("reply in thread")
+            && output.contains(&format!("{}#2", root.id))
+            && output.contains(&own.id.to_string())
+    );
     let mut parallel = Client::open(f.store("bob"), bob.profile.clone(), None).await?;
     let second_waiter = parallel.wait(3);
     let waiter = bob.wait(3);
@@ -166,18 +233,34 @@ async fn wait_backlog_wakes_on_reply_and_keeps_per_handle_cursor() -> Result<()>
         alice.reply(root.id, options("new reply")).await
     };
     let (events, second_events, message) = tokio::join!(waiter, second_waiter, sender);
-    ensure!(
-        second_events?
-            .iter()
-            .any(|e| matches!(e, WaitEntry::Message(_)))
-    );
-    message?;
-    ensure!(events?.iter().any(|e| matches!(e, WaitEntry::Message(_))));
+    let message = message?;
+    for entries in [events?, second_events?] {
+        ensure!(entries.len() == 1);
+        let output = bob.format_wait_entry(&entries[0]).await?;
+        ensure!(
+            output.contains(&format!("{}#3", root.id))
+                && output.contains(&message.id.to_string())
+                && !output.contains(&own.id.to_string())
+        );
+    }
     ensure!(bob.wait(0).await?.is_empty());
     let mut second = Client::open(f.store("bob"), bob.profile.clone(), Some("second")).await?;
-    ensure!(!second.wait(0).await?.is_empty());
+    let entries = second.wait(0).await?;
+    ensure!(
+        entries
+            .iter()
+            .any(|e| matches!(e, WaitEntry::Message(entry) if entry.latest_seq == own.seq))
+    );
     let mut reopened = Client::open(f.store("bob"), bob.profile.clone(), None).await?;
     ensure!(reopened.wait(0).await?.is_empty());
+    // An own-only backlog consumes the original timeout instead of waking the session.
+    bob.react(message.id, ReactionKind::Ack, false).await?;
+    let started = std::time::Instant::now();
+    ensure!(bob.wait(1).await?.is_empty());
+    ensure!(started.elapsed() >= Duration::from_millis(900));
+    let ack = alice.wait_text(0).await?;
+    ensure!(ack.contains("reaction: ack by bob/cli") && ack.contains(&format!("{}#3", root.id)));
+    ensure!(alice.wait_text(0).await?.is_empty());
     Ok(())
 }
 #[tokio::test]
@@ -256,6 +339,11 @@ async fn read_composes_summary_coverage_tail_and_all() -> Result<()> {
     }
     let view = alice.read(root.id, ReadOptions::default()).await?;
     ensure!(view.messages.len() == 5 && view.newer_messages == 2);
+    ensure!(view.summary_number == Some(8) && view.messages[0].number == 6);
+    ensure!(
+        view.text()
+            .contains("summary (as of #8; 2 newer messages below)")
+    );
     let view = alice
         .read(
             root.id,
@@ -265,7 +353,9 @@ async fn read_composes_summary_coverage_tail_and_all() -> Result<()> {
             },
         )
         .await?;
-    ensure!(view.messages.len() == 2);
+    ensure!(
+        view.messages.len() == 2 && view.messages[0].number == 9 && view.messages[1].number == 10
+    );
     let view = alice
         .read(
             root.id,
@@ -289,6 +379,15 @@ async fn enrollment_history_revoke_device_rotates_and_invalidates_token() -> Res
         laptop.profile.person_id == alice.profile.person_id
             && laptop.profile.display_name == "alice"
     );
+    ensure!(
+        laptop
+            .wait(0)
+            .await?
+            .iter()
+            .any(|e| matches!(e, WaitEntry::Message(_)))
+    );
+    let own_history = laptop.read(root.id, ReadOptions::default()).await?.text();
+    ensure!(own_history.contains("your other session") && !own_history.contains("UNTRUSTED"));
     ensure!(
         laptop
             .read(root.id, ReadOptions::default())
@@ -456,7 +555,18 @@ async fn names_slug_collisions_self_channel_and_secret_link_refusal() -> Result<
     let mut other_session =
         Client::open(f.store("alice"), alice.profile.clone(), Some("second")).await?;
     ensure!(!other_session.fetch().await?.is_empty());
-    other_session.read(root.id, ReadOptions::default()).await?;
+    ensure!(alice.wait(0).await?.is_empty());
+    ensure!(
+        other_session
+            .wait(0)
+            .await?
+            .iter()
+            .any(|e| matches!(e, WaitEntry::Message(_)))
+    );
+    let own_view = other_session.read(root.id, ReadOptions::default()).await?;
+    ensure!(
+        own_view.text().contains("your other session") && !own_view.text().contains("UNTRUSTED")
+    );
     ensure!(alice.counts().await?.unread_threads == 0);
     ensure!(
         alice.read(root.id, ReadOptions::default()).await?.messages[0]
@@ -588,12 +698,14 @@ async fn persisted_trust_rejects_omitted_certificate_and_roster_rollback() -> Re
 #[tokio::test]
 async fn tampered_message_attachment_and_sequence_are_rejected() -> Result<()> {
     let f = Fixture::new().await?;
-    let mut alice = f.alice().await?;
+    let (mut alice, mut bob) = f.pair().await?;
     let path: PathBuf = f.dir.path().join("file.txt");
     std::fs::write(&path, b"safe")?;
     let mut opts = options("signed body");
     opts.files.push(path);
     let root = alice.send("#all", "Signed", opts).await?;
+    bob.wait(0).await?;
+    alice.react(root.id, ReactionKind::Ack, false).await?;
     let connection = rusqlite::Connection::open(f.dir.path().join("server/phi.db"))?;
     let original = serde_json::to_string(&root)?;
     let mut tampered = root.clone();
@@ -610,10 +722,18 @@ async fn tampered_message_attachment_and_sequence_are_rejected() -> Result<()> {
         rusqlite::params![serde_json::to_string(&tampered)?, root.id.to_string()],
     )?;
     ensure!(alice.read(root.id, ReadOptions::default()).await.is_err());
+    // The event verifies, but rendering its target fails. The CLI must retry it after repair.
+    ensure!(bob.wait_text(0).await.is_err());
     connection.execute(
         "UPDATE messages SET json=? WHERE id=?",
         rusqlite::params![original, root.id.to_string()],
     )?;
+    ensure!(
+        bob.wait_text(0)
+            .await?
+            .contains("reaction: ack by alice/cli")
+    );
+    ensure!(bob.wait_text(0).await?.is_empty());
     let paths: Vec<_> = std::fs::read_dir(f.dir.path().join("server/blobs"))?
         .collect::<std::io::Result<Vec<_>>>()?;
     ensure!(!paths.is_empty());

@@ -1,10 +1,12 @@
 //! Shared client policy, persistence and cryptographic verification for CLI and GUI.
 mod client;
+mod reference;
 mod storage;
 mod transport;
 mod view;
 pub use client::*;
 pub use phi_proto::PROTOCOL_MAJOR;
+pub use reference::*;
 pub use storage::*;
 pub use transport::Error;
 pub use view::*;

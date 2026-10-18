@@ -3299,9 +3299,11 @@ dependencies = [
 name = "phi-cli"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "clap",
  "phi-core",
  "phi-proto",
+ "phi-server",
  "serde_json",
  "tempfile",
  "tokio",
