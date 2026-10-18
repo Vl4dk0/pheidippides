@@ -125,6 +125,11 @@ impl Validate for GrantSealedKey {
 }
 impl Validate for MessageEnvelope {
     fn validate(&self) -> Result<(), ValidationError> {
+        check(
+            self.thread_id.is_some() || self.summary_covers_seq.is_none_or(|seq| seq == 0),
+            "summary_covers_seq",
+            "a root can cover only zero existing sequences",
+        )?;
         encrypted(&self.ciphertext, MAX_CIPHERTEXT_BYTES)?;
         check(
             self.mentions.len() <= MAX_MENTIONS,
@@ -152,6 +157,8 @@ impl Validate for Attachment {
             "attachment.name",
             "expected safe filename of 1..=255 bytes",
         )?;
+        single_line(&self.name, "attachment.name")?;
+        single_line(&self.mime, "attachment.mime")?;
         check(
             !self.mime.is_empty()
                 && self.mime.len() <= 255
@@ -174,6 +181,13 @@ impl MessageContent {
 }
 impl Validate for MessageContent {
     fn validate(&self) -> Result<(), ValidationError> {
+        if let Some(title) = &self.title {
+            single_line(title, "title")?;
+        }
+        if let Some(summary) = &self.summary {
+            single_line(summary, "summary")?;
+        }
+        single_line(&self.display_name, "display_name")?;
         check(
             self.body.len() <= MAX_CIPHERTEXT_BYTES,
             "body",
@@ -319,7 +333,20 @@ impl Validate for CreateChannelRequest {
             "members",
             "dm requires two persons; self requires one",
         )?;
+        self.membership.validate()?;
+        let signed = &self.membership.data;
+        check(
+            signed.previous.is_none()
+                && signed.space_id == self.space_id
+                && signed.channel_id == self.id
+                && signed.kind == self.kind
+                && signed.epoch == 0
+                && signed.members == self.members,
+            "membership",
+            "signed channel fields mismatch",
+        )?;
         PutKeysRequest {
+            membership: None,
             epoch: 0,
             wrapped_keys: self.wrapped_keys.clone(),
         }
@@ -334,11 +361,26 @@ impl Validate for CreateChannelRequest {
 impl Validate for UpdateChannelRequest {
     fn validate(&self) -> Result<(), ValidationError> {
         self.meta.validate()?;
+        self.membership.validate()?;
+        check(
+            self.membership.data.members == self.members
+                && self.membership.data.epoch == self.meta_epoch,
+            "membership",
+            "signed channel fields mismatch",
+        )?;
         members(&self.members)
     }
 }
 impl Validate for PutKeysRequest {
     fn validate(&self) -> Result<(), ValidationError> {
+        if let Some(membership) = &self.membership {
+            membership.validate()?;
+            check(
+                membership.data.epoch == self.epoch,
+                "membership.epoch",
+                "signed epoch mismatch",
+            )?;
+        }
         check(
             !self.wrapped_keys.is_empty() && self.wrapped_keys.len() <= MAX_DEVICES,
             "wrapped_keys",
@@ -365,6 +407,12 @@ impl Validate for PutKeysRequest {
 impl Validate for SendMessageRequest {
     fn validate(&self) -> Result<(), ValidationError> {
         self.envelope.validate()?;
+        check(
+            self.id == self.envelope.id
+                && self.has_summary == self.envelope.summary_covers_seq.is_some(),
+            "envelope",
+            "signed message id or summary claim mismatch",
+        )?;
         check(
             self.blob_ids.len() <= MAX_ATTACHMENTS
                 && self.blob_ids.iter().collect::<BTreeSet<_>>().len() == self.blob_ids.len(),
@@ -460,4 +508,22 @@ fn reject_unknown(
         _ => {}
     }
     Ok(())
+}
+
+fn single_line(text: &str, field: &str) -> Result<(), ValidationError> {
+    check(!text.chars().any(|c| c.is_control() || matches!(c, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{2028}' | '\u{2029}')), field, "control characters, line separators and bidi controls are forbidden")
+}
+impl Validate for ChannelMembership {
+    fn validate(&self) -> Result<(), ValidationError> {
+        members(&self.data.members)?;
+        check(
+            match self.data.kind {
+                ChannelKind::Dm => self.data.members.len() == 2,
+                ChannelKind::SelfChannel => self.data.members.len() == 1,
+                _ => true,
+            },
+            "membership.members",
+            "dm requires two persons; self requires one",
+        )
+    }
 }

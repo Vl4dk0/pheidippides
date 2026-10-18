@@ -64,6 +64,8 @@ pub type CreateRevocationResponse = Revocation;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateChannelRequest {
+    #[serde(deserialize_with = "crate::validation::strict")]
+    pub membership: ChannelMembership,
     pub id: ChannelId,
     pub space_id: SpaceId,
     pub kind: ChannelKind,
@@ -82,6 +84,8 @@ pub struct ListChannelsResponse {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateChannelRequest {
+    #[serde(deserialize_with = "crate::validation::strict")]
+    pub membership: ChannelMembership,
     pub meta_epoch: Epoch,
     #[serde(deserialize_with = "crate::validation::strict")]
     pub meta: Ciphertext,
@@ -91,6 +95,9 @@ pub type UpdateChannelResponse = Channel;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PutKeysRequest {
+    /// Required for rotations; historical/self rewraps do not alter membership.
+    #[serde(default, deserialize_with = "crate::validation::strict")]
+    pub membership: Option<ChannelMembership>,
     pub epoch: Epoch,
     #[serde(deserialize_with = "crate::validation::strict")]
     pub wrapped_keys: Vec<WrappedKey>,

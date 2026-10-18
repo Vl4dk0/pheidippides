@@ -66,7 +66,7 @@ impl Db {
             grants: vec![],
             revocations: vec![],
         };
-        phi_crypto::verify_trust_bundle(root.data.space_id, &bundle, now())?;
+        let verified = phi_crypto::verify_trust_bundle(root.data.space_id, &bundle, now(), None)?;
         let space = Space {
             id: root.data.space_id,
             root_cert: root.clone(),
@@ -78,6 +78,7 @@ impl Db {
                 "INSERT INTO spaces(id,json) VALUES(?,?)",
                 params![space.id.to_string(), json(&space)?],
             )?;
+            db.pin_trust(space.id, &verified)?;
             let token = db.add_device(root.clone())?;
             let auth = Auth { cert: root.clone() };
             db.create_channel(&auth, request.all_channel, true)?;
@@ -104,12 +105,24 @@ impl Db {
                 "invalid grant issuer or validity interval",
             ));
         }
+        if d.kind == GrantKind::Enroll
+            && d.device_kind == DeviceKind::Gui
+            && a.cert.data.kind != DeviceKind::Gui
+        {
+            return Err(ApiError::forbidden());
+        }
         self.verify(a, &phi_crypto::grant_signing_bytes(d)?, &r.record.signature)?;
         let existing: bool = self.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM persons WHERE id=?)",
             [d.person_id.to_string()],
             |r| r.get(0),
         )?;
+        if d.kind == GrantKind::Invite {
+            let reserved: bool = self.conn.query_row("SELECT EXISTS(SELECT 1 FROM grants WHERE space_id=? AND json_extract(json,'$.record.data.kind')='invite' AND json_extract(json,'$.record.data.person_id')=?)", params![a.sid().to_string(), d.person_id.to_string()], |row| row.get(0))?;
+            if reserved {
+                return Err(ApiError::conflict("invite person already reserved"));
+            }
+        }
         match d.kind {
             GrantKind::Invite if existing => {
                 return Err(ApiError::conflict("invite person already exists"));
@@ -182,13 +195,17 @@ impl Db {
             let cert = &r.certificate;
             if cert.data.space_id != data.space_id
                 || cert.data.person_id != data.person_id
+                || cert.data.kind != data.device_kind
                 || cert.data.issuer != (CertificateIssuer::Grant { grant_id: id })
             {
                 return Err(ApiError::invalid("certificate grant identity mismatch"));
             }
+            let pinned = db.trust_pins(data.space_id)?;
             let mut directory = db.directory(data.space_id)?;
             directory.certificates.push(cert.clone());
-            phi_crypto::verify_trust_bundle(data.space_id, &directory, now())?;
+            let verified =
+                phi_crypto::verify_trust_bundle(data.space_id, &directory, now(), Some(&pinned))?;
+            db.pin_trust(data.space_id, &verified)?;
             let token = db.add_device(cert.clone())?;
             if data.kind == GrantKind::Invite {
                 let mut all: Channel = db.one(
@@ -232,9 +249,11 @@ impl Db {
             &rev.signature,
         )?;
         self.transaction(|db| {
+            let pinned = db.trust_pins(a.sid())?;
             let mut bundle = db.directory(a.sid())?;
             bundle.revocations.push(rev.clone());
-            phi_crypto::verify_trust_bundle(a.sid(), &bundle, now())?;
+            let verified = phi_crypto::verify_trust_bundle(a.sid(), &bundle, now(), Some(&pinned))?;
+            db.pin_trust(a.sid(), &verified)?;
             let devices: Vec<Device> = match rev.data.target {
                 RevocationTarget::Device { device_id } => vec![db.one(
                     "SELECT json FROM devices WHERE id=? AND space_id=?",

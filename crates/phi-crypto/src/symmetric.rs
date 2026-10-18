@@ -1,6 +1,6 @@
 use crate::{
-    CryptoError, DeviceKeys, Entropy, GrantKeys, VerifiedDevice, keys::derive, random,
-    signing_bytes, verify_signature,
+    CryptoError, DeviceKeys, Entropy, GrantKeys, VerifiedDevice, VerifiedMembership, keys::derive,
+    random, signing_bytes, verify_signature,
 };
 use chacha20poly1305::{
     XChaCha20Poly1305, XNonce,
@@ -182,9 +182,20 @@ fn wrap_context(
 pub fn wrap_channel_key(
     key: &ChannelKey,
     recipient: &VerifiedDevice,
+    membership: &VerifiedMembership,
     entropy: &mut impl Entropy,
 ) -> Result<WrappedKey, CryptoError> {
     let cert = recipient.certificate();
+    if recipient.context != membership.context
+        || membership.data.space_id != key.space_id
+        || membership.data.channel_id != key.channel_id
+        || membership.data.epoch != key.epoch
+        || !membership.members.contains(&cert.data.person_id)
+    {
+        return Err(CryptoError::Trust(
+            "key recipient outside authenticated channel membership",
+        ));
+    }
     if cert.data.space_id != key.space_id {
         return Err(CryptoError::Trust("recipient belongs to another space"));
     }
@@ -263,6 +274,8 @@ pub fn unseal_grant_key(
 
 #[derive(Clone, Debug)]
 pub struct MessageMetadata {
+    pub id: MessageId,
+    pub summary_covers_seq: Option<Seq>,
     pub thread_id: Option<MessageId>,
     pub handle: Handle,
     pub mentions: Vec<Mention>,
@@ -291,6 +304,8 @@ pub fn message_signing_bytes(envelope: &MessageEnvelope) -> Result<Vec<u8>, Cryp
     signing_bytes(
         "phi message v1",
         &(
+            envelope.id,
+            envelope.summary_covers_seq,
             envelope.space_id,
             envelope.channel_id,
             envelope.thread_id,
@@ -325,6 +340,13 @@ pub fn encrypt_message(
     entropy: &mut impl Entropy,
 ) -> Result<(MessageEnvelope, Signature), CryptoError> {
     content.validate()?;
+    if metadata.summary_covers_seq.is_some() != content.summary.is_some()
+        || metadata.thread_id.is_none() && metadata.summary_covers_seq.is_some_and(|seq| seq != 0)
+    {
+        return Err(CryptoError::Trust(
+            "summary content and signed coverage disagree",
+        ));
+    }
     if metadata.thread_id.is_some() && content.title.is_some()
         || metadata.thread_id.is_none() && content.title.is_none()
     {
@@ -348,6 +370,8 @@ pub fn encrypt_message(
     }
     let encrypted = encrypt(&channel.key, &plaintext, &aad, entropy)?;
     let envelope = MessageEnvelope {
+        id: metadata.id,
+        summary_covers_seq: metadata.summary_covers_seq,
         space_id: channel.space_id,
         channel_id: channel.channel_id,
         thread_id: metadata.thread_id,
@@ -389,6 +413,13 @@ pub fn decrypt_message(
     )?;
     let content: MessageContent = serde_json::from_slice(&plaintext)?;
     content.validate()?;
+    if content.summary.is_some() != envelope.summary_covers_seq.is_some()
+        || envelope.thread_id.is_none() && envelope.summary_covers_seq.is_some_and(|seq| seq != 0)
+    {
+        return Err(CryptoError::Trust(
+            "summary content and signed coverage disagree",
+        ));
+    }
     if envelope.thread_id.is_some() && content.title.is_some()
         || envelope.thread_id.is_none() && content.title.is_none()
     {

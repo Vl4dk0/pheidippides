@@ -158,11 +158,25 @@ same space. Clients remain the real verifiers: verify the complete directory,
 message signatures, revocations, and encrypted content independently. The host
 cannot detect rolled-back/omitted records or truthful summaries.
 
-Existing M1 edge case: `phi-crypto::verify_trust_bundle` treats certificate
-creation at exactly the revocation's Unix second as issuance after revocation.
-A legitimate same-second enroll/revoke can therefore be rejected by chain
-validation. Crypto semantics are unchanged in M2; review timestamp tie handling
-before relying on rapid enrollment/revocation flows.
+The server persists opaque cryptographically verified trust pins in SQLite and
+updates them in the same transaction as enrollment/revocation. Verification uses
+those prior pins, so rapid same-second enrollment/removal works without trusting
+backdated issuance. Invite person IDs are reserved uniquely, including unused
+invites. GUI enroll grants require GUI issuers; certificates must match the signed
+grant device kind.
+
+Channel create/update/rotation verify signed membership scope, issuer, epoch and
+member set. Updates/rotations extend the stored roster signature and preserve its
+history; stale/forked updates return 409. #all additions are backed by signed invite
+origins. Client-chosen message IDs and summary coverage are now in the signed
+envelope. The server requires projected fields to match, rejects coverage beyond
+existing thread history, and copies coverage without replacing it with the new
+server seq. Clients must verify/persist both directory and channel pins as described
+in phi-crypto/README.md; the host is not the client's source of trusted pins.
+
+The old prototype's signed JSON lacks these proofs and cannot be silently migrated
+by the server. Development data needs legitimate re-signing or recreation; no
+legacy/unsigned verification path is provided.
 
 Known metadata leak: handles, mentions, reaction kinds, timestamps, ciphertext
 sizes, membership/routing graph, attachment IDs/thread associations, device kinds

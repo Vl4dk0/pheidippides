@@ -34,3 +34,6 @@ CREATE INDEX IF NOT EXISTS messages_thread ON messages(thread_id,seq);
 CREATE INDEX IF NOT EXISTS cursors_thread ON cursors(thread_id);
 CREATE INDEX IF NOT EXISTS events_thread ON events(thread_id);
 CREATE INDEX IF NOT EXISTS blob_refs_thread ON blob_refs(thread_id);
+
+CREATE TABLE IF NOT EXISTS trust_pins(space_id TEXT PRIMARY KEY REFERENCES spaces(id), json TEXT NOT NULL);
+CREATE UNIQUE INDEX IF NOT EXISTS one_invite_person ON grants(space_id,json_extract(json,'$.record.data.person_id')) WHERE json_extract(json,'$.record.data.kind')='invite';

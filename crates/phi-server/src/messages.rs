@@ -47,6 +47,18 @@ impl Db {
                 )?;
                 r.id
             };
+            let latest: u64 = db.conn.query_row(
+                "SELECT COALESCE(MAX(seq),0) FROM messages WHERE thread_id=?",
+                [thread.to_string()],
+                |row| row.get(0),
+            )?;
+            if e.summary_covers_seq
+                .is_some_and(|coverage| coverage > latest)
+            {
+                return Err(ApiError::invalid(
+                    "summary coverage exceeds existing thread history",
+                ));
+            }
             let seq = db.seq(a.sid())?;
             let message = Message {
                 id: r.id,
@@ -57,7 +69,7 @@ impl Db {
                 seq,
                 created_at: now(),
                 has_summary: r.has_summary,
-                summary_covers_seq: r.has_summary.then_some(seq),
+                summary_covers_seq: e.summary_covers_seq,
             };
             db.conn.execute(
                 "INSERT INTO messages VALUES(?,?,?,?,?,?,?)",

@@ -46,20 +46,34 @@ ambiguity. Mention lists preserve order and encode each mention as
 
 | Domain | Ordered fields |
 |---|---|
-| `phi message v1` | space_id, channel_id, thread_id, epoch, handle, mentions, nonce, ciphertext |
+| `phi message v1` | id, summary_covers_seq, space_id, channel_id, thread_id, epoch, handle, mentions, nonce, ciphertext |
 | `phi device certificate v1` | space_id, person_id, device_id, kind, sign_pub, kex_pub, created_at, issuer |
-| `phi grant record v1` | space_id, grant_id, grant_pub, kind, person_id, created_at, expires_at, issuer_device |
+| `phi grant record v1` | space_id, grant_id, grant_pub, kind, device_kind, person_id, created_at, expires_at, issuer_device |
 | `phi revocation v1` | space_id, target, issuer_device, created_at |
 | `phi reaction v1` | space_id, message_id, person_id, device_id, handle, kind, created_at, remove |
 | `phi settings v1` | space_id, issuer_device, created_at, retention_days, summary_mode, messages_per_minute, messages_per_hour |
+| `phi channel membership v1` | previous, space_id, channel_id, epoch, kind, members, issuer_device |
 
 A certificate issuer is `['device', device_id]` or `['grant', grant_id]`; a
 revocation target is `['device', device_id]` or `['person', person_id]` (JSON uses
 double quotes). The wire issuer references the grant ID; its signed grant record
 supplies the grant public key. The root certificate names itself as device issuer
-and is self-signed. Signatures cover only the fields above, not storage IDs, seq,
-author fields, summary flags or server timestamps. Check claimed author IDs against
-the verified certificate with `VerifiedDirectory::verify_message` before decrypting.
+and is self-signed. Only the root may use a device issuer: every other certificate
+must be grant-signed. Client-chosen message IDs and coverage claims are signed;
+server-assigned seq/created_at and author projections are not. Call
+`VerifiedDirectory::verify_message` before decrypting: it checks author identity,
+ID equality and both summary projections against the signed envelope.
+
+`summary_covers_seq` is a signed optional upper bound on **already assigned thread
+sequences**, plus the current message identified by its signed ID. `None` means no
+summary; `Some(0)` is the only root summary claim. Reply senders supply the latest
+thread seq their summary actually covers. The server requires coverage <= existing
+thread history and copies the claim unchanged into Message; it never substitutes
+its newly assigned seq. Decryption also checks summary presence against the claim.
+Readers must use this authenticated coverage, never infer coverage from the
+message's untrusted server seq. Deduplicate IDs and retain known ID/seq associations
+in the client cache. This does not make server ordering, completeness, counts or
+summary truth cryptographically trustworthy.
 
 Encryption is XChaCha20-Poly1305 with fresh random nonce; ciphertext includes the
 16-byte tag. Message plaintext is `MessageContent` JSON. Message AAD is
@@ -78,32 +92,103 @@ secret, absent salt, info=`UTF8('phi sealed box v1') || ephemeral_pub_raw ||
 recipient_pub_raw`. Encrypt with fresh random XChaCha20 nonce and caller-supplied
 AAD. The wire box contains ephemeral_pub, nonce and ciphertext.
 
-Channel wrapping requires a `VerifiedDevice`, not an unverified public key; AAD is
+Channel wrapping requires both a `VerifiedDevice` and `VerifiedMembership` from
+the same verified directory snapshot. It checks space, channel, epoch and person
+membership before sealing, so a valid space certificate alone is insufficient.
+AAD is
 `J('phi wrapped key v1', [space_id, channel_id, epoch, device_id])`. Grant-sealed
 channel key AAD is `J('phi grant channel key v1', [space_id, grant_id, channel_id,
 epoch])`. Both carry exactly 32 plaintext bytes (48 ciphertext bytes).
 
-## Trust and links
+## Trust, pinned state and M3 persistence contract
 
-`verify_trust_bundle(expected_space_id, bundle, now)` anchors the root hash and
-self-signature, verifies all device/grant dependencies iteratively, and rejects
-cycles, unknown issuers, duplicate IDs, multiple certificates per grant, mixed
-spaces, invalid signatures, mismatched grant persons and redemption outside the
-grant's validity interval. `created_at` was added to grant records to authenticate
-issuance order. Enroll grants belong to the issuer's person; invite grants name a
-new person. `expires_at=null` is allowed only for enroll/recovery. Expired grants
-remain valid evidence for certificates issued before expiry.
+Call `verify_trust_bundle(expected_space_id, bundle, now, prior)` with
+`Option<&PinnedTrustState>`. `None` is **first-use bootstrap only**. On success:
 
-Signed revocations cover a device or a whole person. Issuers must have been valid
-at issuance, and revoked targets never become `VerifiedDevice`s. Earlier valid
-issuance survives a later issuer revocation: revoking a root machine does not
-revoke everyone's devices. Grants cannot be redeemed after their issuer was
-revoked. This uses signed timestamps; the server must enforce current revocation,
-single use and expiry at redemption. A dishonest host can omit/roll back directory
-records or backdate server metadata; this prototype has no transparency log or
-external freshness witness. Preserve known revocations in the client cache.
+1. Inspect `grant_certificates()` (grant ID -> exact certificate) and
+   `revocations()`; these are verified evidence, not server assertions.
+2. Atomically persist `pinned_state()` in this profile's locally trusted cache.
+   `PinnedTrustState` supports serde for that cache. Never deserialize host data
+   as pins, pass a current response as its own prior, or discard existing pins
+   after an error. M3 owns filesystem persistence and profile isolation.
+3. Pass those pins on every refresh. Missing or changed pinned root, certificates
+   or grant records fail closed. The exact certificate pins also prevent swapping
+   a grant's redeemer for another device across successive snapshots.
+4. Pinned revocations are always merged, even when the host omits them. Save the
+   resulting merged state; never replace it with a raw response. A missing
+   revocation therefore cannot make its target active again.
+
+The root hash/self-signature anchors all dependencies. Verification rejects
+cycles, mixed spaces, duplicate devices/grants, reused grants and invalid
+signatures. Each person has exactly one origin: the root person or one invite
+record; another invite cannot reuse that person ID, even if the first invite is
+unused. Later certificates for that person must use enroll grants issued by that
+same person's device. Certificates must match the grant's signed `device_kind`.
+A GUI enroll grant requires a GUI issuer. A new-person invite may target either
+kind. Device kinds authenticate an issuer's designation, not hardware/keychain
+attestation or proof that a human typed the message.
+
+Current revocation dominates attacker-controlled wall clocks. A certificate whose
+grant issuer is currently revoked is accepted **only if that exact certificate
+was already pinned**. Backdating a new grant/certificate cannot recreate trust.
+Exact old evidence survives a later issuer revocation, including when certificate
+creation and revocation share one Unix second. New signed revocations from an
+already revoked issuer also need exact prior evidence, except self-revocation.
+Revoked devices/persons never become active `VerifiedDevice`s. Timestamps still
+check creation bounds and expiry, but are not an ordering oracle. Expiry is
+exclusive at redemption; an old redeemed certificate remains valid after expiry.
+Only enroll/recovery grants may have `expires_at=null`.
+
+A fresh client seeing revoked historical issuers needs a trusted prior snapshot;
+it must fail closed rather than guess which descendants predate revocation.
+Pins detect conflicts against *observed* history. No protocol without a shared
+witness can discover a revocation nobody has seen or reconcile isolated clients'
+divergent first snapshots automatically. Cross-client exchange of trusted pins
+would expose equivocation; this prototype does not add a transparency service.
+
+## Authenticated channel membership
+
+Create/update carry `ChannelMembership`; rotations require it in `PutKeysRequest`.
+Each proof signs space/channel/epoch/kind/members/issuer and the previous roster's
+signature (`previous=null` for epoch-0 genesis). Updates and rotations must extend
+the currently stored proof; the server persists the complete oldest-first
+`Channel.membership_history` plus the current `membership`. Historical/self key
+rewraps leave membership unchanged and omit the proof from PUT keys.
+
+Before wrapping, call `VerifiedDirectory::verify_channel(channel, prior_roster)`
+and pass its `VerifiedMembership` to `wrap_channel_key`. M3 must persist each
+accepted current roster per channel, pass it on every refresh, and retain it on
+errors. The verifier checks history back to that exact pin, immutable space/id/kind,
+nondecreasing epoch, signatures, and that each new signer belonged to the prior
+roster. It rejects a missing pin, fork, rollback or unsigned members projection.
+For locally proposed creation/rotation, `verify_membership(proposed, prior_roster)`
+checks the one-step transition before wrapping. `None` is only for a newly accepted
+epoch-0 genesis; first discovery must also validate the channel's decrypted
+metadata/expected peer context. A first-ever roster remains a bootstrap trust
+observation, not proof of unobserved history.
+
+`#all` has a root-signed genesis and is special by definition: every person with
+a verified certificate belongs to it. Signed invite origins authorize automatic additions, so effective all
+membership comes from the verified directory rather than an unsigned host list;
+new roster signatures checkpoint that set. Removed/revoked devices remain excluded
+by the directory. Group, DM and self recipients are restricted to their signed
+member sets. Refresh directory and roster together before rotating; stale verified
+objects from a different directory snapshot cannot be mixed.
+
+## Text and links
+
+Titles, summaries, display names, attachment names and MIME values reject control
+characters, Unicode line/paragraph separators and bidi directional controls.
+Attachment names remain one path segment. Markdown bodies remain multiline and
+untrusted: M3 must render them inside the untrusted content frame, never as trusted
+header/author markup. A GUI kind never grants instruction priority.
 
 Links are `phi://authority/space_id#S` (HTTP) or `phis://...` (HTTPS), using the
 32-byte S encoded base64url. DNS, IPv4 and bracketed IPv6 with optional valid port
 are accepted; credentials, paths, queries, percent escapes and padding are rejected.
 Encoded links use `Zeroizing<String>` and expose S only via explicit accessors.
+
+These changes tighten the unreleased prototype's major-1 contract. Old signed
+records lacking these fields cannot be upgraded by the host; development stores
+must be recreated or re-signed by their legitimate key owners. There is no unsigned
+or legacy-verification fallback.

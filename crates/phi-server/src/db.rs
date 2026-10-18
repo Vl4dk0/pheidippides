@@ -132,6 +132,16 @@ impl Db {
             params![mid.to_string(), a.sid().to_string(), a.person().to_string()],
         )
     }
+    pub fn trust_pins(&self, sid: SpaceId) -> Result<phi_crypto::PinnedTrustState> {
+        self.one(
+            "SELECT json FROM trust_pins WHERE space_id=?",
+            [sid.to_string()],
+        )
+    }
+    pub fn pin_trust(&self, sid: SpaceId, verified: &phi_crypto::VerifiedDirectory) -> Result<()> {
+        self.conn.execute("INSERT INTO trust_pins VALUES(?,?) ON CONFLICT(space_id) DO UPDATE SET json=excluded.json", params![sid.to_string(),json(&verified.pinned_state())?])?;
+        Ok(())
+    }
     pub fn directory(&self, sid: SpaceId) -> Result<TrustBundle> {
         let root = self.space(sid)?.root_cert;
         let devices: Vec<Device> = self.list(

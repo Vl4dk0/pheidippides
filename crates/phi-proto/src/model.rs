@@ -70,6 +70,7 @@ pub struct GrantRecordData {
     pub grant_id: GrantId,
     pub grant_pub: PublicKey,
     pub kind: GrantKind,
+    pub device_kind: DeviceKind,
     pub person_id: PersonId,
     pub created_at: Timestamp,
     pub expires_at: Option<Timestamp>,
@@ -131,6 +132,9 @@ pub struct Mention {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MessageEnvelope {
+    pub id: MessageId,
+    /// Coverage of already assigned thread sequences; this message is included by id.
+    pub summary_covers_seq: Option<Seq>,
     pub space_id: SpaceId,
     pub channel_id: ChannelId,
     pub thread_id: Option<MessageId>,
@@ -255,6 +259,8 @@ pub struct Grant {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Channel {
+    pub membership: ChannelMembership,
+    pub membership_history: Vec<ChannelMembership>,
     pub id: ChannelId,
     pub space_id: SpaceId,
     pub kind: ChannelKind,
@@ -313,4 +319,21 @@ pub struct TrustBundle {
     pub certificates: Vec<DeviceCertificate>,
     pub grants: Vec<GrantRecord>,
     pub revocations: Vec<Revocation>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChannelMembershipData {
+    /// The previous roster signature makes updates an authenticated chain.
+    pub previous: Option<Signature>,
+    pub space_id: SpaceId,
+    pub channel_id: ChannelId,
+    pub epoch: Epoch,
+    pub kind: ChannelKind,
+    pub members: Vec<PersonId>,
+    pub issuer_device: DeviceId,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChannelMembership {
+    pub data: ChannelMembershipData,
+    pub signature: Signature,
 }

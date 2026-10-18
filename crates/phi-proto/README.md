@@ -42,8 +42,11 @@ upload their own rewrapped keys via PUT keys; issuing an invite shares only #all
 Member self/DM channels are created using the standard channel endpoint.
 
 Messages contain a nested `envelope` with the exact signed routing fields.
+The envelope additionally signs the client-chosen id and optional summary_covers_seq.
 Servers derive author IDs from the authenticated device, assign seq/created_at,
-and set summary_covers_seq to the assigned message seq iff has_summary=true.
+and copy the signed coverage unchanged. Top-level id/has_summary must match the
+envelope; coverage describes prior assigned thread sequences plus the current
+message by its signed id. Root summaries use Some(0).
 `SendMessageRequest.blob_ids` (default empty, at most 32 distinct IDs) links
 opaque uploads to the thread for server retention and access control, without
 revealing encrypted attachment descriptors. Attachment senders must populate it.
@@ -72,3 +75,12 @@ Protocol mismatch returns exactly ErrorBody::Upgrade with HTTP 426. Use Retry-Af
 from the RateLimited error on 429. Names, titles, bodies and attachment descriptors
 are encrypted. The host sees handles, mentions, reaction kinds, timestamps, sizes
 and the membership/routing graph.
+
+Channel create/update requests require a signed `membership`. Rotations require
+`PutKeysRequest.membership=Some(proof)`; same/old-epoch self rewraps use None.
+`Channel` returns current membership plus oldest-first membership_history. Proofs
+include the previous proof's signature, scope, epoch, kind, members and issuer;
+updates/rotations must extend the stored proof. See phi-crypto's README for channel
+and directory pinning, #all expansion through signed invite origins, GUI enrollment
+policy, and bootstrap limits. `GrantRecordData.device_kind` is mandatory and signed.
+Text metadata fields are single-line and reject controls/bidi formatting.

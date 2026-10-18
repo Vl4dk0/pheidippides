@@ -6,6 +6,31 @@ use phi_proto::*;
 use rusqlite::params;
 
 impl Db {
+    fn signed_membership(
+        &self,
+        a: &Auth,
+        proof: &ChannelMembership,
+        channel: &Channel,
+    ) -> Result<()> {
+        let data = &proof.data;
+        proof.validate()?;
+        if data.space_id != a.sid()
+            || data.channel_id != channel.id
+            || data.kind != channel.kind
+            || data.epoch != channel.current_epoch
+            || data.members != channel.members
+            || data.issuer_device != a.device()
+        {
+            return Err(ApiError::invalid(
+                "signed membership scope, epoch, members or issuer mismatch",
+            ));
+        }
+        self.verify(
+            a,
+            &phi_crypto::membership_signing_bytes(data)?,
+            &proof.signature,
+        )
+    }
     fn valid_members(&self, a: &Auth, members: &[PersonId]) -> Result<()> {
         for person in members {
             let active: bool = self.conn.query_row(
@@ -102,6 +127,8 @@ impl Db {
             }
         }
         let channel = Channel {
+            membership: r.membership,
+            membership_history: vec![],
             id: r.id,
             space_id: r.space_id,
             kind: r.kind,
@@ -110,6 +137,7 @@ impl Db {
             members: r.members,
             current_epoch: 0,
         };
+        self.signed_membership(a, &channel.membership, &channel)?;
         self.valid_keys(a, &channel, &r.wrapped_keys)?;
         self.conn.execute(
             "INSERT INTO channels VALUES(?,?,?,?)",
@@ -145,7 +173,13 @@ impl Db {
                 return Err(ApiError::conflict("metadata must use current epoch"));
             }
             db.valid_members(a, &r.members)?;
+            if r.membership.data.previous.as_ref() != Some(&c.membership.signature) {
+                return Err(ApiError::conflict("membership predecessor mismatch"));
+            }
             c.members = r.members;
+            c.membership_history.push(c.membership);
+            c.membership = r.membership;
+            db.signed_membership(a, &c.membership, &c)?;
             c.meta = r.meta;
             c.meta_epoch = r.meta_epoch;
             db.conn.execute(
@@ -199,11 +233,25 @@ impl Db {
                     ));
                 }
                 channel.current_epoch = r.epoch;
+                let proof = r
+                    .membership
+                    .as_ref()
+                    .ok_or_else(|| ApiError::invalid("rotation requires signed membership"))?;
+                if proof.data.previous.as_ref() != Some(&channel.membership.signature) {
+                    return Err(ApiError::conflict("membership predecessor mismatch"));
+                }
+                channel.membership_history.push(channel.membership.clone());
+                channel.membership = r
+                    .membership
+                    .ok_or_else(|| ApiError::invalid("rotation requires signed membership"))?;
+                db.signed_membership(a, &channel.membership, &channel)?;
                 db.conn.execute(
                     "UPDATE channels SET json=? WHERE id=?",
                     params![json(&channel)?, cid.to_string()],
                 )?;
-            } else if r.wrapped_keys.iter().any(|k| k.device_id != a.device()) {
+            } else if r.membership.is_some()
+                || r.wrapped_keys.iter().any(|k| k.device_id != a.device())
+            {
                 return Err(ApiError::forbidden());
             }
             db.save_keys(&r.wrapped_keys)?;

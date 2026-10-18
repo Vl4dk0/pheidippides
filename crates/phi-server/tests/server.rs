@@ -55,6 +55,45 @@ fn wrapped(cid: ChannelId, did: DeviceId, epoch: u64) -> WrappedKey {
         },
     }
 }
+fn roster(
+    cert: &DeviceCertificate,
+    key: &DeviceKeys,
+    channel_id: ChannelId,
+    epoch: Epoch,
+    kind: ChannelKind,
+    members: Vec<PersonId>,
+) -> Result<ChannelMembership, CryptoError> {
+    sign_membership(
+        ChannelMembershipData {
+            previous: None,
+            space_id: cert.data.space_id,
+            channel_id,
+            epoch,
+            kind,
+            members,
+            issuer_device: cert.data.device_id,
+        },
+        key,
+    )
+}
+fn next_roster(
+    cert: &DeviceCertificate,
+    key: &DeviceKeys,
+    prior: &ChannelMembership,
+    epoch: Epoch,
+    members: Vec<PersonId>,
+) -> Result<ChannelMembership, CryptoError> {
+    sign_membership(
+        ChannelMembershipData {
+            previous: Some(prior.signature.clone()),
+            epoch,
+            members,
+            issuer_device: cert.data.device_id,
+            ..prior.data.clone()
+        },
+        key,
+    )
+}
 fn token(t: &Base64<32>) -> TestResult<String> {
     Ok(serde_json::to_value(t)?
         .as_str()
@@ -144,13 +183,16 @@ impl Fixture {
         )?;
         let all = ChannelId::from_bytes(bytes());
         let own = ChannelId::from_bytes(bytes());
-        let channel = |id, kind| CreateChannelRequest {
-            id,
-            space_id: sid,
-            kind,
-            meta: cipher(16),
-            members: vec![pid],
-            wrapped_keys: vec![wrapped(id, did, 0)],
+        let channel = |id, kind| -> TestResult<CreateChannelRequest> {
+            Ok(CreateChannelRequest {
+                membership: roster(&cert, &key, id, 0, kind, vec![pid])?,
+                id,
+                space_id: sid,
+                kind,
+                meta: cipher(16),
+                members: vec![pid],
+                wrapped_keys: vec![wrapped(id, did, 0)],
+            })
         };
         let response: CreateSpaceResponse = ok(
             &app,
@@ -159,8 +201,8 @@ impl Fixture {
             config.admin_token.as_deref(),
             CreateSpaceRequest {
                 root_cert: cert.clone(),
-                all_channel: channel(all, ChannelKind::All),
-                self_channel: channel(own, ChannelKind::SelfChannel),
+                all_channel: channel(all, ChannelKind::All)?,
+                self_channel: channel(own, ChannelKind::SelfChannel)?,
             },
         )
         .await?;
@@ -205,6 +247,7 @@ impl Fixture {
                 grant_id: grant.id(),
                 grant_pub: grant.public(),
                 kind,
+                device_kind: DeviceKind::Cli,
                 person_id: person,
                 created_at: (timestamp() - 10).max(issuer.cert.data.created_at),
                 expires_at: expires,
@@ -257,7 +300,7 @@ impl Fixture {
                 kind: DeviceKind::Cli,
                 sign_pub: key.sign_public(),
                 kex_pub: key.kex_public(),
-                created_at: timestamp() - 1,
+                created_at: timestamp(),
                 issuer: CertificateIssuer::Grant { grant_id: k.id() },
             },
             k,
@@ -289,7 +332,10 @@ impl Fixture {
         thread: Option<MessageId>,
         mentions: Vec<Mention>,
     ) -> TestResult<SendMessageRequest> {
+        let id = MessageId::from_bytes(bytes());
         let envelope = MessageEnvelope {
+            id,
+            summary_covers_seq: Some(0),
             space_id: self.sid,
             channel_id: cid,
             thread_id: thread,
@@ -301,7 +347,7 @@ impl Fixture {
         };
         let signature = a.key.sign(&message_signing_bytes(&envelope)?);
         Ok(SendMessageRequest {
-            id: MessageId::from_bytes(bytes()),
+            id,
             envelope,
             signature,
             has_summary: true,
@@ -433,6 +479,7 @@ async fn admin_creation_auth_and_major_version_are_enforced() -> TestResult {
     let req = CreateSpaceRequest {
         root_cert: f.root.cert.clone(),
         all_channel: CreateChannelRequest {
+            membership: all.membership,
             id: all.id,
             space_id: f.sid,
             kind: all.kind,
@@ -441,6 +488,7 @@ async fn admin_creation_auth_and_major_version_are_enforced() -> TestResult {
             wrapped_keys: vec![wrapped(all.id, f.root.cert.data.device_id, 0)],
         },
         self_channel: CreateChannelRequest {
+            membership: own.membership,
             id: own.id,
             space_id: f.sid,
             kind: own.kind,
@@ -528,9 +576,29 @@ async fn invite_and_enrollment_preserve_signed_directory_and_membership() -> Tes
         json!(null),
     )
     .await?;
-    let trusted = verify_trust_bundle(f.sid, &directory.directory, timestamp())?;
+    let trusted = verify_trust_bundle(f.sid, &directory.directory, timestamp(), None)?;
     assert_eq!(trusted.active_devices().count(), 3);
     assert_eq!(directory.persons.len(), 2);
+    let (enroll, _) = f.grant(&f.root, GrantKind::Enroll, None).await?;
+    let mut gui = enroll.record.data.clone();
+    gui.device_kind = DeviceKind::Gui;
+    let gui = CreateGrantRequest {
+        record: sign_grant(gui, &f.root.key)?,
+        sealed_keys: enroll.sealed_keys,
+    };
+    assert_eq!(
+        request(
+            &f.app,
+            "POST",
+            &f.space("/grants"),
+            Some(&f.root.token),
+            gui
+        )
+        .await?
+        .0,
+        403
+    );
+
     let list: ListChannelsResponse = ok(
         &f.app,
         "GET",
@@ -542,6 +610,7 @@ async fn invite_and_enrollment_preserve_signed_directory_and_membership() -> Tes
     assert_eq!(list.channels.len(), 1);
     assert_eq!(list.channels[0].id, f.all);
     let r = PutKeysRequest {
+        membership: None,
         epoch: 0,
         wrapped_keys: vec![wrapped(f.all, person.cert.data.device_id, 0)],
     };
@@ -575,6 +644,14 @@ async fn redeem_is_atomic_single_use_and_rejects_forged_certificates() -> TestRe
     forged.certificate.signature = Signature::from_bytes([0; 64]);
     let path = format!("/v1/grants/{}/redeem", k.id());
     assert_eq!(request(&f.app, "POST", &path, None, forged).await?.0, 400);
+    let mut wrong_kind = r.clone();
+    wrong_kind.certificate.data.kind = DeviceKind::Gui;
+    wrong_kind.certificate = certify_with_grant(wrong_kind.certificate.data, &k)?;
+    assert_eq!(
+        request(&f.app, "POST", &path, None, wrong_kind).await?.0,
+        400
+    );
+
     let (a, b) = tokio::join!(
         request(&f.app, "POST", &path, None, &r),
         request(&f.app, "POST", &path, None, &r)
@@ -663,7 +740,7 @@ async fn person_revocation_rejects_all_tokens_and_forgery() -> TestResult {
                 person_id: person.cert.data.person_id,
             },
             issuer_device: f.root.cert.data.device_id,
-            created_at: timestamp(),
+            created_at: person.cert.data.created_at,
         },
         &f.root.key,
     )?;
@@ -714,6 +791,14 @@ async fn channels_enforce_membership_and_complete_rotation() -> TestResult {
         &f.space("/channels"),
         Some(&f.root.token),
         CreateChannelRequest {
+            membership: roster(
+                &f.root.cert,
+                &f.root.key,
+                cid,
+                0,
+                ChannelKind::Group,
+                members.clone(),
+            )?,
             id: cid,
             space_id: f.sid,
             kind: ChannelKind::Group,
@@ -727,6 +812,27 @@ async fn channels_enforce_membership_and_complete_rotation() -> TestResult {
     )
     .await?;
     assert_eq!(c.current_epoch, 0);
+    let directory: ListDevicesResponse = ok(
+        &f.app,
+        "GET",
+        &f.space("/devices"),
+        Some(&f.root.token),
+        json!(null),
+    )
+    .await?;
+    let trusted = verify_trust_bundle(f.sid, &directory.directory, timestamp(), None)?;
+    trusted.verify_channel(&c, None)?;
+    let mut injected = serde_json::to_value(&c)?;
+    injected["members"]
+        .as_array_mut()
+        .ok_or_else(|| anyhow::anyhow!("members"))?
+        .push(serde_json::to_value(outsider.cert.data.person_id)?);
+    assert!(
+        trusted
+            .verify_channel(&serde_json::from_value(injected)?, Some(&c.membership))
+            .is_err()
+    );
+
     assert_eq!(
         request(
             &f.app,
@@ -739,7 +845,14 @@ async fn channels_enforce_membership_and_complete_rotation() -> TestResult {
         .0,
         404
     );
-    let partial = PutKeysRequest {
+    let mut partial = PutKeysRequest {
+        membership: Some(next_roster(
+            &f.root.cert,
+            &f.root.key,
+            &c.membership,
+            1,
+            members.clone(),
+        )?),
         epoch: 1,
         wrapped_keys: vec![wrapped(cid, f.root.cert.data.device_id, 1)],
     };
@@ -755,18 +868,50 @@ async fn channels_enforce_membership_and_complete_rotation() -> TestResult {
         .0,
         400
     );
-    let _: Channel = ok(
+    let updated: Channel = ok(
         &f.app,
         "PATCH",
         &format!("/v1/channels/{cid}"),
         Some(&f.root.token),
         UpdateChannelRequest {
+            membership: next_roster(
+                &f.root.cert,
+                &f.root.key,
+                &c.membership,
+                0,
+                vec![f.root.cert.data.person_id],
+            )?,
             meta_epoch: 0,
             meta: cipher(16),
             members: vec![f.root.cert.data.person_id],
         },
     )
     .await?;
+    trusted.verify_channel(&updated, Some(&c.membership))?;
+    assert_eq!(
+        request(
+            &f.app,
+            "PATCH",
+            &format!("/v1/channels/{cid}"),
+            Some(&f.root.token),
+            UpdateChannelRequest {
+                membership: updated.membership.clone(),
+                meta_epoch: 0,
+                meta: cipher(16),
+                members: updated.members.clone()
+            }
+        )
+        .await?
+        .0,
+        409
+    );
+    partial.membership = Some(next_roster(
+        &f.root.cert,
+        &f.root.key,
+        &updated.membership,
+        1,
+        vec![f.root.cert.data.person_id],
+    )?);
     let _: GetKeysResponse = ok(
         &f.app,
         "PUT",
@@ -832,9 +977,29 @@ async fn messages_check_signatures_threads_summaries_and_pagination() -> TestRes
             .0,
         400
     );
+    let mut replay = f.message(&f.root, f.all, None, vec![])?;
+    replay.id = MessageId::from_bytes(bytes());
+    assert_eq!(
+        request(&f.app, "POST", &path, Some(&f.root.token), replay)
+            .await?
+            .0,
+        400
+    );
     let root = f.send(&f.root, f.all, None).await?;
+    let mut overclaim = f.message(&f.root, f.all, Some(root.id), vec![])?;
+    overclaim.envelope.summary_covers_seq = Some(u64::MAX);
+    overclaim.signature = f
+        .root
+        .key
+        .sign(&message_signing_bytes(&overclaim.envelope)?);
+    assert_eq!(
+        request(&f.app, "POST", &path, Some(&f.root.token), overclaim)
+            .await?
+            .0,
+        400
+    );
     let reply = f.send(&f.root, f.all, Some(root.id)).await?;
-    assert_eq!(reply.summary_covers_seq, Some(reply.seq));
+    assert_eq!(reply.summary_covers_seq, Some(0));
     assert!(reply.seq > root.seq);
     let r = f.message(&f.root, f.all, Some(reply.id), vec![])?;
     assert_eq!(
@@ -1414,6 +1579,8 @@ async fn signed_settings_emit_events_and_forever_disables_retention() -> TestRes
     assert!(matches!(e.events[0].event, EventData::Settings(_)));
     let mut r = f.message(&f.root, f.all, Some(root.id), vec![])?;
     r.has_summary = false;
+    r.envelope.summary_covers_seq = None;
+    r.signature = f.root.key.sign(&message_signing_bytes(&r.envelope)?);
     let _: Message = ok(
         &f.app,
         "POST",
