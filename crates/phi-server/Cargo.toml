@@ -1,0 +1,15 @@
+[package]
+name = "phi-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "phi-server"
+path = "src/main.rs"
+
+[dependencies]
+phi-proto.workspace = true
+
+[lints]
+workspace = true

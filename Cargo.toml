@@ -1,0 +1,38 @@
+[workspace]
+members = ["crates/phi-proto", "crates/phi-crypto", "crates/phi-core", "crates/phi-server", "crates/phi-cli"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+
+[workspace.dependencies]
+phi-proto = { path = "crates/phi-proto" }
+phi-crypto = { path = "crates/phi-crypto" }
+phi-core = { path = "crates/phi-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+base64 = "0.22"
+zeroize = { version = "1", features = ["derive"] }
+ed25519-dalek = { version = "2.2", features = ["zeroize"] }
+x25519-dalek = { version = "2.0", features = ["static_secrets", "zeroize"] }
+chacha20poly1305 = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+blake3 = "1"
+getrandom = "0.3"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unused_qualifications = "deny"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1

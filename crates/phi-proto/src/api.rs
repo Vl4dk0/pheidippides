@@ -1,0 +1,205 @@
+use crate::*;
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateSpaceRequest {
+    #[serde(deserialize_with = "crate::validation::strict")]
+    pub root_cert: DeviceCertificate,
+    #[serde(deserialize_with = "crate::validation::strict")]
+    pub all_channel: CreateChannelRequest,
+    #[serde(deserialize_with = "crate::validation::strict")]
+    pub self_channel: CreateChannelRequest,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CreateSpaceResponse {
+    pub space: Space,
+    pub device_token: Base64<32>,
+}
+pub type GetSpaceResponse = Space;
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateSettingsRequest {
+    #[serde(deserialize_with = "crate::validation::strict")]
+    pub change: SettingsChange,
+}
+pub type UpdateSettingsResponse = SettingsChange;
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateGrantRequest {
+    #[serde(deserialize_with = "crate::validation::strict")]
+    pub record: GrantRecord,
+    #[serde(deserialize_with = "crate::validation::strict")]
+    pub sealed_keys: Vec<GrantSealedKey>,
+}
+pub type CreateGrantResponse = Grant;
+/// GET /v1/grants/{grant_id} is unauthenticated: only signed records and ciphertext.
+/// Redeemers need this before signing their certificate; it never exposes S.
+pub type GetGrantResponse = Grant;
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RedeemGrantRequest {
+    #[serde(deserialize_with = "crate::validation::strict")]
+    pub certificate: DeviceCertificate,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RedeemGrantResponse {
+    pub device_token: Base64<32>,
+    pub grant: Grant,
+    pub directory: TrustBundle,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ListDevicesResponse {
+    pub persons: Vec<Person>,
+    pub devices: Vec<Device>,
+    pub directory: TrustBundle,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateRevocationRequest {
+    #[serde(deserialize_with = "crate::validation::strict")]
+    pub revocation: Revocation,
+}
+pub type CreateRevocationResponse = Revocation;
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateChannelRequest {
+    pub id: ChannelId,
+    pub space_id: SpaceId,
+    pub kind: ChannelKind,
+    #[serde(deserialize_with = "crate::validation::strict")]
+    pub meta: Ciphertext,
+    pub members: Vec<PersonId>,
+    #[serde(deserialize_with = "crate::validation::strict")]
+    pub wrapped_keys: Vec<WrappedKey>,
+}
+pub type CreateChannelResponse = Channel;
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ListChannelsResponse {
+    pub channels: Vec<Channel>,
+}
+/// PATCH /v1/channels/{cid}: membership/meta change, followed by rotation on removal.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateChannelRequest {
+    pub meta_epoch: Epoch,
+    #[serde(deserialize_with = "crate::validation::strict")]
+    pub meta: Ciphertext,
+    pub members: Vec<PersonId>,
+}
+pub type UpdateChannelResponse = Channel;
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PutKeysRequest {
+    pub epoch: Epoch,
+    #[serde(deserialize_with = "crate::validation::strict")]
+    pub wrapped_keys: Vec<WrappedKey>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GetKeysResponse {
+    pub wrapped_keys: Vec<WrappedKey>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SendMessageRequest {
+    pub id: MessageId,
+    #[serde(deserialize_with = "crate::validation::strict")]
+    pub envelope: MessageEnvelope,
+    pub signature: Signature,
+    pub has_summary: bool,
+}
+pub type SendMessageResponse = Message;
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MessagesQuery {
+    pub thread: Option<MessageId>,
+    pub after: Option<Seq>,
+    pub limit: Option<u32>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ListMessagesResponse {
+    pub messages: Vec<Message>,
+    pub next_after: Option<Seq>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReactionRequest {
+    #[serde(deserialize_with = "crate::validation::strict")]
+    pub reaction: Reaction,
+}
+pub type ReactionResponse = Reaction;
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PutCursorRequest {
+    pub last_read_seq: Seq,
+}
+pub type PutCursorResponse = ReadCursor;
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CountsQuery {
+    pub handle: Option<Handle>,
+}
+pub type CountsResponse = Counts;
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EventsQuery {
+    pub after: Seq,
+    pub timeout: Option<u16>,
+    pub handle: Option<Handle>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EventsResponse {
+    pub events: Vec<Event>,
+    pub next_after: Seq,
+}
+/// JSON blob transport keeps the prototype API uniform. Servers may stream decoding.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UploadBlobRequest {
+    pub space_id: SpaceId,
+    pub ciphertext: Base64Bytes,
+}
+pub type UploadBlobResponse = Blob;
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DownloadBlobResponse {
+    pub blob: Blob,
+    pub ciphertext: Base64Bytes,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "error", rename_all = "snake_case")]
+pub enum ErrorBody {
+    Invalid { message: String },
+    Unauthorized { message: String },
+    Forbidden { message: String },
+    NotFound { message: String },
+    Conflict { message: String },
+    TooLarge { message: String },
+    RateLimited { retry_after: u64 },
+    Upgrade { required_major: u16 },
+    Internal { message: String },
+}
+impl ErrorBody {
+    pub fn status_code(&self) -> u16 {
+        match self {
+            Self::Invalid { .. } => 400,
+            Self::Unauthorized { .. } => 401,
+            Self::Forbidden { .. } => 403,
+            Self::NotFound { .. } => 404,
+            Self::Conflict { .. } => 409,
+            Self::TooLarge { .. } => 413,
+            Self::RateLimited { .. } => 429,
+            Self::Upgrade { .. } => 426,
+            Self::Internal { .. } => 500,
+        }
+    }
+}
+pub fn check_protocol(major: u16) -> Result<(), ErrorBody> {
+    if major == PROTOCOL_MAJOR {
+        Ok(())
+    } else {
+        Err(ErrorBody::Upgrade {
+            required_major: PROTOCOL_MAJOR,
+        })
+    }
+}

@@ -1,0 +1,12 @@
+[package]
+name = "phi-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+phi-proto.workspace = true
+phi-crypto.workspace = true
+
+[lints]
+workspace = true
