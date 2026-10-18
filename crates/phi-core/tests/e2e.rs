@@ -661,6 +661,27 @@ async fn gui_keystore_boundary_and_authenticated_device_kind() -> Result<()> {
             .text()
             .contains("human · sent from GUI")
     );
+    ensure!(cli.inbox().await?.is_empty());
+    let threads = cli.threads().await?;
+    ensure!(threads.len() == 1 && !threads[0].unread && !threads[0].own_agent_activity);
+    cli.reply(root.id, options("Agent follow-up")).await?;
+    ensure!(gui.threads().await?[0].own_agent_activity);
+    gui.set_display_name("Alice Desktop").await?;
+    cli.refresh().await?;
+    ensure!(cli.person_name(gui.profile.person_id) == "alice-desktop");
+    let mention = cli
+        .send(
+            "@alice-desktop/reviewer",
+            "Agent mention",
+            options("For your reviewer"),
+        )
+        .await?;
+    ensure!(
+        gui.inbox()
+            .await?
+            .iter()
+            .any(|entry| entry.id == mention.id && entry.mentioned)
+    );
     let cli_gui_enroll = cli.invite_for_device(true, false, DeviceKind::Gui).await;
     ensure!(cli_gui_enroll.is_err());
     let gui_code = gui.invite_for_device(true, true, DeviceKind::Gui).await?;

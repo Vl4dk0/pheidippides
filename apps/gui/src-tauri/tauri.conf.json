@@ -1,0 +1,23 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Pheidippides",
+  "version": "0.1.0",
+  "identifier": "sk.pheidippides.desktop",
+  "build": { "frontendDist": "../dist", "beforeBuildCommand": "pnpm build" },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Pheidippides",
+        "width": 1180,
+        "height": 800,
+        "minWidth": 480,
+        "minHeight": 500
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'; frame-src 'none'; form-action 'none'"
+    }
+  },
+  "bundle": { "active": false, "icon": [] }
+}

@@ -39,6 +39,8 @@ pub struct InboxEntry {
     pub created_at: u64,
     pub summary: Option<String>,
     pub mentioned: bool,
+    pub unread: bool,
+    pub own_agent_activity: bool,
     pub reactions: Vec<Reaction>,
     pub latest_seq: Seq,
 }

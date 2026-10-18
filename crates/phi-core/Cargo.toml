@@ -15,7 +15,7 @@ getrandom.workspace = true
 blake3.workspace = true
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
-tokio = { version = "1", features = ["process", "io-util", "time"] }
+tokio = { version = "1", features = ["process", "io-util", "time", "macros"] }
 toml = "0.9"
 directories = "6"
 

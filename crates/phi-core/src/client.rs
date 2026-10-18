@@ -544,6 +544,35 @@ impl Client {
         self.store.save_profile(&self.profile)?;
         self.refresh().await
     }
+    /// Keep addressing and the human composer consistent across a person's devices.
+    pub async fn set_display_name(&mut self, name: &str) -> Result<()> {
+        if name.trim().is_empty() || name.len() > 120 {
+            return Err(user("display name must be 1–120 bytes"));
+        }
+        self.refresh().await?;
+        let all_id = self
+            .channels
+            .iter()
+            .find(|c| c.channel.kind == ChannelKind::All)
+            .map(|c| c.channel.id)
+            .ok_or_else(|| user("missing #all"))?;
+        self.ensure_safe_epoch(all_id).await?;
+        let all = self
+            .channels
+            .iter()
+            .find(|c| c.channel.id == all_id)
+            .cloned()
+            .ok_or_else(|| user("missing #all after rotation"))?;
+        let mut meta = all.meta.clone();
+        meta.people.remove(&self.profile.person_id);
+        let name = unique_slug(name, &meta.people);
+        meta.people.insert(self.profile.person_id, name.clone());
+        self.update_channel(&all.channel, meta, all.channel.members.clone())
+            .await?;
+        self.profile.display_name = name;
+        self.store.save_profile(&self.profile)?;
+        self.refresh().await
+    }
     fn key(&self, channel: ChannelId, epoch: Epoch) -> Result<ChannelKey> {
         let key: KeyBytes = load_json(self.keys.as_ref(), &format!("channel/{channel}/{epoch}"))?;
         Ok(ChannelKey::from_bytes(
@@ -1096,6 +1125,15 @@ impl Client {
         Ok(path)
     }
     pub async fn inbox(&mut self) -> Result<Vec<InboxEntry>> {
+        Ok(self
+            .threads()
+            .await?
+            .into_iter()
+            .filter(|entry| entry.unread)
+            .collect())
+    }
+    /// The desktop keeps read threads visible without advancing their read cursors.
+    pub async fn threads(&mut self) -> Result<Vec<InboxEntry>> {
         self.refresh().await?;
         let messages = self.sync_all().await?;
         let mut threads: BTreeMap<MessageId, Vec<DecodedMessage>> = BTreeMap::new();
@@ -1124,14 +1162,12 @@ impl Client {
                 .optional()?
                 .unwrap_or(0);
             let latest = thread.last().ok_or_else(|| user("empty thread"))?;
-            if latest.message.seq <= cursor {
-                continue;
-            }
             let root = thread.first().ok_or_else(|| user("empty thread"))?;
             let mentions = thread.iter().filter(|m| m.message.seq > cursor).any(|m| {
                 m.message.envelope.mentions.iter().any(|mention| {
                     mention.person_id == self.profile.person_id
-                        && mention.handle.as_ref().is_none_or(|h| h == &self.handle)
+                        && (self.profile.kind == DeviceKind::Gui
+                            || mention.handle.as_ref().is_none_or(|h| h == &self.handle))
                 })
             });
             result.push(InboxEntry {
@@ -1153,6 +1189,12 @@ impl Client {
                     })
                     .or_else(|| thread.iter().rev().find_map(|m| m.content.summary.clone())),
                 mentioned: mentions,
+                unread: latest.message.seq > cursor,
+                own_agent_activity: thread.iter().any(|m| {
+                    m.message.author_person == self.profile.person_id
+                        && m.author_kind == DeviceKind::Cli
+                        && m.verification_error.is_none()
+                }),
                 reactions: thread.iter().flat_map(|m| m.reactions.clone()).collect(),
                 latest_seq: latest.message.seq,
             });
@@ -1348,8 +1390,12 @@ impl Client {
                         summary: content.summary,
                         mentioned: message.envelope.mentions.iter().any(|m| {
                             m.person_id == self.profile.person_id
-                                && m.handle.as_ref().is_none_or(|h| h == &self.handle)
+                                && (self.profile.kind == DeviceKind::Gui
+                                    || m.handle.as_ref().is_none_or(|h| h == &self.handle))
                         }),
+                        unread: true,
+                        own_agent_activity: message.author_person == self.profile.person_id
+                            && author.certificate().data.kind == DeviceKind::Cli,
                         reactions: vec![],
                         latest_seq: message.seq,
                     })
