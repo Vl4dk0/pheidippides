@@ -360,6 +360,14 @@ impl Validate for CreateChannelRequest {
 }
 impl Validate for UpdateChannelRequest {
     fn validate(&self) -> Result<(), ValidationError> {
+        if !self.wrapped_keys.is_empty() {
+            PutKeysRequest {
+                membership: None,
+                epoch: self.meta_epoch,
+                wrapped_keys: self.wrapped_keys.clone(),
+            }
+            .validate()?;
+        }
         self.meta.validate()?;
         self.membership.validate()?;
         check(

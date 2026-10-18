@@ -37,3 +37,7 @@ CREATE INDEX IF NOT EXISTS blob_refs_thread ON blob_refs(thread_id);
 
 CREATE TABLE IF NOT EXISTS trust_pins(space_id TEXT PRIMARY KEY REFERENCES spaces(id), json TEXT NOT NULL);
 CREATE UNIQUE INDEX IF NOT EXISTS one_invite_person ON grants(space_id,json_extract(json,'$.record.data.person_id')) WHERE json_extract(json,'$.record.data.kind')='invite';
+
+CREATE TABLE IF NOT EXISTS message_mentions(message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE, person_id TEXT NOT NULL, handle TEXT NOT NULL, PRIMARY KEY(message_id,person_id,handle));
+CREATE INDEX IF NOT EXISTS mentions_person ON message_mentions(person_id,handle,message_id);
+CREATE INDEX IF NOT EXISTS devices_person ON devices(person_id,space_id);

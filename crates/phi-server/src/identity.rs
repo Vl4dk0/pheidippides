@@ -43,12 +43,7 @@ impl Db {
         )?;
         Ok(token)
     }
-    pub fn create_space(
-        &mut self,
-        request: CreateSpaceRequest,
-        admin: Option<&str>,
-    ) -> Result<CreateSpaceResponse> {
-        request.validate()?;
+    pub fn authorize_creation(&self, admin: Option<&str>) -> Result<()> {
         if self.config.allow_space_creation == crate::config::Creation::Token {
             let expected = self
                 .config
@@ -59,6 +54,15 @@ impl Db {
                 return Err(ApiError::forbidden());
             }
         }
+        Ok(())
+    }
+    pub fn create_space(
+        &mut self,
+        request: CreateSpaceRequest,
+        admin: Option<&str>,
+    ) -> Result<CreateSpaceResponse> {
+        request.validate()?;
+        self.authorize_creation(admin)?;
         let root = &request.root_cert;
         let bundle = TrustBundle {
             root: root.clone(),

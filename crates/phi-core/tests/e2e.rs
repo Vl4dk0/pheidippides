@@ -105,8 +105,16 @@ async fn create_invite_join_attachment_fetch_read_reply() -> Result<()> {
 async fn claim_exclusivity_reactions_unread_and_person_cursor() -> Result<()> {
     let f = Fixture::new().await?;
     let (mut alice, mut bob) = f.pair().await?;
+    let invite = alice.invite(false, false).await?;
+    let mut carol = Client::join(f.store("carol"), &invite, "carol").await?;
     let root = alice.send("#all", "Task", options("review")).await?;
+    carol.wait(0).await?;
     bob.react(root.id, ReactionKind::Claim, false).await?;
+    ensure!(bob.fetch().await?.contains("1 claimed by you"));
+    let events = carol.wait(0).await?;
+    ensure!(events.iter().any(|e|matches!(e,WaitEntry::Reaction(r) if r.data.message_id==root.id && r.data.kind==ReactionKind::Claim)));
+    let view = carol.read(root.id, ReadOptions::default()).await?;
+    ensure!(view.text().contains("claimed by bob/cli"));
     ensure!(
         alice
             .react(root.id, ReactionKind::Claim, false)
@@ -117,6 +125,17 @@ async fn claim_exclusivity_reactions_unread_and_person_cursor() -> Result<()> {
     let view = alice.read(root.id, ReadOptions::default()).await?;
     ensure!(view.text().contains("claimed by bob/cli") && view.text().contains("ack×1"));
     bob.react(root.id, ReactionKind::Claim, true).await?;
+    ensure!(carol.wait(0).await?.iter().any(
+        |e| matches!(e,WaitEntry::Reaction(r) if r.data.kind==ReactionKind::Claim && r.data.remove)
+    ));
+    ensure!(
+        !carol
+            .read(root.id, ReadOptions::default())
+            .await?
+            .text()
+            .contains("claimed by bob/cli")
+    );
+
     alice.react(root.id, ReactionKind::Claim, false).await?;
     bob.read(root.id, ReadOptions::default()).await?;
     ensure!(bob.counts().await?.unread_threads == 0);
@@ -434,6 +453,11 @@ async fn names_slug_collisions_self_channel_and_secret_link_refusal() -> Result<
         )
         .await?;
     ensure!(alice.counts().await?.unread_threads == 1);
+    let mut other_session =
+        Client::open(f.store("alice"), alice.profile.clone(), Some("second")).await?;
+    ensure!(!other_session.fetch().await?.is_empty());
+    other_session.read(root.id, ReadOptions::default()).await?;
+    ensure!(alice.counts().await?.unread_threads == 0);
     ensure!(
         alice.read(root.id, ReadOptions::default()).await?.messages[0]
             .message

@@ -26,13 +26,15 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
-use tokio::sync::watch;
+use tokio::sync::{Semaphore, watch};
 
 #[derive(Clone)]
 pub struct Server {
     store: Store,
     notifications: Arc<Mutex<BTreeMap<SpaceId, watch::Sender<u64>>>>,
     max_body: usize,
+    config: Arc<Config>,
+    uploads: Arc<Semaphore>,
 }
 impl Server {
     pub fn open(config: Config) -> anyhow::Result<Self> {
@@ -42,11 +44,14 @@ impl Server {
             .and_then(|n| n.checked_add(4096))
             .ok_or_else(|| anyhow::anyhow!("blob limit too large"))?
             .max(1024 * 1024);
-        let store = Store::open(config).map_err(|e| anyhow::anyhow!("{:?}", e.0))?;
+        let config = Arc::new(config);
+        let store = Store::open((*config).clone()).map_err(|e| anyhow::anyhow!("{:?}", e.0))?;
         Ok(Self {
             store,
             notifications: Arc::new(Mutex::new(BTreeMap::new())),
             max_body,
+            config,
+            uploads: Arc::new(Semaphore::new(1)),
         })
     }
     pub fn router(&self) -> Router {
@@ -71,10 +76,34 @@ impl Server {
         Ok(())
     }
     pub async fn sweep(&self, unix_seconds: u64) -> anyhow::Result<u64> {
-        self.store
+        let (deleted, garbage) = self
+            .store
             .call(move |db| db.sweep(unix_seconds))
             .await
-            .map_err(|e| anyhow::anyhow!("{:?}", e.0))
+            .map_err(|e| anyhow::anyhow!("{:?}", e.0))?;
+        // Tombstones commit before slow filesystem work; interruption retries on the next sweep.
+        let path = self.config.data_dir.join("blobs");
+        let cleaned = tokio::task::spawn_blocking(move || -> std::io::Result<Vec<String>> {
+            for id in &garbage {
+                match std::fs::remove_file(path.join(id)) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            Ok(garbage)
+        })
+        .await??;
+        self.store
+            .call(move |db| {
+                for id in cleaned {
+                    db.conn.execute("DELETE FROM blob_gc WHERE id=?", [id])?;
+                }
+                Ok(())
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("{:?}", e.0))?;
+        Ok(deleted)
     }
     pub async fn backup(&self, dest: std::path::PathBuf) -> anyhow::Result<()> {
         self.store
@@ -181,7 +210,46 @@ async fn handle_result(server: Server, request: Request) -> Result<serde_json::V
     if let (&Method::GET, ["v1", "spaces", sid, "events"]) = (&method, parts.as_slice()) {
         return value(server.events(token, id(sid)?, query(&raw_query)?).await?);
     }
-    let max = if path == "/v1/blobs" {
+    let preflight_token = token.clone();
+    let preflight_path = path.clone();
+    let preflight_method = method.clone();
+    server
+        .store
+        .call(move |db| {
+            let parts: Vec<_> = preflight_path.trim_matches('/').split('/').collect();
+            match (&preflight_method, parts.as_slice()) {
+                (&Method::POST, ["v1", "spaces"]) => {
+                    db.authorize_creation(preflight_token.as_deref())
+                }
+                (&Method::GET, ["v1", "grants", _])
+                | (&Method::POST, ["v1", "grants", _, "redeem"]) => Ok(()),
+                _ => {
+                    let auth = db.auth(preflight_token.as_deref())?;
+                    if matches!(
+                        (&preflight_method, parts.as_slice()),
+                        (&Method::POST, ["v1", "channels", _, "messages"])
+                    ) {
+                        db.rate_limit(&auth)?;
+                    }
+                    Ok(())
+                }
+            }
+        })
+        .await?;
+    let uploading = method == Method::POST && path == "/v1/blobs";
+    // Reject excess uploads before touching their bodies, bounding aggregate ciphertext buffers.
+    let permit = if uploading {
+        Some(
+            server
+                .uploads
+                .clone()
+                .try_acquire_owned()
+                .map_err(|_| ApiError(ErrorBody::RateLimited { retry_after: 1 }))?,
+        )
+    } else {
+        None
+    };
+    let max = if uploading {
         server.max_body
     } else {
         1024 * 1024
@@ -191,7 +259,62 @@ async fn handle_result(server: Server, request: Request) -> Result<serde_json::V
             message: "request body limit exceeded".into(),
         })
     })?;
-    let is_write = method != Method::GET;
+    if let Some(permit) = permit {
+        let config = server.config.clone();
+        let staged = tokio::task::spawn_blocking(move || {
+            let request: UploadBlobRequest =
+                serde_json::from_slice(&body).map_err(ApiError::invalid)?;
+            blobs::StagedBlob::write(&config, request, permit)
+        })
+        .await
+        .map_err(ApiError::internal)??;
+        let (result, staged) = server
+            .store
+            .call(move |db| {
+                let mut staged = staged;
+                let result = (|| {
+                    let auth = db.auth(token.as_deref())?;
+                    db.touch(&auth)?;
+                    db.commit_blob(&auth, &staged.blob)?;
+                    staged.persist();
+                    value(&staged.blob)
+                })();
+                // Return ownership past the DB guard, even on auth/quota failure.
+                Ok((result, staged))
+            })
+            .await?;
+        tokio::task::spawn_blocking(move || drop(staged))
+            .await
+            .map_err(ApiError::internal)?;
+        return result;
+    }
+
+    if let (&Method::GET, ["v1", "blobs", bid]) = (&method, parts.as_slice()) {
+        let bid = id(bid)?;
+        let (blob, mut file) = server
+            .store
+            .call(move |db| {
+                let auth = db.auth(token.as_deref())?;
+                db.touch(&auth)?;
+                let blob = db.blob(&auth, bid)?;
+                // Open while its row is visible; an in-flight download survives retention unlink.
+                let file = std::fs::File::open(
+                    db.config.data_dir.join("blobs").join(blob.id.to_string()),
+                )?;
+                Ok((blob, file))
+            })
+            .await?;
+        return tokio::task::spawn_blocking(move || {
+            let mut bytes = Vec::new();
+            std::io::Read::read_to_end(&mut file, &mut bytes)?;
+            value(DownloadBlobResponse {
+                blob,
+                ciphertext: Base64Bytes::new(bytes),
+            })
+        })
+        .await
+        .map_err(ApiError::internal)?;
+    }
     let notifier = server.clone();
     server
         .store
@@ -201,20 +324,21 @@ async fn handle_result(server: Server, request: Request) -> Result<serde_json::V
                 (&method, p.as_slice())
             {
                 let response = db.create_space(parse(&body)?, token.as_deref())?;
-                let sid = response.space.id;
-                (value(response)?, Some(sid))
+                (value(response)?, None)
             } else if let (&Method::GET, ["v1", "grants", gid]) = (&method, p.as_slice()) {
                 (value(db.grant(id(gid)?)?)?, None)
             } else if let (&Method::POST, ["v1", "grants", gid, "redeem"]) = (&method, p.as_slice())
             {
                 let response = db.redeem(id(gid)?, parse(&body)?)?;
-                let sid = response.grant.record.data.space_id;
-                (value(response)?, Some(sid))
+                (value(response)?, None)
             } else {
                 let auth = db.auth(token.as_deref())?;
+                let before = db.latest(auth.sid())?;
+                let response = dispatch(db, &auth, &method, &p, &raw_query, &body)?;
+                db.touch(&auth)?;
                 (
-                    dispatch(db, &auth, &method, &p, &raw_query, &body)?,
-                    is_write.then_some(auth.sid()),
+                    response,
+                    (db.latest(auth.sid())? > before).then_some(auth.sid()),
                 )
             };
             // Commit notifications survive cancellation of the HTTP request future.
@@ -311,11 +435,9 @@ fn dispatch(
             a.space(id(sid)?)?;
             value(db.counts(a, query(q)?)?)
         }
-        (&Method::POST, ["v1", "blobs"]) => {
-            let r: UploadBlobRequest = serde_json::from_slice(body).map_err(ApiError::invalid)?;
-            value(db.upload(a, r)?)
-        }
-        (&Method::GET, ["v1", "blobs", bid]) => value(db.download(a, id(bid)?)?),
         _ => Err(ApiError::missing()),
     }
 }
+
+#[cfg(test)]
+mod tests;

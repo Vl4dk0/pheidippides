@@ -51,3 +51,10 @@ Different clients may conservatively rotate more than once; published epochs are
 monotone, and accepted key accounts are immutable. Proposed keys enter those
 accounts only after a successful PUT; server self-wraps recover committed keys
 after an interrupted response. Concurrent stale roster updates return conflict.
+
+Group shrink publishes its new signed roster, encrypted metadata, and complete
+remaining-device epoch wraps atomically in one PATCH. The server rejects shrink
+without rotation, including replacing one person with another at equal roster
+size. Reaction pages and wait events expose channel-wide claim/unclaim state;
+fetch remains the specification's counts-only operation. Self-channel sends leave
+the shared person cursor unread until another session explicitly reads the thread.

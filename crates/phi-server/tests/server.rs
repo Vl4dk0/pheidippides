@@ -468,7 +468,7 @@ async fn admin_creation_auth_and_major_version_are_enforced() -> TestResult {
         json!({"root_cert":f.root.cert,"all_channel":{"bad":0}}),
     )
     .await?;
-    assert_eq!(s, 400);
+    assert_eq!(s, 403);
     let conn = rusqlite::Connection::open(f.dir.path().join("phi.db"))?;
     let channels: Vec<String> = {
         let mut q = conn.prepare("SELECT json FROM channels ORDER BY kind")?;
@@ -845,7 +845,7 @@ async fn channels_enforce_membership_and_complete_rotation() -> TestResult {
         .0,
         404
     );
-    let mut partial = PutKeysRequest {
+    let partial = PutKeysRequest {
         membership: Some(next_roster(
             &f.root.cert,
             &f.root.key,
@@ -868,58 +868,108 @@ async fn channels_enforce_membership_and_complete_rotation() -> TestResult {
         .0,
         400
     );
-    let updated: Channel = ok(
-        &f.app,
-        "PATCH",
-        &format!("/v1/channels/{cid}"),
-        Some(&f.root.token),
-        UpdateChannelRequest {
-            membership: next_roster(
-                &f.root.cert,
-                &f.root.key,
-                &c.membership,
-                0,
-                vec![f.root.cert.data.person_id],
-            )?,
-            meta_epoch: 0,
-            meta: cipher(16),
-            members: vec![f.root.cert.data.person_id],
-        },
-    )
-    .await?;
-    trusted.verify_channel(&updated, Some(&c.membership))?;
+    let replacement = UpdateChannelRequest {
+        wrapped_keys: vec![],
+        membership: next_roster(
+            &f.root.cert,
+            &f.root.key,
+            &c.membership,
+            0,
+            vec![f.root.cert.data.person_id, outsider.cert.data.person_id],
+        )?,
+        meta_epoch: 0,
+        meta: cipher(16),
+        members: vec![f.root.cert.data.person_id, outsider.cert.data.person_id],
+    };
     assert_eq!(
         request(
             &f.app,
             "PATCH",
             &format!("/v1/channels/{cid}"),
             Some(&f.root.token),
-            UpdateChannelRequest {
-                membership: updated.membership.clone(),
-                meta_epoch: 0,
-                meta: cipher(16),
-                members: updated.members.clone()
-            }
+            replacement
         )
         .await?
         .0,
         409
     );
-    partial.membership = Some(next_roster(
+    let mut shrink = UpdateChannelRequest {
+        wrapped_keys: vec![],
+        membership: next_roster(
+            &f.root.cert,
+            &f.root.key,
+            &c.membership,
+            0,
+            vec![f.root.cert.data.person_id],
+        )?,
+        meta_epoch: 0,
+        meta: cipher(16),
+        members: vec![f.root.cert.data.person_id],
+    };
+    assert_eq!(
+        request(
+            &f.app,
+            "PATCH",
+            &format!("/v1/channels/{cid}"),
+            Some(&f.root.token),
+            &shrink
+        )
+        .await?
+        .0,
+        409
+    );
+    shrink.meta_epoch = 1;
+    shrink.membership = next_roster(
         &f.root.cert,
         &f.root.key,
-        &updated.membership,
+        &c.membership,
         1,
-        vec![f.root.cert.data.person_id],
-    )?);
+        shrink.members.clone(),
+    )?;
+    assert_eq!(
+        request(
+            &f.app,
+            "PATCH",
+            &format!("/v1/channels/{cid}"),
+            Some(&f.root.token),
+            &shrink
+        )
+        .await?
+        .0,
+        400
+    );
+    // The old membership still works after both rejected publications.
     let _: GetKeysResponse = ok(
         &f.app,
-        "PUT",
-        &format!("/v1/channels/{cid}/keys"),
-        Some(&f.root.token),
-        partial,
+        "GET",
+        &format!("/v1/channels/{cid}/keys/mine"),
+        Some(&person.token),
+        json!(null),
     )
     .await?;
+    shrink.wrapped_keys = vec![wrapped(cid, f.root.cert.data.device_id, 1)];
+    let updated: Channel = ok(
+        &f.app,
+        "PATCH",
+        &format!("/v1/channels/{cid}"),
+        Some(&f.root.token),
+        &shrink,
+    )
+    .await?;
+    trusted.verify_channel(&updated, Some(&c.membership))?;
+    assert_eq!(updated.current_epoch, 1);
+    assert_eq!(
+        request(
+            &f.app,
+            "PATCH",
+            &format!("/v1/channels/{cid}"),
+            Some(&f.root.token),
+            &shrink
+        )
+        .await?
+        .0,
+        409
+    );
     assert_eq!(
         request(
             &f.app,
@@ -1137,6 +1187,22 @@ async fn counts_mentions_claims_and_read_cursors_are_per_person() -> TestResult 
     )
     .await?;
     assert_eq!(all_handles.mentions, 1);
+    // Existing databases backfill the index once without changing count semantics.
+    let connection = rusqlite::Connection::open(f.dir.path().join("phi.db"))?;
+    connection.execute_batch("DROP TABLE message_mentions; PRAGMA user_version=0;")?;
+    let upgraded = Server::open(f.config.clone())?;
+    let after_upgrade: Counts = ok(
+        &upgraded.router(),
+        "GET",
+        &f.space("/counts?handle=worker"),
+        Some(&p.token),
+        json!(null),
+    )
+    .await?;
+    assert_eq!(
+        (after_upgrade.unread_threads, after_upgrade.mentions),
+        (1, 1)
+    );
     let c: Counts = ok(
         &f.app,
         "GET",
@@ -1195,7 +1261,7 @@ async fn counts_mentions_claims_and_read_cursors_are_per_person() -> TestResult 
     Ok(())
 }
 #[tokio::test]
-async fn event_feed_hides_private_channels_and_targets_reactions_to_authors() -> TestResult {
+async fn event_feed_hides_private_channels_and_shares_channel_reactions() -> TestResult {
     let f = Fixture::new().await?;
     let p = f.join(&f.root, GrantKind::Invite).await?;
     let private = f.send(&f.root, f.own, None).await?;
@@ -1217,7 +1283,7 @@ async fn event_feed_hides_private_channels_and_targets_reactions_to_authors() ->
         json!(null),
     )
     .await?;
-    assert_eq!(e.events.len(), 1);
+    assert_eq!(e.events.len(), 2);
     assert!(e.next_after > public.seq);
     assert!(e.events.iter().all(|e| e.seq != private.seq));
     let e: EventsResponse = ok(
@@ -1246,6 +1312,11 @@ async fn event_feed_hides_private_channels_and_targets_reactions_to_authors() ->
 async fn multiple_long_polls_wake_and_revocation_interrupts_waiters() -> TestResult {
     let f = Fixture::new().await?;
     let p = f.join(&f.root, GrantKind::Invite).await?;
+    let conn = rusqlite::Connection::open(f.dir.path().join("phi.db"))?;
+    conn.execute(
+        "UPDATE devices SET json=json_set(json,'$.last_seen_at',1) WHERE id=?",
+        [p.cert.data.device_id.to_string()],
+    )?;
     let mut waiters = Vec::new();
     for _ in 0..1000 {
         let path = f.space("/events?after=0&timeout=10");
@@ -1256,6 +1327,12 @@ async fn multiple_long_polls_wake_and_revocation_interrupts_waiters() -> TestRes
         }));
     }
     tokio::time::sleep(Duration::from_millis(150)).await;
+    let seen: u64 = conn.query_row(
+        "SELECT json_extract(json,'$.last_seen_at') FROM devices WHERE id=?",
+        [p.cert.data.device_id.to_string()],
+        |r| r.get(0),
+    )?;
+    assert_eq!(seen, 1, "idle polls must not write last_seen");
     let m = f.send(&f.root, f.all, None).await?;
     for task in waiters {
         let (status, value, _) = tokio::time::timeout(Duration::from_secs(5), task).await???;
@@ -1495,7 +1572,22 @@ async fn token_buckets_return_retry_after_and_survive_restart() -> TestResult {
         c.limits.messages_per_hour = 2
     })
     .await?;
-    let _ = f.send(&f.root, f.all, None).await?;
+    let mut garbage = f.message(&f.root, f.all, None, vec![])?;
+    garbage.envelope.ciphertext = Base64Bytes::new(vec![8; MAX_CIPHERTEXT_BYTES]);
+    garbage.signature = Signature::from_bytes([0; 64]);
+    assert_eq!(
+        request(
+            &f.app,
+            "POST",
+            &format!("/v1/channels/{}/messages", f.all),
+            Some(&f.root.token),
+            garbage
+        )
+        .await?
+        .0,
+        400
+    );
+
     let path = format!("/v1/channels/{}/messages", f.all);
     let r = f.message(&f.root, f.all, None, vec![])?;
     let (s, e, h) = request(&f.app, "POST", &path, Some(&f.root.token), &r).await?;
@@ -1625,5 +1717,116 @@ async fn config_cli_overrides_and_backup_use_deployment_contract() -> TestResult
     assert!(Config::load(&config_path).is_err());
     std::fs::write(&config_path, "allow_space_creation='anyone'\nunknown=1\n")?;
     assert!(Config::load(&config_path).is_err());
+    Ok(())
+}
+
+#[tokio::test]
+async fn upload_admission_precedes_body_reads_and_rechecks_revocation() -> TestResult {
+    let f = Fixture::new().await?;
+    let person = f.join(&f.root, GrantKind::Invite).await?;
+    let polled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let make_body = |polled: std::sync::Arc<std::sync::atomic::AtomicBool>| {
+        Body::from_stream(futures_util::stream::once(async move {
+            polled.store(true, Ordering::SeqCst);
+            Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b"{}"))
+        }))
+    };
+    let unauthorized = f
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/blobs")
+                .header("Phi-Protocol", PROTOCOL_MAJOR)
+                .body(make_body(polled.clone()))?,
+        )
+        .await?;
+    assert_eq!(unauthorized.status(), 401);
+    assert!(!polled.load(Ordering::SeqCst));
+    let started = std::sync::Arc::new(tokio::sync::Notify::new());
+    let release = std::sync::Arc::new(tokio::sync::Notify::new());
+    let data = serde_json::to_vec(&UploadBlobRequest {
+        space_id: f.sid,
+        ciphertext: Base64Bytes::new(vec![5; 32]),
+    })?;
+    let (entered, resume) = (started.clone(), release.clone());
+    let body = Body::from_stream(futures_util::stream::once(async move {
+        entered.notify_one();
+        resume.notified().await;
+        Ok::<_, std::io::Error>(axum::body::Bytes::from(data))
+    }));
+    let first = Request::builder()
+        .method("POST")
+        .uri("/v1/blobs")
+        .header("Phi-Protocol", PROTOCOL_MAJOR)
+        .header("Authorization", format!("Bearer {}", person.token))
+        .body(body)?;
+    let app = f.app.clone();
+    let pending = tokio::spawn(async move { app.oneshot(first).await });
+    tokio::time::timeout(Duration::from_secs(2), started.notified()).await?;
+    let second = f
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/blobs")
+                .header("Phi-Protocol", PROTOCOL_MAJOR)
+                .header("Authorization", format!("Bearer {}", f.root.token))
+                .body(make_body(polled.clone()))?,
+        )
+        .await?;
+    assert_eq!(second.status(), 429);
+    assert!(!polled.load(Ordering::SeqCst));
+    let _: Space = tokio::time::timeout(
+        Duration::from_secs(1),
+        ok(
+            &f.app,
+            "GET",
+            &f.space(""),
+            Some(&f.root.token),
+            json!(null),
+        ),
+    )
+    .await??;
+    let rev = sign_revocation(
+        RevocationData {
+            space_id: f.sid,
+            target: RevocationTarget::Device {
+                device_id: person.cert.data.device_id,
+            },
+            issuer_device: f.root.cert.data.device_id,
+            created_at: timestamp(),
+        },
+        &f.root.key,
+    )?;
+    let _: Revocation = ok(
+        &f.app,
+        "POST",
+        &f.space("/revocations"),
+        Some(&f.root.token),
+        CreateRevocationRequest { revocation: rev },
+    )
+    .await?;
+    release.notify_one();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), pending)
+            .await???
+            .status(),
+        401
+    );
+    assert_eq!(std::fs::read_dir(f.dir.path().join("blobs"))?.count(), 0);
+    let _: Blob = ok(
+        &f.app,
+        "POST",
+        "/v1/blobs",
+        Some(&f.root.token),
+        UploadBlobRequest {
+            space_id: f.sid,
+            ciphertext: Base64Bytes::new(vec![6; 32]),
+        },
+    )
+    .await?;
     Ok(())
 }

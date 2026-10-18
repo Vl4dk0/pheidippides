@@ -42,11 +42,15 @@ are cached under `data_dir/acme`. TLS off does not add TLS headers or trust prox
 identity; authorization always uses bearer tokens. SIGINT/SIGTERM stop serving.
 
 SQLite uses WAL and indexes space sequences, channel/thread sequences,
-membership, claims, and retention activity. Blocking SQLite/filesystem work runs
-on Tokio's blocking pool under a process-wide database lock. Idle long-polls
+membership, normalized mentions, claims, and retention activity. SQLite work runs
+on Tokio's blocking pool under a process-wide database lock. Counts use indexed
+mention metadata; existing databases backfill it once at startup. Blob writes/fsync,
+download reads, and retention file cleanup run outside that lock. Idle long-polls
 hold no database lock/connection or blocking worker: they share one watch sender
 per accessed, authenticated space. Request work is serialized, appropriate for
-the specified low message throughput. No per-waiter polling timer/query loop.
+the specified low message throughput. Only committed event inserts notify waiters. Poll authentication never updates
+`last_seen_at`; ordinary authenticated traffic updates it at most once per minute.
+No per-waiter polling timer/query loop.
 
 Hourly retention also runs at startup. A thread's server activity includes
 messages and reaction changes. Sweeps cascade roots/replies, reactions, cursors,
@@ -71,7 +75,12 @@ All paths below start with `/v1`. JSON request/response type names are exported 
 `Phi-Protocol: 1`. Success is HTTP 200 and JSON. Requests reject unknown fields,
 including nested signed records. Typed query/path fields and size bounds are
 validated; ordinary JSON bodies are capped at 1 MiB before parsing, blob uploads
-at a configured base64-aware bound. Blob JSON buffers ciphertext in memory.
+at a configured base64-aware bound. Authentication precedes body consumption.
+Blob JSON buffers ciphertext in memory; a single process-wide upload permit bounds
+aggregate upload buffers to one maximum-size body plus decoded ciphertext. Excess
+uploads get 429/Retry-After before their bodies are polled. Files are synced outside
+the database lock, then authorization and quota are rechecked at publication;
+interrupted or rejected uploads clean up their unpublished files.
 
 | Method/path | Body or query | Response |
 |---|---|---|
@@ -112,8 +121,11 @@ channels. Invites add their new person to #all; enrollment adds another device
 to the issuer's person. Clients create additional self/DM/group channels, and
 redeemers PUT their rewrapped keys. All membership is person-based. Group PATCH
 may change membership/meta; all, self, and DM membership is fixed, with
-metadata-only PATCH updates permitted for encrypted client-side name registries. Rotations
-advance exactly one epoch and wrap to every remaining active member device;
+metadata-only PATCH updates permitted for encrypted client-side name registries.
+Removing any person (including an equal-size replacement) requires one atomic
+PATCH with the next signed membership epoch, metadata encrypted at that epoch,
+and `wrapped_keys` for every remaining active device. A rejected PATCH leaves the
+old roster, epoch, and wraps unchanged. Rotations advance exactly one epoch and wrap to every remaining active member device;
 same/older-epoch PUT may add only the authenticated device's own immutable wrap.
 
 Messages must use the current epoch and a root thread in the same channel.
@@ -129,7 +141,8 @@ the same person can remove one from any handle, with a signed removal request.
 Message pages are ascending by seq, default 100, maximum 1000. `next_after` is
 the final returned message seq. Events default to a 600-second wait, capped at
 900; `timeout=0` reads backlog immediately. Events include all messages in joined
-channels, reactions on the caller's messages, and space settings/revocations.
+channels, all reactions in those channels, and space settings/revocations.
+Reaction author targeting is retained as routing metadata, not an access filter.
 The optional handle is validated; highlighting targeted mentions is a client
 responsibility, since every channel message is relevant. Events return at most
 1000 rows and a cursor that safely skips inaccessible events without skipping
@@ -144,8 +157,8 @@ descriptors. Blob downloads require uploader ownership or membership in a thread
 channel referencing the blob. Sharing a blob requires the same access. Per-file
 limits include 16 extra tag bytes; quotas count complete stored ciphertext.
 
-Two persistent token buckets gate successful message inserts atomically (minute
-and hour); effective rates are the smaller of server limits and signed space
+Two persistent token buckets gate authenticated send attempts before body parsing
+and signature verification (minute and hour); invalid requests also spend tokens; effective rates are the smaller of server limits and signed space
 settings. Restarting does not reset buckets. HTTP 429 includes `Retry-After`
 in seconds. Other operations do not consume message tokens.
 

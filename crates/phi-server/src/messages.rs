@@ -28,7 +28,6 @@ impl Db {
         }
         phi_crypto::verify_message_signature(&a.cert.data.sign_pub, e, &r.signature)?;
         self.transaction(|db| {
-            db.rate_limit(a)?;
             let thread = if let Some(tid) = e.thread_id {
                 let root = db.message(a, tid)?;
                 if root.envelope.thread_id.is_some() || root.envelope.channel_id != cid {
@@ -83,6 +82,16 @@ impl Db {
                     json(&message)?
                 ],
             )?;
+            for mention in &message.envelope.mentions {
+                db.conn.execute(
+                    "INSERT INTO message_mentions VALUES(?,?,?)",
+                    params![
+                        message.id.to_string(),
+                        mention.person_id.to_string(),
+                        mention.handle.as_ref().map_or("",Handle::as_str)
+                    ],
+                )?;
+            }
             // Blob IDs are routing metadata; plaintext attachment keys never reach the host.
             for id in &r.blob_ids {
                 let blob: Blob = db.one(
@@ -310,10 +319,8 @@ impl Db {
         let mut statement = self.conn.prepare(
             "
             SELECT m.channel_id,COUNT(DISTINCT m.thread_id),COALESCE(SUM((SELECT
-            COUNT(*) FROM json_each(m.json,'$.envelope.mentions') j WHERE
-            json_extract(j.value,'$.person_id')=? AND (? IS NULL OR
-            json_extract(j.value,'$.handle') IS NULL OR
-            json_extract(j.value,'$.handle')=?))),0) FROM messages m JOIN members
+            COUNT(*) FROM message_mentions mm WHERE mm.message_id=m.id
+            AND mm.person_id=? AND (? IS NULL OR mm.handle='' OR mm.handle=?))),0) FROM messages m JOIN members
             cm ON cm.channel_id=m.channel_id LEFT JOIN cursors c ON
             c.thread_id=m.thread_id AND c.person_id=cm.person_id WHERE
             cm.person_id=? AND m.space_id=? AND m.seq>COALESCE(c.seq,0) GROUP BY
@@ -367,13 +374,11 @@ impl Db {
             "
             SELECT e.json FROM events e WHERE e.space_id=? AND e.seq>? AND
             ((e.channel_id IS NULL) OR EXISTS(SELECT 1 FROM members m WHERE
-            m.channel_id=e.channel_id AND m.person_id=?)) AND (e.target_person IS
-            NULL OR e.target_person=?) ORDER BY e.seq LIMIT 1000
+            m.channel_id=e.channel_id AND m.person_id=?)) ORDER BY e.seq LIMIT 1000
         ",
             params![
                 a.sid().to_string(),
                 q.after.min(i64::MAX as u64),
-                a.person().to_string(),
                 a.person().to_string()
             ],
         )?;
