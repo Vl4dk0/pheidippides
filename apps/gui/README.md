@@ -91,9 +91,11 @@ and their decrypted cache path. The prototype composer sends text only.
   decrypted message/attachment caches remain plaintext as in phi-core. Keychain
   protection does not encrypt those caches or defend against a compromised OS.
 - While open, one background frontend loop per profile invokes the core's
-  durable `wait` cursor using a separate client. Startup backlog is drained
-  quietly, then requests long-poll for 60 seconds. Foreground commands use
-  independent clients so sending is not delayed by the poll. Errors are visible
+  durable `wait` cursor using a separate client. Only the first successful poll
+  is quiet; the next poll can notify even if the first returned backlog. Later
+  requests long-poll for 60 seconds. Foreground commands use
+  independent clients so sending is not delayed by the poll. Rejected events are
+  recorded by the core and surfaced through validated IPC error strings. Errors are visible
   with bounded retry backoff; closing the app stops the loops. There is no
   daemon. Selection generations reject stale UI responses after navigation.
 - The [Tauri notification plugin](https://v2.tauri.app/plugin/notification/)

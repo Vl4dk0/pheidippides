@@ -1,11 +1,159 @@
 use anyhow::{Result, ensure};
+use axum::{
+    body::{Body, to_bytes},
+    extract::{Request, State},
+    http::{Method, StatusCode},
+    middleware::Next,
+    response::{IntoResponse, Response},
+};
 use phi_core::*;
 use phi_proto::*;
 use phi_server::{
     Server,
     config::{Config, Creation},
 };
-use std::{path::PathBuf, time::Duration};
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+
+#[derive(Clone, Default)]
+struct Faults {
+    omit_device: Option<DeviceId>,
+    hide_revocations: bool,
+    inflate_cursor: bool,
+    corrupt_event: Option<MessageId>,
+    unsigned_retention: Option<u32>,
+    backdate_messages: bool,
+    fail_metadata: Option<ChannelId>,
+    fail_rotation: Option<ChannelId>,
+    fail_revocations: bool,
+    fail_message: Option<MessageId>,
+    lose_revocation_response: bool,
+}
+async fn hostile_host(
+    State(faults): State<Arc<Mutex<Faults>>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let Ok(faults) = faults.lock().map(|f| f.clone()) else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    let path = request.uri().path().to_owned();
+    if (faults
+        .fail_metadata
+        .is_some_and(|id| path == format!("/v1/channels/{id}"))
+        && request.method() == Method::PATCH)
+        || (faults
+            .fail_rotation
+            .is_some_and(|id| path == format!("/v1/channels/{id}/keys"))
+            && request.method() == Method::PUT)
+        || (faults.fail_revocations
+            && path.ends_with("/revocations")
+            && request.method() == Method::POST)
+    {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            axum::Json(serde_json::json!({"error":"interrupted publication"})),
+        )
+            .into_response();
+    }
+    if faults
+        .fail_message
+        .is_some_and(|id| path == format!("/v1/messages/{id}"))
+    {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            axum::Json(serde_json::json!({"error":"temporary failure"})),
+        )
+            .into_response();
+    }
+    let response = next.run(request).await;
+    if faults.lose_revocation_response
+        && path.ends_with("/revocations")
+        && response.status().is_success()
+    {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            axum::Json(serde_json::json!({"error":"lost response after commit"})),
+        )
+            .into_response();
+    }
+    if !response.status().is_success()
+        || !response
+            .headers()
+            .get("content-type")
+            .is_some_and(|v| v.as_bytes().starts_with(b"application/json"))
+    {
+        return response;
+    }
+    let (mut parts, body) = response.into_parts();
+    let Ok(bytes) = to_bytes(body, 32 * 1024 * 1024).await else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return Response::from_parts(parts, Body::from(bytes));
+    };
+    if path.ends_with("/devices") {
+        if let Some(id) = faults.omit_device {
+            if let Some(devices) = value.get_mut("devices").and_then(|v| v.as_array_mut()) {
+                devices.retain(|device| device["cert"]["data"]["device_id"] != id.to_string());
+            }
+        }
+        if faults.hide_revocations {
+            value["directory"]["revocations"] = serde_json::json!([]);
+        }
+    }
+    if value.get("settings").is_some() {
+        if let Some(retention) = faults.unsigned_retention {
+            value["settings"]["retention_days"] = retention.into();
+            value["settings_change"] = serde_json::Value::Null;
+        }
+    }
+    if path.ends_with("/events") {
+        if faults.inflate_cursor {
+            value["next_after"] = 1_000_000.into();
+        }
+        if let Some(id) = faults.corrupt_event {
+            if let Some(events) = value.get_mut("events").and_then(|v| v.as_array_mut()) {
+                for event in events {
+                    if event["event"]["data"]["id"] == id.to_string() {
+                        event["event"]["data"]["signature"] =
+                            serde_json::to_value(Signature::from_bytes([0; 64]))
+                                .unwrap_or_default();
+                    }
+                }
+            }
+        }
+    }
+    if faults.backdate_messages {
+        backdate(&mut value);
+    }
+    parts.headers.remove("content-length");
+    match serde_json::to_vec(&value) {
+        Ok(body) => Response::from_parts(parts, Body::from(body)),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+fn backdate(value: &mut serde_json::Value) {
+    if value.get("envelope").is_some() && value.get("author_device").is_some() {
+        value["created_at"] = 1.into();
+    }
+    match value {
+        serde_json::Value::Object(map) => {
+            for value in map.values_mut() {
+                backdate(value);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                backdate(value);
+            }
+        }
+        _ => {}
+    }
+}
 use tempfile::TempDir;
 
 struct Fixture {
@@ -13,6 +161,7 @@ struct Fixture {
     url: String,
     server: Server,
     task: tokio::task::JoinHandle<()>,
+    faults: Arc<Mutex<Faults>>,
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -34,7 +183,11 @@ impl Fixture {
         let server = Server::open(config)?;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let url = format!("http://{}", listener.local_addr()?);
-        let router = server.router();
+        let faults = Arc::new(Mutex::new(Faults::default()));
+        let router = server.router().layer(axum::middleware::from_fn_with_state(
+            faults.clone(),
+            hostile_host,
+        ));
         let task = tokio::spawn(async move {
             let _ = axum::serve(listener, router).await;
         });
@@ -43,7 +196,16 @@ impl Fixture {
             url,
             server,
             task,
+            faults,
         })
+    }
+    fn faults(&self, update: impl FnOnce(&mut Faults)) -> Result<()> {
+        let mut faults = self
+            .faults
+            .lock()
+            .map_err(|_| anyhow::anyhow!("fault mutex poisoned"))?;
+        update(&mut faults);
+        Ok(())
     }
     fn store(&self, name: &str) -> Store {
         Store::new(
@@ -203,6 +365,7 @@ async fn wait_backlog_wakes_on_reply_and_keeps_per_handle_cursor() -> Result<()>
     let (mut alice, mut bob) = f.pair().await?;
     let root = alice.send("@bob", "Task", options("hello")).await?;
     ensure!(alice.wait(0).await?.is_empty());
+    f.faults(|faults| faults.inflate_cursor = true)?;
     let events = bob.wait(0).await?;
     ensure!(events.iter().any(|e| matches!(e, WaitEntry::Message(_))));
     let output = bob.format_wait_entry(&events[0]).await?;
@@ -212,6 +375,7 @@ async fn wait_backlog_wakes_on_reply_and_keeps_per_handle_cursor() -> Result<()>
             && output.contains(&format!("phi read {}", root.id))
     );
     ensure!(bob.wait(0).await?.is_empty());
+    f.faults(|faults| faults.inflate_cursor = false)?;
     bob.react(root.id, ReactionKind::Claim, false).await?;
     let own = bob.reply(root.id, options("my reply")).await?;
     let events = alice.wait(0).await?;
@@ -396,11 +560,82 @@ async fn enrollment_history_revoke_device_rotates_and_invalidates_token() -> Res
             .len()
             == 1
     );
-    alice
-        .revoke(RevocationTarget::Device {
-            device_id: laptop.profile.device_id,
-        })
-        .await?;
+    let all = alice
+        .channels
+        .iter()
+        .find(|c| c.channel.kind == ChannelKind::All)
+        .ok_or_else(|| anyhow::anyhow!("all missing"))?
+        .channel
+        .id;
+    f.faults(|faults| {
+        faults.omit_device = Some(laptop.profile.device_id);
+        faults.hide_revocations = true;
+        faults.fail_revocations = true;
+    })?;
+    ensure!(
+        alice
+            .revoke(RevocationTarget::Device {
+                device_id: laptop.profile.device_id
+            })
+            .await
+            .is_err()
+    );
+    let cache =
+        rusqlite::Connection::open(f.store("alice").cache_dir(&alice.profile).join("cache.db"))?;
+    let pinned: String =
+        cache.query_row("SELECT value FROM state WHERE name='trust'", [], |r| {
+            r.get(0)
+        })?;
+    let pinned: serde_json::Value = serde_json::from_str(&pinned)?;
+    ensure!(
+        pinned["bundle"]["revocations"]
+            .as_array()
+            .is_some_and(|r| r.len() == 1)
+    );
+    ensure!(
+        cache.query_row("SELECT COUNT(*) FROM pending_revocations", [], |r| r
+            .get::<_, u64>(0))?
+            == 1
+    );
+    f.faults(|faults| {
+        faults.fail_revocations = false;
+        faults.lose_revocation_response = true;
+        faults.fail_metadata = Some(all);
+    })?;
+    ensure!(
+        Client::open(f.store("alice"), alice.profile.clone(), None)
+            .await
+            .is_err()
+    );
+    ensure!(matches!(laptop.counts().await, Err(Error::Auth)));
+    f.faults(|faults| faults.lose_revocation_response = false)?;
+    ensure!(
+        Client::open(f.store("alice"), alice.profile.clone(), None)
+            .await
+            .is_err()
+    );
+    ensure!(
+        cache.query_row("SELECT COUNT(*) FROM pending_revocations", [], |r| r
+            .get::<_, u64>(0))?
+            == 0
+    );
+    // Every channel was processed even though the all-channel metadata PATCH failed.
+    alice.refresh().await?;
+    ensure!(alice.channels.iter().all(|c| c.channel.current_epoch == 1));
+    let protected: String = cache.query_row(
+        "SELECT value FROM state WHERE name=?",
+        [format!("protected/{all}")],
+        |r| r.get(0),
+    )?;
+    ensure!(protected != "[]");
+    f.faults(|faults| faults.fail_metadata = None)?;
+    alice = Client::open(f.store("alice"), alice.profile.clone(), None).await?;
+    ensure!(
+        alice
+            .channels
+            .iter()
+            .all(|c| c.channel.meta_epoch == 1 && c.channel.current_epoch == 1)
+    );
     ensure!(matches!(laptop.counts().await, Err(Error::Auth)));
     let new = alice.send("#all", "New key", options("private")).await?;
     ensure!(new.envelope.epoch == 1);
@@ -442,7 +677,7 @@ async fn removal_rotates_all_dm_and_group_and_isolates_removed_person() -> Resul
 async fn groups_add_remove_rotate_and_enroll_after_rotation() -> Result<()> {
     let f = Fixture::new().await?;
     let (mut alice, mut bob) = f.pair().await?;
-    alice.group_create("backend", &[]).await?;
+    let group = alice.group_create("backend", &[]).await?;
     alice
         .send(
             "#backend",
@@ -450,7 +685,17 @@ async fn groups_add_remove_rotate_and_enroll_after_rotation() -> Result<()> {
             options("private old history"),
         )
         .await?;
-    alice.group_member("backend", "@bob", false).await?;
+    f.faults(|faults| faults.fail_rotation = Some(group))?;
+    ensure!(alice.group_member("backend", "@bob", false).await.is_err());
+    f.faults(|faults| faults.fail_rotation = None)?;
+    alice = Client::open(f.store("alice"), alice.profile.clone(), None).await?;
+    ensure!(
+        alice
+            .channels
+            .iter()
+            .find(|c| c.channel.id == group)
+            .is_some_and(|c| c.channel.current_epoch == 1 && c.channel.meta_epoch == 1)
+    );
     let root = alice.send("#backend", "Group", options("shared")).await?;
     ensure!(
         bob.read(root.id, ReadOptions::default()).await?.messages[0]
@@ -600,6 +845,11 @@ async fn names_slug_collisions_self_channel_and_secret_link_refusal() -> Result<
 async fn local_cache_search_and_retention_prune_on_startup() -> Result<()> {
     let f = Fixture::new().await?;
     let mut alice = f.alice().await?;
+    alice.set_settings("retention_days", "2").await?;
+    f.faults(|faults| {
+        faults.backdate_messages = true;
+        faults.unsigned_retention = Some(0);
+    })?;
     let root = alice
         .send("#all", "Needle", options("searchable plaintext"))
         .await?;
@@ -607,11 +857,28 @@ async fn local_cache_search_and_retention_prune_on_startup() -> Result<()> {
     ensure!(alice.search("absent").await?.is_empty());
     let cache = f.store("alice").cache_dir(&alice.profile).join("cache.db");
     let conn = rusqlite::Connection::open(cache)?;
+    let mut reopened = Client::open(f.store("alice"), alice.profile.clone(), None).await?;
+    ensure!(reopened.settings.retention_days == 2);
+    ensure!(reopened.search("searchable").await?.len() == 1);
+    let observed: u64 = conn.query_row(
+        "SELECT CAST(value AS INTEGER) FROM state WHERE name=?",
+        [format!("activity/{}", root.id)],
+        |r| r.get(0),
+    )?;
+    ensure!(observed > 1);
     conn.execute("UPDATE messages SET created=1", [])?;
     conn.execute(
         "UPDATE state SET value='1' WHERE name LIKE 'activity/%'",
         [],
     )?;
+    // Reading identical signed evidence must not refresh retention.
+    reopened.read(root.id, ReadOptions::default()).await?;
+    let activity: String = conn.query_row(
+        "SELECT value FROM state WHERE name=?",
+        [format!("activity/{}", root.id)],
+        |r| r.get(0),
+    )?;
+    ensure!(activity == "1");
     let mut reopened = Client::open(f.store("alice"), alice.profile.clone(), None).await?;
     ensure!(reopened.search("searchable").await?.is_empty());
     reopened.read(root.id, ReadOptions::default()).await?;
@@ -648,7 +915,7 @@ async fn http_errors_admin_token_rate_limit_protocol_and_auth() -> Result<()> {
     ensure!(matches!(error, Error::RateLimited(_)) && error.exit_code() == 2);
     let response = reqwest::Client::new()
         .get(format!("{}/v1/spaces/{}", f.url, alice.profile.space_id))
-        .header("Phi-Protocol", 2)
+        .header("Phi-Protocol", PROTOCOL_MAJOR + 1)
         .send()
         .await?;
     ensure!(response.status().as_u16() == 426);
@@ -660,6 +927,8 @@ async fn persisted_trust_rejects_omitted_certificate_and_roster_rollback() -> Re
     let f = Fixture::new().await?;
     let (mut alice, bob) = f.pair().await?;
     alice.group_create("backend", &["@bob".into()]).await?;
+    let link = alice.invite(true, false).await?;
+    let mut laptop = Client::join(f.store("laptop"), &link, "alice").await?;
     alice.group_member("backend", "@bob", true).await?;
     let connection = rusqlite::Connection::open(f.dir.path().join("server/phi.db"))?;
     let channel = alice
@@ -669,6 +938,165 @@ async fn persisted_trust_rejects_omitted_certificate_and_roster_rollback() -> Re
         .ok_or_else(|| anyhow::anyhow!("missing group"))?
         .channel
         .clone();
+    let accounts =
+        FileKeyStore::open(&f.store("laptop").profile_dir(&laptop.profile).join("keys"))?;
+    let epoch_account = format!("channel/{}/1", channel.id);
+    ensure!(accounts.get(&epoch_account)?.is_none());
+    let mut invalid_meta = channel.clone();
+    invalid_meta.meta.ciphertext = Base64Bytes::new(vec![0; channel.meta.ciphertext.len()]);
+    connection.execute(
+        "UPDATE channels SET json=? WHERE id=?",
+        rusqlite::params![
+            serde_json::to_string(&invalid_meta)?,
+            channel.id.to_string()
+        ],
+    )?;
+    ensure!(laptop.refresh().await.is_err());
+    ensure!(accounts.get(&epoch_account)?.is_none());
+    // A former key holder can produce a valid sealed box and metadata under old
+    // bytes relabeled as an existing new epoch. Only the signed commitment detects it.
+    let prior = accounts
+        .get(&format!("channel/{}/0", channel.id))?
+        .ok_or_else(|| anyhow::anyhow!("old key missing"))?;
+    let prior: KeyBytes = serde_json::from_slice(&prior)?;
+    let recipient = laptop
+        .devices
+        .iter()
+        .find(|d| d.cert.data.device_id == laptop.profile.device_id)
+        .ok_or_else(|| anyhow::anyhow!("recipient missing"))?
+        .clone();
+    let mut entropy =
+        |bytes: &mut [u8]| getrandom::fill(bytes).map_err(|_| phi_crypto::CryptoError::Entropy);
+    let context = serde_json::to_vec(&(
+        "phi wrapped key v1",
+        (
+            laptop.profile.space_id,
+            channel.id,
+            1_u64,
+            laptop.profile.device_id,
+        ),
+    ))?;
+    let forged = WrappedKey {
+        channel_id: channel.id,
+        epoch: 1,
+        device_id: laptop.profile.device_id,
+        sealed: phi_crypto::seal(
+            &recipient.cert.data.kex_pub,
+            prior.as_bytes(),
+            &context,
+            &mut entropy,
+        )?,
+    };
+    let original_wrap: String = connection.query_row(
+        "SELECT json FROM wrapped_keys WHERE channel_id=? AND epoch=1 AND device_id=?",
+        rusqlite::params![channel.id.to_string(), laptop.profile.device_id.to_string()],
+        |r| r.get(0),
+    )?;
+    let meta = alice
+        .channels
+        .iter()
+        .find(|c| c.channel.id == channel.id)
+        .ok_or_else(|| anyhow::anyhow!("meta missing"))?
+        .meta
+        .clone();
+    let old_as_new = phi_crypto::ChannelKey::from_bytes(
+        laptop.profile.space_id,
+        channel.id,
+        1,
+        *prior.as_bytes(),
+    );
+    let mut forged_channel = channel.clone();
+    forged_channel.meta = phi_crypto::encrypt_channel_metadata(
+        &old_as_new,
+        &serde_json::to_vec(&meta)?,
+        &mut entropy,
+    )?;
+    connection.execute(
+        "UPDATE channels SET json=? WHERE id=?",
+        rusqlite::params![
+            serde_json::to_string(&forged_channel)?,
+            channel.id.to_string()
+        ],
+    )?;
+    connection.execute(
+        "UPDATE wrapped_keys SET json=? WHERE channel_id=? AND epoch=1 AND device_id=?",
+        rusqlite::params![
+            serde_json::to_string(&forged)?,
+            channel.id.to_string(),
+            laptop.profile.device_id.to_string()
+        ],
+    )?;
+    ensure!(laptop.refresh().await.is_err());
+    ensure!(accounts.get(&epoch_account)?.is_none());
+    let pinned = rusqlite::Connection::open(
+        f.store("laptop")
+            .cache_dir(&laptop.profile)
+            .join("cache.db"),
+    )?;
+    let roster: String = pinned.query_row(
+        "SELECT value FROM state WHERE name=?",
+        [format!("roster/{}", channel.id)],
+        |r| r.get(0),
+    )?;
+    ensure!(
+        serde_json::from_str::<ChannelMembership>(&roster)?
+            .data
+            .epoch
+            == 0
+    );
+    connection.execute(
+        "UPDATE channels SET json=? WHERE id=?",
+        rusqlite::params![serde_json::to_string(&channel)?, channel.id.to_string()],
+    )?;
+    connection.execute(
+        "UPDATE wrapped_keys SET json=? WHERE channel_id=? AND epoch=1 AND device_id=?",
+        rusqlite::params![
+            original_wrap,
+            channel.id.to_string(),
+            laptop.profile.device_id.to_string()
+        ],
+    )?;
+    laptop.refresh().await?;
+    ensure!(accounts.get(&epoch_account)?.is_some());
+    // Even a correctly encrypted box for an uncommitted future epoch cannot reserve an account.
+    let future_context = serde_json::to_vec(&(
+        "phi wrapped key v1",
+        (
+            laptop.profile.space_id,
+            channel.id,
+            99_u64,
+            laptop.profile.device_id,
+        ),
+    ))?;
+    let future = WrappedKey {
+        epoch: 99,
+        sealed: phi_crypto::seal(
+            &recipient.cert.data.kex_pub,
+            prior.as_bytes(),
+            &future_context,
+            &mut entropy,
+        )?,
+        ..forged
+    };
+    connection.execute(
+        "INSERT INTO wrapped_keys VALUES(?,?,?,?)",
+        rusqlite::params![
+            channel.id.to_string(),
+            99,
+            laptop.profile.device_id.to_string(),
+            serde_json::to_string(&future)?
+        ],
+    )?;
+    ensure!(laptop.refresh().await.is_err());
+    ensure!(
+        accounts
+            .get(&format!("channel/{}/99", channel.id))?
+            .is_none()
+    );
+    connection.execute(
+        "DELETE FROM wrapped_keys WHERE channel_id=? AND epoch=99",
+        [channel.id.to_string()],
+    )?;
     let mut rollback = channel.clone();
     rollback.membership = rollback
         .membership_history
@@ -722,18 +1150,64 @@ async fn tampered_message_attachment_and_sequence_are_rejected() -> Result<()> {
         rusqlite::params![serde_json::to_string(&tampered)?, root.id.to_string()],
     )?;
     ensure!(alice.read(root.id, ReadOptions::default()).await.is_err());
-    // The event verifies, but rendering its target fails. The CLI must retry it after repair.
+    // Transport failures preserve the batch; unavailable authenticated history
+    // produces an ID/read pointer instead of wedging otherwise valid events.
+    f.faults(|faults| faults.fail_message = Some(root.id))?;
     ensure!(bob.wait_text(0).await.is_err());
+    f.faults(|faults| faults.fail_message = None)?;
+    let output = bob.wait_text(0).await?;
+    ensure!(
+        output.contains("reaction: ack by alice/cli") && output.contains("reference unavailable")
+    );
     connection.execute(
         "UPDATE messages SET json=? WHERE id=?",
         rusqlite::params![original, root.id.to_string()],
     )?;
-    ensure!(
-        bob.wait_text(0)
-            .await?
-            .contains("reaction: ack by alice/cli")
-    );
     ensure!(bob.wait_text(0).await?.is_empty());
+    let bad = alice
+        .send("#all", "Bad event", options("host corrupts this event"))
+        .await?;
+    let good = alice
+        .send("#all", "Good event", options("delivered after rejection"))
+        .await?;
+    f.faults(|faults| {
+        faults.corrupt_event = Some(bad.id);
+        faults.inflate_cursor = true;
+    })?;
+    let events = bob.wait(0).await?;
+    ensure!(
+        events
+            .iter()
+            .any(|e| matches!(e, WaitEntry::VerificationFailure { seq, .. } if *seq == bad.seq))
+    );
+    ensure!(
+        events
+            .iter()
+            .any(|e| matches!(e, WaitEntry::Message(entry) if entry.latest_seq == good.seq))
+    );
+    let cache =
+        rusqlite::Connection::open(f.store("bob").cache_dir(&bob.profile).join("cache.db"))?;
+    ensure!(
+        cache.query_row(
+            "SELECT COUNT(*) FROM wait_outcomes WHERE error IS NOT NULL",
+            [],
+            |r| r.get::<_, u64>(0)
+        )? == 1
+    );
+    f.faults(|faults| {
+        faults.corrupt_event = None;
+        faults.inflate_cursor = false;
+    })?;
+    let later = alice
+        .send("#all", "Still live", options("cursor not poisoned"))
+        .await?;
+    let events = bob.wait(0).await?;
+    ensure!(
+        events
+            .iter()
+            .any(|e| matches!(e, WaitEntry::Message(entry) if entry.latest_seq == later.seq))
+    );
+    ensure!(bob.wait(0).await?.is_empty());
     let paths: Vec<_> = std::fs::read_dir(f.dir.path().join("server/blobs"))?
         .collect::<std::io::Result<Vec<_>>>()?;
     ensure!(!paths.is_empty());
@@ -744,7 +1218,7 @@ async fn tampered_message_attachment_and_sequence_are_rejected() -> Result<()> {
 }
 
 #[derive(Clone, Default)]
-struct MemoryKeys(std::sync::Arc<std::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>>>);
+struct MemoryKeys(Arc<Mutex<std::collections::BTreeMap<String, Vec<u8>>>>);
 impl KeyStore for MemoryKeys {
     fn get(&self, account: &str) -> phi_core::Result<Option<zeroize::Zeroizing<Vec<u8>>>> {
         let map = self

@@ -61,6 +61,7 @@ pub enum WaitEntry {
     Reaction(Reaction),
     Settings(SettingsChange),
     Revocation(Revocation),
+    VerificationFailure { seq: Seq, description: String },
 }
 
 pub(crate) fn compose_thread(

@@ -72,6 +72,7 @@ impl Db {
         };
         let verified = phi_crypto::verify_trust_bundle(root.data.space_id, &bundle, now(), None)?;
         let space = Space {
+            settings_change: None,
             id: root.data.space_id,
             root_cert: root.clone(),
             settings: self.config.settings(),
@@ -255,6 +256,9 @@ impl Db {
         self.transaction(|db| {
             let pinned = db.trust_pins(a.sid())?;
             let mut bundle = db.directory(a.sid())?;
+            if bundle.revocations.contains(&rev) {
+                return Ok(rev);
+            }
             bundle.revocations.push(rev.clone());
             let verified = phi_crypto::verify_trust_bundle(a.sid(), &bundle, now(), Some(&pinned))?;
             db.pin_trust(a.sid(), &verified)?;
@@ -324,6 +328,7 @@ impl Db {
         self.transaction(|db| {
             let mut space = db.space(a.sid())?;
             space.settings = change.data.settings.clone();
+            space.settings_change = Some(change.clone());
             db.conn.execute(
                 "UPDATE spaces SET json=? WHERE id=?",
                 params![json(&space)?, a.sid().to_string()],

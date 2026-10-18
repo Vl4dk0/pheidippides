@@ -297,17 +297,20 @@ impl Client {
         let channels: ListChannelsResponse = http
             .get(&format!("/spaces/{}/channels", profile.space_id))
             .await?;
-        for sealed in &response.grant.sealed_keys {
-            let key = unseal_grant_key(profile.space_id, &grant_keys, sealed)?;
-            save_channel_key(key_store.as_ref(), &key)?;
-        }
-        for sealed in &response.grant.sealed_keys {
-            let key = unseal_grant_key(profile.space_id, &grant_keys, sealed)?;
+        let grant_keys: Vec<ChannelKey> = response
+            .grant
+            .sealed_keys
+            .iter()
+            .map(|sealed| unseal_grant_key(profile.space_id, &grant_keys, sealed))
+            .collect::<std::result::Result<_, _>>()?;
+        for key in &grant_keys {
             let channel = channels
                 .channels
                 .iter()
                 .find(|c| c.id == key.channel_id())
                 .ok_or_else(|| user("grant channel missing"))?;
+            let epochs = cache.channel_epochs(&directory, channel)?;
+            validate_key(key, &epochs)?;
             let membership = directory.verify_channel(channel, None)?;
             let membership = if key.epoch() == channel.current_epoch {
                 membership
@@ -325,21 +328,16 @@ impl Client {
                     .verify_membership(records[index], index.checked_sub(1).map(|i| records[i]))?
             };
             // Read and check encrypted peer context before giving a device any key.
-            let meta_key: KeyBytes = load_json(
-                key_store.as_ref(),
-                &format!("channel/{}/{}", channel.id, channel.meta_epoch),
-            )?;
-            let meta_key = ChannelKey::from_bytes(
-                profile.space_id,
-                channel.id,
-                channel.meta_epoch,
-                *meta_key.as_bytes(),
-            );
+            let meta_key = grant_keys
+                .iter()
+                .find(|key| key.channel_id() == channel.id && key.epoch() == channel.meta_epoch)
+                .ok_or_else(|| user("grant metadata key missing"))?;
+            validate_key(meta_key, &epochs)?;
             let meta: ChannelMeta =
-                serde_json::from_slice(&decrypt_channel_metadata(&meta_key, &channel.meta)?)?;
+                serde_json::from_slice(&decrypt_channel_metadata(meta_key, &channel.meta)?)?;
             validate_meta(channel, &meta, profile.person_id)?;
             let recipient = directory.device(did)?;
-            let wrapped = wrap_channel_key(&key, &recipient, &membership, &mut entropy)?;
+            let wrapped = wrap_channel_key(key, &recipient, &membership, &mut entropy)?;
             let _: GetKeysResponse = http
                 .send(
                     Method::PUT,
@@ -352,7 +350,7 @@ impl Client {
                 )
                 .await?;
             cache.channel(&directory, channel)?;
-            save_channel_key(key_store.as_ref(), &key)?;
+            save_channel_key(key_store.as_ref(), key)?;
             if channel.kind == ChannelKind::All {
                 profile.name = meta.space_name;
             }
@@ -423,6 +421,10 @@ impl Client {
             directory,
         };
         client.refresh().await?;
+        if client.publish_pending_revocations().await? {
+            client.refresh().await?;
+        }
+        client.resume_rotations().await?;
         client.prune()?;
         Ok(client)
     }
@@ -436,19 +438,20 @@ impl Client {
         if space.id != sid {
             return Err(user("space response crossed profile boundary"));
         }
-        self.settings = space.settings;
+        self.settings = match space.settings_change {
+            Some(change) => self.cache.accept_settings(&self.directory, &change)?,
+            None => self.cache.trusted_settings()?,
+        };
         let channels: ListChannelsResponse =
             self.http.get(&format!("/spaces/{sid}/channels")).await?;
         let mut accepted = Vec::new();
         for channel in channels.channels {
-            let prior = self
-                .cache
-                .get::<ChannelMembership>(&format!("roster/{}", channel.id))?;
-            self.directory.verify_channel(&channel, prior.as_ref())?;
+            let epochs = self.cache.channel_epochs(&self.directory, &channel)?;
             let response: GetKeysResponse = self
                 .http
                 .get(&format!("/channels/{}/keys/mine", channel.id))
                 .await?;
+            let mut candidates = Vec::new();
             for wrapped in response.wrapped_keys {
                 if wrapped.channel_id != channel.id {
                     return Err(user("key response crossed channel boundary"));
@@ -459,13 +462,27 @@ impl Client {
                     &self.identity.keys(),
                     &wrapped,
                 )?;
-                save_channel_key(self.keys.as_ref(), &key)?;
+                validate_key(&key, &epochs)?;
+                candidates.push(key);
             }
-            let key = self.key(channel.id, channel.meta_epoch)?;
+            let stored;
+            let key = if let Some(key) = candidates
+                .iter()
+                .find(|key| key.epoch() == channel.meta_epoch)
+            {
+                key
+            } else {
+                stored = self.key(channel.id, channel.meta_epoch)?;
+                &stored
+            };
+            validate_key(key, &epochs)?;
             let meta: ChannelMeta =
-                serde_json::from_slice(&decrypt_channel_metadata(&key, &channel.meta)?)?;
+                serde_json::from_slice(&decrypt_channel_metadata(key, &channel.meta)?)?;
             validate_meta(&channel, &meta, self.profile.person_id)?;
             self.cache.channel(&self.directory, &channel)?;
+            for key in &candidates {
+                save_channel_key(self.keys.as_ref(), key)?;
+            }
             accepted.push(NamedChannel { channel, meta });
         }
         self.channels = accepted;
@@ -1134,6 +1151,28 @@ impl Client {
         }
         Ok(message.reference())
     }
+    async fn wait_reference(
+        &mut self,
+        id: MessageId,
+    ) -> Result<(Option<MessageReference>, String)> {
+        match self.message_reference(id).await {
+            Ok(reference) => Ok((Some(reference), String::new())),
+            Err(
+                error @ (Error::User(_)
+                | Error::Crypto(_)
+                | Error::Validation(_)
+                | Error::Json(_)
+                | Error::Server { status: 404, .. }),
+            ) => {
+                // A valid event may refer to unavailable or corrupted history. Keep its
+                // signed ID usable without letting that history block all later events.
+                self.cache
+                    .set(&format!("wait-reference/{id}"), &error.to_string())?;
+                Ok((None, format!("  reference unavailable: {error}\n")))
+            }
+            Err(error) => Err(error),
+        }
+    }
     pub async fn format_wait_entry(&mut self, event: &WaitEntry) -> Result<String> {
         match event {
             WaitEntry::Message(entry) => {
@@ -1143,19 +1182,32 @@ impl Client {
                     |r| r.get(0),
                 )?;
                 let message: Message = serde_json::from_str(&raw)?;
-                let reference = self.message_reference(message.id).await?;
-                let kind = if reference.number == 1 {
+                let (reference, warning) = self.wait_reference(message.id).await?;
+                let thread = message.envelope.thread_id.unwrap_or(message.id);
+                let label = reference
+                    .map(|r| r.to_string())
+                    .unwrap_or_else(|| message.id.to_string());
+                let kind = if message.envelope.thread_id.is_none() {
                     "new message"
                 } else {
                     "reply in thread"
                 };
                 Ok(format!(
-                    "{kind} · thread {} · message {reference} · id {} · {} · {}\n  phi read {}\n",
-                    reference.thread, reference.id, entry.channel, entry.from, reference.thread
+                    "{kind} · thread {thread} · message {label} · id {} · {} · {}\n{warning}  phi read {thread}\n",
+                    message.id, entry.channel, entry.from
                 ))
             }
             WaitEntry::Reaction(reaction) => {
-                let reference = self.message_reference(reaction.data.message_id).await?;
+                let (reference, warning) = self.wait_reference(reaction.data.message_id).await?;
+                let label = reference
+                    .map(|r| r.to_string())
+                    .unwrap_or_else(|| reaction.data.message_id.to_string());
+                let thread = reference
+                    .map(|r| r.thread.to_string())
+                    .unwrap_or_else(|| "unavailable".into());
+                let pointer = reference
+                    .map(|r| r.thread)
+                    .unwrap_or(reaction.data.message_id);
                 let kind = match (reaction.data.kind, reaction.data.remove) {
                     (ReactionKind::Claim, true) => "unclaim",
                     (ReactionKind::Claim, false) => "claim",
@@ -1169,14 +1221,15 @@ impl Client {
                     kind.into()
                 };
                 Ok(format!(
-                    "reaction: {kind} by {}/{} · thread {} · message {reference} · id {}\n  phi read {}\n",
+                    "reaction: {kind} by {}/{} · thread {thread} · message {label} · id {}\n{warning}  phi read {pointer}\n",
                     self.person_name(reaction.data.person_id),
                     reaction.data.handle,
-                    reference.thread,
-                    reference.id,
-                    reference.thread
+                    reaction.data.message_id
                 ))
             }
+            WaitEntry::VerificationFailure { seq, description } => Ok(format!(
+                "verification failed · event {seq}: {description} (recorded locally; skipped)\n"
+            )),
             WaitEntry::Settings(change) => Ok(format!(
                 "#all · space settings changed: retention_days={} summary_mode={:?}\n",
                 change.data.settings.retention_days, change.data.settings.summary_mode
@@ -1346,7 +1399,7 @@ impl Client {
             })
             .collect()
     }
-    fn save_reaction(&self, reaction: &Reaction) -> Result<()> {
+    fn save_reaction(&mut self, reaction: &Reaction) -> Result<()> {
         let d = &reaction.data;
         let kind = serde_json::to_string(&d.kind)?;
         if d.remove {
@@ -1379,7 +1432,10 @@ impl Client {
             )
             .optional()?;
         if let Some(thread) = thread {
-            self.cache.activity(thread.parse()?, d.created_at)?;
+            self.cache.activity(
+                thread.parse()?,
+                &format!("reaction/{}", serde_json::to_string(reaction)?),
+            )?;
         }
         Ok(())
     }
@@ -1460,7 +1516,7 @@ impl Client {
         self.advance_wait(&batch.cursor, batch.next_after)?;
         Ok(batch.events)
     }
-    /// Rendering can require reference lookups; failed rendering must leave the event pending.
+    /// Transient lookup failures leave the batch pending; corrupt history gets a visible ID fallback.
     pub async fn wait_text(&mut self, seconds: u16) -> Result<String> {
         let batch = self.wait_batch(seconds).await?;
         let mut output = String::new();
@@ -1493,11 +1549,10 @@ impl Client {
                 return Err(user("server rolled back event cursor"));
             }
             if response.events.is_empty() {
-                self.advance_wait(&name, response.next_after)?;
                 return Ok(WaitBatch {
                     events: vec![],
                     cursor: name,
-                    next_after: response.next_after,
+                    next_after: after,
                 });
             }
             self.refresh().await?;
@@ -1512,95 +1567,120 @@ impl Client {
                     return Err(user("invalid event sequence or scope"));
                 }
                 previous = event.seq;
-                let entry = match event.event {
-                    EventData::Message(message) => {
-                        let author = self.directory.verify_message(&message)?;
-                        let content = decrypt_message(
-                            &self.key(message.envelope.channel_id, message.envelope.epoch)?,
-                            &author,
-                            &message.envelope,
-                            &message.signature,
-                        )?;
-                        self.cache.message(&message, &content)?;
-                        if message.author_device == self.profile.device_id
-                            && message.envelope.handle == self.handle
-                        {
-                            continue;
-                        }
-                        WaitEntry::Message(InboxEntry {
-                            id: message.envelope.thread_id.unwrap_or(message.id),
-                            channel: self.channel_name(message.envelope.channel_id),
-                            title: content.title.unwrap_or_else(|| {
-                                format!(
-                                    "reply to {}",
-                                    message
-                                        .envelope
-                                        .thread_id
-                                        .map(|id| id.to_string())
-                                        .unwrap_or_default()
-                                )
-                            }),
-                            from: format!(
-                                "{}/{}",
-                                self.person_name(message.author_person),
-                                message.envelope.handle
-                            ),
-                            created_at: message.created_at,
-                            summary: content.summary,
-                            mentioned: message.envelope.mentions.iter().any(|m| {
-                                m.person_id == self.profile.person_id
-                                    && (self.profile.kind == DeviceKind::Gui
-                                        || m.handle.as_ref().is_none_or(|h| h == &self.handle))
-                            }),
-                            unread: true,
-                            own_agent_activity: message.author_person == self.profile.person_id
-                                && author.certificate().data.kind == DeviceKind::Cli,
-                            reactions: vec![],
-                            latest_seq: message.seq,
-                        })
+                let result = self.process_wait_event(&event);
+                let error = result.as_ref().err().map(ToString::to_string);
+                let unchanged = self
+                    .cache
+                    .wait_outcome(&self.handle, &event, error.as_deref())?;
+                if !unchanged {
+                    entries.push(WaitEntry::VerificationFailure {
+                        seq: event.seq,
+                        description: "server changed a previously observed event".into(),
+                    });
+                } else {
+                    match result {
+                        Ok(Some(entry)) => entries.push(entry),
+                        Ok(None) => {}
+                        Err(error) => entries.push(WaitEntry::VerificationFailure {
+                            seq: event.seq,
+                            description: error.to_string(),
+                        }),
                     }
-                    EventData::Reaction(reaction) => {
-                        self.directory.verify_reaction(&reaction)?;
-                        self.save_reaction(&reaction)?;
-                        if reaction.data.device_id == self.profile.device_id
-                            && reaction.data.handle == self.handle
-                        {
-                            continue;
-                        }
-                        WaitEntry::Reaction(reaction)
-                    }
-                    EventData::Settings(change) => {
-                        self.directory.verify_settings(&change)?;
-                        WaitEntry::Settings(change)
-                    }
-                    EventData::Revocation(revocation) => {
-                        if !self.directory.revocations().contains(&revocation) {
-                            return Err(user("unverified revocation event"));
-                        }
-                        WaitEntry::Revocation(revocation)
-                    }
-                };
-                entries.push(entry);
+                }
             }
-            // Advance only after the whole response verified. Errors preserve the backlog for inspection.
+            // The cursor names only outcomes recorded locally, never an unsigned high-water mark.
             if !entries.is_empty() {
                 return Ok(WaitBatch {
                     events: entries,
                     cursor: name,
-                    next_after: response.next_after,
+                    next_after: previous,
                 });
             }
-            self.advance_wait(&name, response.next_after)?;
+            self.advance_wait(&name, previous)?;
             if !full_page && std::time::Instant::now() >= deadline {
                 return Ok(WaitBatch {
                     events: entries,
                     cursor: name,
-                    next_after: response.next_after,
+                    next_after: previous,
                 });
             }
             // Ignored self-events still consume the cursor; keep waiting for someone else
             // with the original deadline, rather than returning a false notification.
         }
+    }
+    fn process_wait_event(&mut self, event: &Event) -> Result<Option<WaitEntry>> {
+        let entry = match event.event.clone() {
+            EventData::Message(message) => {
+                if message.seq != event.seq {
+                    return Err(user("message/event sequence mismatch"));
+                }
+                let author = self.directory.verify_message(&message)?;
+                let content = decrypt_message(
+                    &self.key(message.envelope.channel_id, message.envelope.epoch)?,
+                    &author,
+                    &message.envelope,
+                    &message.signature,
+                )?;
+                self.cache.message(&message, &content)?;
+                if message.author_device == self.profile.device_id
+                    && message.envelope.handle == self.handle
+                {
+                    return Ok(None);
+                }
+                WaitEntry::Message(InboxEntry {
+                    id: message.envelope.thread_id.unwrap_or(message.id),
+                    channel: self.channel_name(message.envelope.channel_id),
+                    title: content.title.unwrap_or_else(|| {
+                        format!(
+                            "reply to {}",
+                            message
+                                .envelope
+                                .thread_id
+                                .map(|id| id.to_string())
+                                .unwrap_or_default()
+                        )
+                    }),
+                    from: format!(
+                        "{}/{}",
+                        self.person_name(message.author_person),
+                        message.envelope.handle
+                    ),
+                    created_at: message.created_at,
+                    summary: content.summary,
+                    mentioned: message.envelope.mentions.iter().any(|m| {
+                        m.person_id == self.profile.person_id
+                            && (self.profile.kind == DeviceKind::Gui
+                                || m.handle.as_ref().is_none_or(|h| h == &self.handle))
+                    }),
+                    unread: true,
+                    own_agent_activity: message.author_person == self.profile.person_id
+                        && author.certificate().data.kind == DeviceKind::Cli,
+                    reactions: vec![],
+                    latest_seq: message.seq,
+                })
+            }
+            EventData::Reaction(reaction) => {
+                self.directory.verify_reaction(&reaction)?;
+                self.save_reaction(&reaction)?;
+                if reaction.data.device_id == self.profile.device_id
+                    && reaction.data.handle == self.handle
+                {
+                    return Ok(None);
+                }
+                WaitEntry::Reaction(reaction)
+            }
+            EventData::Settings(change) => {
+                self.settings = self.cache.accept_settings(&self.directory, &change)?;
+                WaitEntry::Settings(change)
+            }
+            EventData::Revocation(revocation) => {
+                if !self.directory.revocations().contains(&revocation) {
+                    return Err(user("unverified revocation event"));
+                }
+                WaitEntry::Revocation(revocation)
+            }
+        };
+        Ok(Some(entry))
     }
     fn advance_wait(&self, name: &str, sequence: u64) -> Result<()> {
         self.cache.db.execute("INSERT INTO state VALUES(?,?) ON CONFLICT(name) DO UPDATE SET value=CAST(MAX(CAST(state.value AS INTEGER),CAST(excluded.value AS INTEGER)) AS TEXT)", params![name, sequence.to_string()])?;
@@ -1646,6 +1726,7 @@ impl Client {
                 space_id: self.profile.space_id,
                 channel_id: channel.id,
                 epoch: key.epoch(),
+                key_commitment: key.commitment(),
                 kind: channel.kind,
                 members: members.clone(),
                 issuer_device: self.profile.device_id,
@@ -1729,20 +1810,14 @@ impl Client {
             .cache
             .get(&format!("protected/{channel_id}"))?
             .unwrap_or_default();
-        let relevant = self.directory.revocations().iter().any(|r| {
-            if protected.contains(&r.signature) {
-                return false;
+        let mut relevant = false;
+        for revocation in self.directory.revocations() {
+            if protected.contains(&revocation.signature) {
+                continue;
             }
-            match r.data.target {
-                RevocationTarget::Person { person_id } => {
-                    named.channel.members.contains(&person_id)
-                }
-                RevocationTarget::Device { device_id } => self.devices.iter().any(|d| {
-                    d.cert.data.device_id == device_id
-                        && named.channel.members.contains(&d.cert.data.person_id)
-                }),
-            }
-        });
+            let person = self.revoked_person(&revocation.data.target)?;
+            relevant |= named.channel.members.contains(&person);
+        }
         if !relevant {
             return Ok(());
         }
@@ -1775,8 +1850,91 @@ impl Client {
         // must rekey before sending, even if another client may already have rotated once.
         if channel.current_epoch == original_epoch {
             self.rotate(&channel).await?;
+        } else {
+            self.mark_protected(channel.id)?;
         }
         self.refresh().await
+    }
+    fn revoked_person(&self, target: &RevocationTarget) -> Result<PersonId> {
+        Ok(match target {
+            RevocationTarget::Person { person_id } => *person_id,
+            RevocationTarget::Device { device_id } => {
+                self.directory.certificate(*device_id)?.data.person_id
+            }
+        })
+    }
+    fn mark_protected(&self, channel: ChannelId) -> Result<()> {
+        let protected: BTreeSet<_> = self
+            .directory
+            .revocations()
+            .iter()
+            .map(|r| r.signature.clone())
+            .collect();
+        self.cache.set(&format!("protected/{channel}"), &protected)
+    }
+    async fn publish_pending_revocations(&mut self) -> Result<bool> {
+        let pending: Vec<String> = self
+            .cache
+            .db
+            .prepare("SELECT raw FROM pending_revocations ORDER BY rowid")?
+            .query_map([], |r| r.get(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        for raw in &pending {
+            let revocation: Revocation = serde_json::from_str(raw)?;
+            let response: CreateRevocationResponse = self
+                .http
+                .send(
+                    Method::POST,
+                    &format!("/spaces/{}/revocations", self.profile.space_id),
+                    &CreateRevocationRequest {
+                        revocation: revocation.clone(),
+                    },
+                )
+                .await?;
+            if response != revocation {
+                return Err(user("server changed signed revocation"));
+            }
+            self.cache
+                .db
+                .execute("DELETE FROM pending_revocations WHERE raw=?", [raw])?;
+        }
+        Ok(!pending.is_empty())
+    }
+    async fn resume_rotations(&mut self) -> Result<()> {
+        let channels: Vec<_> = self.channels.clone();
+        let mut first_error = None;
+        for named in channels {
+            let result = async {
+                let marker = format!("pending-rotation/{}", named.channel.id);
+                if let Some(epoch) = self.cache.get::<Epoch>(&marker)? {
+                    if named.channel.current_epoch < epoch {
+                        self.rotate(&named.channel).await?;
+                    } else if named.channel.meta_epoch < named.channel.current_epoch {
+                        self.update_channel(
+                            &named.channel,
+                            named.meta.clone(),
+                            named.channel.members.clone(),
+                        )
+                        .await?;
+                    }
+                    self.cache
+                        .db
+                        .execute("DELETE FROM state WHERE name=?", [&marker])?;
+                    self.refresh().await?;
+                }
+                self.ensure_safe_epoch(named.channel.id).await
+            }
+            .await;
+            if let Err(error) = result {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+        Ok(())
     }
     async fn rotate(&mut self, channel: &Channel) -> Result<()> {
         let key = self
@@ -1786,6 +1944,7 @@ impl Client {
             ChannelMembershipData {
                 previous: Some(channel.membership.signature.clone()),
                 epoch: key.epoch(),
+                key_commitment: key.commitment(),
                 members: channel.members.clone(),
                 issuer_device: self.profile.device_id,
                 ..channel.membership.data.clone()
@@ -1804,6 +1963,12 @@ impl Client {
                 wrapped_keys.push(wrap_channel_key(&key, &device, &membership, &mut entropy)?);
             }
         }
+        let meta: ChannelMeta = serde_json::from_slice(&decrypt_channel_metadata(
+            &self.key(channel.id, channel.meta_epoch)?,
+            &channel.meta,
+        )?)?;
+        self.cache
+            .set(&format!("pending-rotation/{}", channel.id), &key.epoch())?;
         let _: GetKeysResponse = self
             .http
             .send(
@@ -1816,43 +1981,25 @@ impl Client {
                 },
             )
             .await?;
-        // The server also stores our self-wrap, so refresh can recover a committed key after a crash.
-        // Unaccepted proposals must never occupy immutable epoch accounts during concurrent rotations.
-        save_channel_key(self.keys.as_ref(), &key)?;
-        let meta: ChannelMeta = serde_json::from_slice(&decrypt_channel_metadata(
-            &self.key(channel.id, channel.meta_epoch)?,
-            &channel.meta,
-        )?)?;
+        // Record completed key publication before the separate metadata update.
+        self.mark_protected(channel.id)?;
         let mut rotated = channel.clone();
         rotated.membership_history.push(rotated.membership.clone());
         rotated.membership = proof;
         rotated.current_epoch = key.epoch();
+        self.cache.channel(&self.directory, &rotated)?;
+        save_channel_key(self.keys.as_ref(), &key)?;
         self.update_channel(&rotated, meta, channel.members.clone())
             .await?;
-        let protected: BTreeSet<Signature> = self
-            .directory
-            .revocations()
-            .iter()
-            .map(|r| r.signature.clone())
-            .collect();
-        self.cache
-            .set(&format!("protected/{}", channel.id), &protected)?;
+        self.cache.db.execute(
+            "DELETE FROM state WHERE name=?",
+            [format!("pending-rotation/{}", channel.id)],
+        )?;
         Ok(())
     }
     pub async fn revoke(&mut self, target: RevocationTarget) -> Result<()> {
         self.refresh().await?;
-        let affected_person = match target {
-            RevocationTarget::Person { person_id } => person_id,
-            RevocationTarget::Device { device_id } => {
-                self.devices
-                    .iter()
-                    .find(|d| d.cert.data.device_id == device_id)
-                    .ok_or_else(|| user("device not found"))?
-                    .cert
-                    .data
-                    .person_id
-            }
-        };
+        self.revoked_person(&target)?;
         if matches!(target, RevocationTarget::Device { device_id } if device_id == self.profile.device_id)
             || matches!(target, RevocationTarget::Person { person_id } if person_id == self.profile.person_id)
         {
@@ -1869,40 +2016,10 @@ impl Client {
             },
             &self.identity.keys(),
         )?;
-        let _: CreateRevocationResponse = self
-            .http
-            .send(
-                Method::POST,
-                &format!("/spaces/{}/revocations", self.profile.space_id),
-                &CreateRevocationRequest { revocation },
-            )
-            .await?;
+        self.directory = self.cache.record_revocation(&self.directory, &revocation)?;
+        self.publish_pending_revocations().await?;
         self.refresh().await?;
-        let channels: Vec<_> = self
-            .channels
-            .iter()
-            .filter(|c| c.channel.members.contains(&affected_person))
-            .map(|c| c.channel.clone())
-            .collect();
-        for channel in channels {
-            let original_epoch = channel.current_epoch;
-            let channel = if matches!(target, RevocationTarget::Person { .. })
-                && channel.kind == ChannelKind::Group
-            {
-                let mut members = channel.members.clone();
-                members.retain(|p| *p != affected_person);
-                let meta: ChannelMeta = serde_json::from_slice(&decrypt_channel_metadata(
-                    &self.key(channel.id, channel.meta_epoch)?,
-                    &channel.meta,
-                )?)?;
-                self.update_channel(&channel, meta, members).await?
-            } else {
-                channel
-            };
-            if channel.current_epoch == original_epoch {
-                self.rotate(&channel).await?;
-            }
-        }
+        self.resume_rotations().await?;
         self.refresh().await
     }
     pub async fn set_settings(&mut self, key: &str, value: &str) -> Result<SettingsChange> {
@@ -1946,7 +2063,7 @@ impl Client {
         if response != change {
             return Err(user("server changed settings event"));
         }
-        self.settings = response.data.settings.clone();
+        self.settings = self.cache.accept_settings(&self.directory, &response)?;
         Ok(response)
     }
     pub async fn search(&mut self, text: &str) -> Result<Vec<DecodedMessage>> {
@@ -2053,6 +2170,7 @@ fn channel_request(
             space_id: cert.data.space_id,
             channel_id: id,
             epoch: 0,
+            key_commitment: key.commitment(),
             kind,
             members: meta.members.clone(),
             issuer_device: cert.data.device_id,
@@ -2251,4 +2369,13 @@ async fn run_summarizer(command: &str, input: &str) -> Result<String> {
         return Err(user("summarizer returned an empty summary"));
     }
     Ok(summary)
+}
+
+fn validate_key(key: &ChannelKey, epochs: &BTreeMap<Epoch, PublicKey>) -> Result<()> {
+    if epochs.get(&key.epoch()) != Some(&key.commitment()) {
+        return Err(user(
+            "channel key does not match an authenticated epoch commitment",
+        ));
+    }
+    Ok(())
 }

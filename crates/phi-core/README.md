@@ -35,9 +35,22 @@ No daemon, GUI, listener or server process is started by the library.
   Account `identity` stores device secrets/token/certificate; channel accounts
   store epoch keys. JSON secret buffers use `Zeroizing`; rusqlite/HTTP internals
   are not guaranteed to erase every transient copy. Lost keys lose history.
-- Wait cursors are durable per profile/handle and advance only after successful
-  verification. Read cursors are server-side per person/thread. Cache retention
-  follows observed whole-thread activity, preserving historical epoch keys.
+- Wait cursors are durable per profile/handle. Each delivered sequence gets a
+  durable `wait_outcomes` record before advancement: verified/cacheable, ignored
+  own-session activity, or an explicit verification failure. Failed events are
+  surfaced and skipped; they cannot block later messages. The cursor never jumps
+  to an unreturned server high-water mark. Gaps are legitimate for private channels;
+  ordering/completeness remain host-controlled. Read cursors are per person/thread.
+- Cache pruning uses the last accepted signed `SettingsChange` (returned with
+  `Space.settings_change` and persisted from settings events/updates), or the
+  trusted 14-day default before one is observed. Unsigned GET settings cannot
+  disable pruning. Whole-thread activity is the local first observation of each
+  verified message/reaction, not unsigned server `created_at` or a replay's time.
+  This is deliberately independent of the server's unauthenticated activity clock.
+  Startup upgrades old activity records once to local receipt time. Message pins,
+  observation IDs and historical epoch keys survive plaintext pruning. Signatures
+  authenticate settings values, not global freshness; the host can still withhold
+  or replay signed history without a shared witness.
 
 See [`phi-cli/README.md`](../phi-cli/README.md) for commands, output and honest
 limits. `tests/e2e.rs` starts in-process Axum servers bound to ephemeral loopback
@@ -50,7 +63,14 @@ group rosters. This protects private groups the removal issuer cannot discover.
 Different clients may conservatively rotate more than once; published epochs are
 monotone, and accepted key accounts are immutable. Proposed keys enter those
 accounts only after a successful PUT; server self-wraps recover committed keys
-after an interrupted response. Concurrent stale roster updates return conflict.
+after an interrupted response. Device ownership comes from the verified certificate
+map, including revoked certificates, never unsigned device-list projections.
+Locally signed revocations are verified, pinned and queued atomically before POST;
+open retries publication idempotently. Open also resumes affected channel rotations,
+processing later channels even if an earlier metadata update fails. A committed
+key PUT immediately marks that channel protected, with a durable metadata repair
+journal recording the intended epoch until its separate PATCH completes. This
+also retries a rotation PUT that failed before commit. Concurrent stale updates conflict.
 
 Group shrink publishes its new signed roster, encrypted metadata, and complete
 remaining-device epoch wraps atomically in one PATCH. The server rejects shrink
@@ -65,7 +85,7 @@ returns the full thread/number plus immutable message ID. `MessageRef` parses ra
 IDs and `<thread>#<positive number>`; `resolve_message` selects that exact message,
 while `resolve_thread` normalizes it (or a raw reply ID) to the root. Resolution
 uses current verified thread history without advancing its read cursor. Signed
-sequence/coverage data and the wire protocol are unchanged.
+sequence/coverage data remain signed independently of these display positions.
 
 `MessagePerspective` distinguishes the exact device+handle (`You`), another
 session of the same person (`YourOtherSession`), and other people (`Other`). Text
@@ -78,7 +98,19 @@ exact device+handle, advancing past them and continuing to the original deadline
 Other handles/devices remain visible. Settings/revocations lack handles and are
 retained. `format_wait_entry` prints typed message/reply/reaction lines with full
 thread/message references, raw IDs and a read pointer. `wait_text` resolves and
-renders the batch before committing its cursor, so failed lookups can be retried.
+renders the batch before committing its cursor. Transport/storage failures can be
+retried; unavailable or corrupt reference history is recorded and rendered with a
+raw ID/read pointer so it cannot wedge otherwise valid events.
 Neither operation marks a thread read.
 MIME guessing recognizes source/config extensions and falls back to plain text
 for unrecognized UTF-8 text without binary controls.
+
+Protocol major 2 signs a domain-separated key commitment in every channel roster.
+Refresh and join stage unwrapped keys, require their epoch/hash in the accepted
+membership history, and validate encrypted metadata/peer context before writing
+immutable key accounts. Roster pins and epoch commitments commit in one SQLite
+transaction; keys follow only after that acceptance. SQLite and an OS keychain
+cannot share a transaction, so self-wrap recovery completes interrupted writes
+without putting channel secrets in the plaintext trust-state journal.
+Major-1 peers/stores are incompatible; recreate development spaces with all
+components upgraded. There is no legacy unsigned acceptance path.

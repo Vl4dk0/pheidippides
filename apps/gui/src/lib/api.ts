@@ -98,6 +98,7 @@ export const threadSchema = z.object({
 });
 export const pollSchema = z.object({
   changed: z.boolean(),
+  errors: z.array(z.string()),
   notices: z.array(z.object({ mentioned: z.boolean(), direct: z.boolean() })),
 });
 const target = z.discriminatedUnion('kind', [

@@ -65,6 +65,7 @@ fn roster(
 ) -> Result<ChannelMembership, CryptoError> {
     sign_membership(
         ChannelMembershipData {
+            key_commitment: PublicKey::from_bytes([42; 32]),
             previous: None,
             space_id: cert.data.space_id,
             channel_id,
@@ -85,6 +86,7 @@ fn next_roster(
 ) -> Result<ChannelMembership, CryptoError> {
     sign_membership(
         ChannelMembershipData {
+            key_commitment: PublicKey::from_bytes([42; 32]),
             previous: Some(prior.signature.clone()),
             epoch,
             members,
@@ -1306,6 +1308,32 @@ async fn event_feed_hides_private_channels_and_shares_channel_reactions() -> Tes
     .await?;
     assert!(empty.events.is_empty());
     assert_eq!(empty.next_after, e.next_after);
+    let _invisible = f.send(&f.root, f.own, None).await?;
+    let empty: EventsResponse = ok(
+        &f.app,
+        "GET",
+        &f.space(&format!("/events?after={}&timeout=0", e.next_after)),
+        Some(&p.token),
+        json!(null),
+    )
+    .await?;
+    assert!(empty.events.is_empty());
+    assert_eq!(
+        empty.next_after, e.next_after,
+        "never jump to an undelivered high-water mark"
+    );
+    let _visible = f.send(&f.root, f.all, None).await?;
+    let gap: EventsResponse = ok(
+        &f.app,
+        "GET",
+        &f.space(&format!("/events?after={}&timeout=0", empty.next_after)),
+        Some(&p.token),
+        json!(null),
+    )
+    .await?;
+    assert_eq!(gap.events.len(), 1);
+    assert_eq!(gap.next_after, gap.events[0].seq);
+    assert!(gap.events[0].seq > empty.next_after + 1);
     Ok(())
 }
 #[tokio::test]
@@ -1657,9 +1685,20 @@ async fn signed_settings_emit_events_and_forever_disables_retention() -> TestRes
         "PATCH",
         &f.space("/settings"),
         Some(&f.root.token),
-        UpdateSettingsRequest { change },
+        UpdateSettingsRequest {
+            change: change.clone(),
+        },
     )
     .await?;
+    let space: Space = ok(
+        &f.app,
+        "GET",
+        &f.space(""),
+        Some(&f.root.token),
+        json!(null),
+    )
+    .await?;
+    assert_eq!(space.settings_change, Some(change));
     let e: EventsResponse = ok(
         &f.app,
         "GET",

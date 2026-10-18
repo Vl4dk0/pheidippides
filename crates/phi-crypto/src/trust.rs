@@ -198,6 +198,15 @@ impl VerifiedDirectory {
             },
         }
     }
+    /// Revocation affects authorization, never the authenticated device-to-person binding.
+    pub fn certificate(&self, id: DeviceId) -> Result<&DeviceCertificate, CryptoError> {
+        self.certificates
+            .get(&id)
+            .ok_or(CryptoError::Trust("unknown device"))
+    }
+    pub fn trust_bundle(&self) -> TrustBundle {
+        self.pinned_state().bundle
+    }
     pub fn device(&self, id: DeviceId) -> Result<VerifiedDevice, CryptoError> {
         let cert = self
             .certificates
@@ -506,9 +515,10 @@ pub fn verify_trust_bundle(
 
 pub fn membership_signing_bytes(data: &ChannelMembershipData) -> Result<Vec<u8>, CryptoError> {
     signing_bytes(
-        "phi channel membership v1",
+        "phi channel membership v2",
         &(
             &data.previous,
+            &data.key_commitment,
             data.space_id,
             data.channel_id,
             data.epoch,
@@ -571,6 +581,8 @@ impl VerifiedDirectory {
             if old.space_id != membership.data.space_id
                 || old.channel_id != membership.data.channel_id
                 || old.kind != membership.data.kind
+                || (old.epoch == membership.data.epoch
+                    && old.key_commitment != membership.data.key_commitment)
                 || old.epoch > membership.data.epoch
                 || (membership != prior
                     && membership.data.previous.as_ref() != Some(&prior.signature))

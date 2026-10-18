@@ -12,7 +12,7 @@ pub enum Error {
     Server { status: u16, message: String },
     #[error("authentication failed or device revoked; enroll this device again")]
     Auth,
-    #[error("phi 1.x can't talk to a {0}.x server — upgrade phi")]
+    #[error("phi {client_major}.x can't talk to a {0}.x server — upgrade phi", client_major = PROTOCOL_MAJOR)]
     Upgrade(u16),
     #[error("rate limited; retry after {0} seconds")]
     RateLimited(u64),

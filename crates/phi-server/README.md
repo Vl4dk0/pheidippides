@@ -1,6 +1,6 @@
 # phi-server
 
-Ciphertext relay for protocol major 1. The server never receives decryption keys,
+Ciphertext relay for protocol major 2. The server never receives decryption keys,
 message plaintext, names, titles, or attachment filenames. Run one server process
 per data directory. `Server::open(config)?.router()` exposes the same Axum app to
 in-process clients/tests; it starts no listener or background task itself.
@@ -72,7 +72,7 @@ keys are client-owned and cannot be recovered from server backups.
 
 All paths below start with `/v1`. JSON request/response type names are exported by
 `phi-proto`. Every request, including public grant operations, needs
-`Phi-Protocol: 1`. Success is HTTP 200 and JSON. Requests reject unknown fields,
+`Phi-Protocol: 2`. Success is HTTP 200 and JSON. Requests reject unknown fields,
 including nested signed records. Typed query/path fields and size bounds are
 validated; ordinary JSON bodies are capped at 1 MiB before parsing, blob uploads
 at a configured base64-aware bound. Authentication precedes body consumption.
@@ -145,8 +145,8 @@ channels, all reactions in those channels, and space settings/revocations.
 Reaction author targeting is retained as routing metadata, not an access filter.
 The optional handle is validated; highlighting targeted mentions is a client
 responsibility, since every channel message is relevant. Events return at most
-1000 rows and a cursor that safely skips inaccessible events without skipping
-an unreturned relevant event. Clients keep separate cursors per profile/handle.
+1000 rows. `next_after` is the last returned seq, or the requested `after` if
+empty; it never advances through unreturned events. Private-channel gaps are normal. Clients keep separate cursors per profile/handle.
 Concurrent waiters all observe events; notification registration precedes reads.
 
 **Attachment senders must fill `SendMessageRequest.blob_ids`** with the uploaded
@@ -218,3 +218,11 @@ Message pages also return the current signed reactions for each returned message
 and the authenticated person's read cursors for the returned threads, allowing
 client inbox/read composition without decrypting anything on the host. Direct
 GET message lookup has the same space/channel authorization as message pages.
+
+Protocol major 2 binds channel key commitments into signed membership proofs.
+Use upgraded clients and recreate major-1 development spaces; signatures cannot
+be migrated by the host. Routes retain `/v1`. Space GET includes the last signed
+`settings_change`, persisted atomically with the settings update/event. Exact
+revocation re-publication is idempotent, allowing recovery after a lost response.
+Server-configured defaults govern server cleanup. Clients use their trusted 14-day
+baseline until an authorized signed settings update is observed.

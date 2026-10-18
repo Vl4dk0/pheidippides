@@ -1,6 +1,6 @@
-# Protocol major 1 contract
+# Protocol major 2 contract
 
-`Phi-Protocol: 1`, JSON, `/v1`. Request structs and query types implement
+`Phi-Protocol: 2`, JSON, `/v1`. Request structs and query types implement
 `Validate`; call it after serde parsing and before sending. Newtypes validate
 on construction/deserialization. Responses accept unknown fields, including nested fields. Request wrappers use
 `deny_unknown_fields`; their nested objects reject unknown fields using the same
@@ -80,7 +80,7 @@ and the membership/routing graph.
 Channel create/update requests require a signed `membership`. Rotations require
 `PutKeysRequest.membership=Some(proof)`; same/old-epoch self rewraps use None.
 `Channel` returns current membership plus oldest-first membership_history. Proofs
-include the previous proof's signature, scope, epoch, kind, members and issuer;
+include the previous proof's signature, key commitment, scope, epoch, kind, members and issuer;
 updates/rotations must extend the stored proof. See phi-crypto's README for channel
 and directory pinning, #all expansion through signed invite origins, GUI enrollment
 policy, and bootstrap limits. `GrantRecordData.device_kind` is mandatory and signed.
@@ -100,3 +100,12 @@ or additive membership updates at the current epoch. Stale predecessors conflict
 Reaction events are visible to every current member of the message's channel;
 message pages continue to include signed current reaction state. Fetch stays
 counts-only, including claims by the requesting person.
+
+Major 2 adds mandatory signed `ChannelMembershipData.key_commitment`; an epoch
+number alone does not authenticate key bytes. See phi-crypto for its exact digest
+and signature domain. `Space.settings_change` carries the latest signed settings
+proof (None until a change); clients must not use unsigned `Space.settings` for
+local retention. Event `next_after` is the last delivered seq or the request's
+`after` when empty. Clients record an outcome per delivered event before advancing,
+never advance to unreturned high-water marks, and allow private-channel seq gaps.
+The HTTP route namespace remains `/v1`; the protocol header negotiates compatibility.

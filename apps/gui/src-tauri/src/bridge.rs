@@ -459,6 +459,7 @@ pub struct Notice {
 #[derive(Serialize)]
 pub struct PollView {
     changed: bool,
+    errors: Vec<String>,
     notices: Vec<Notice>,
 }
 #[tauri::command]
@@ -495,8 +496,18 @@ pub async fn poll(
         })
         .filter(|notice| notice.mentioned || notice.direct)
         .collect();
+    let errors = events
+        .iter()
+        .filter_map(|event| match event {
+            WaitEntry::VerificationFailure { seq, description } => {
+                Some(format!("Event {seq}: {description}"))
+            }
+            _ => None,
+        })
+        .collect();
     Ok(PollView {
         changed: !events.is_empty(),
+        errors,
         notices,
     })
 }

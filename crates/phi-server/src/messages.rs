@@ -382,11 +382,7 @@ impl Db {
                 a.person().to_string()
             ],
         )?;
-        let next_after = if events.len() == 1000 {
-            events.last().map_or(q.after, |e| e.seq)
-        } else {
-            self.latest(a.sid())?.max(q.after)
-        };
+        let next_after = events.last().map_or(q.after, |event| event.seq);
         Ok(EventsResponse { events, next_after })
     }
 }

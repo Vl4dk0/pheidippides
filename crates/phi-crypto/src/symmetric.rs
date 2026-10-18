@@ -51,6 +51,15 @@ impl ChannelKey {
     pub fn epoch(&self) -> Epoch {
         self.epoch
     }
+    /// A signed roster binds an epoch to this key, not just to its recipients.
+    pub fn commitment(&self) -> PublicKey {
+        let mut hash = blake3::Hasher::new_derive_key("phi channel key commitment v2");
+        hash.update(self.space_id.as_bytes());
+        hash.update(self.channel_id.as_bytes());
+        hash.update(&self.epoch.to_le_bytes());
+        hash.update(self.key.as_ref());
+        PublicKey::from_bytes(*hash.finalize().as_bytes())
+    }
     pub fn export_secret(&self) -> Zeroizing<[u8; 32]> {
         self.key.clone()
     }
@@ -186,6 +195,11 @@ pub fn wrap_channel_key(
     entropy: &mut impl Entropy,
 ) -> Result<WrappedKey, CryptoError> {
     let cert = recipient.certificate();
+    if key.commitment() != membership.data.key_commitment {
+        return Err(CryptoError::Trust(
+            "channel key differs from signed commitment",
+        ));
+    }
     if recipient.context != membership.context
         || membership.data.space_id != key.space_id
         || membership.data.channel_id != key.channel_id

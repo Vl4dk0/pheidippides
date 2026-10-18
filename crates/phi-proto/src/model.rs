@@ -234,6 +234,8 @@ pub struct SettingsChange {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Space {
+    #[serde(default)]
+    pub settings_change: Option<SettingsChange>,
     pub id: SpaceId,
     pub root_cert: DeviceCertificate,
     pub settings: SpaceSettings,
@@ -323,6 +325,8 @@ pub struct TrustBundle {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChannelMembershipData {
+    /// Binds key bytes to the signed epoch, preventing unauthenticated box poisoning.
+    pub key_commitment: PublicKey,
     /// The previous roster signature makes updates an authenticated chain.
     pub previous: Option<Signature>,
     pub space_id: SpaceId,

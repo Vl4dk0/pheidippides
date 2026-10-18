@@ -145,6 +145,11 @@ visible as signed space events.
 Backlog between calls is delivered; an empty successful timeout prints nothing.
 Concurrent waiting sessions each see the event. Run `wait` again after handling
 its result. The shared core also surfaces signed settings/revocation events.
+Verification failures print an explicit `verification failed · event <seq>` line,
+are recorded locally, and are skipped so later events still arrive. Corrupt or
+expired reference history falls back to a raw ID/read pointer; transport/storage
+errors keep the batch pending. Unreturned server high-water marks never advance
+local cursors.
 
 ## Summaries, storage, and limits
 
@@ -175,8 +180,10 @@ unknown binary data uses `application/octet-stream`. This is a hint, not file va
 
 Attachments are independently encrypted, limited to 25 MiB each by this client,
 and cached in contained blob-ID directories. Never execute received files.
-Default retention is 14 days, 0 means forever; startup pruning uses observed
-thread message/reaction activity and removes unreferenced cached blobs. Deletion
+Default retention is 14 days, 0 means forever. Startup pruning uses accepted
+signed settings and local first receipt of verified message/reaction activity;
+unsigned settings/timestamps and replayed reads cannot extend or shorten it.
+Unreferenced cached blobs are removed. Deletion
 is best effort: transcripts and copies can survive. The prototype inbox paginates
 channel history; search covers only locally cached plaintext.
 
@@ -186,8 +193,15 @@ future messages; historical epochs they never received remain unavailable.
 Revocation protects future content only. Remaining members rekey affected private
 groups before sending, including groups the removal issuer cannot access. Revoke this device/person from another
 active device/person so the issuer remains authorized to finish rotations.
-If a multi-request membership/revocation operation fails, its error is reported;
-inspect state and repeat the operation to complete rotation before sending again.
+Signed revocations are pinned before publication. Interrupted publication,
+rotations and metadata updates resume on the next command opening that profile;
+errors stay visible and all affected accessible channels are attempted. A failed
+metadata PATCH does not undo a committed new epoch. Sending also checks for any
+unprotected revocations before sealing new content.
+
+Protocol major 2 signs epoch key commitments to prevent poisoned key accounts.
+Upgrade client/server/GUI together; recreate major-1 development spaces. HTTP
+routes still use `/v1`; incompatible protocol headers fail with exit code 4.
 
 Exit codes: **0** success, **1** input/local/verification error, **2** server/network
 error (including 429 with retry seconds), **3** authentication/revoked, **4** upgrade

@@ -55,8 +55,11 @@ describe('desktop state boundary', () => {
       }).success,
     ).toBe(false);
     expect(
-      pollSchema.safeParse({ changed: true, notices: [{ direct: 'yes' }] })
-        .success,
+      pollSchema.safeParse({
+        changed: true,
+        errors: [],
+        notices: [{ direct: 'yes' }],
+      }).success,
     ).toBe(false);
     const message = {
       id,
@@ -95,17 +98,24 @@ describe('desktop state boundary', () => {
   it('keeps the initial event backlog quiet and notifies only on mentions or DMs', () => {
     const event = {
       changed: true,
+      errors: [],
       notices: [{ mentioned: true, direct: false }],
     };
     expect(shouldNotify(event, true)).toBe(false);
     expect(shouldNotify(event, false)).toBe(true);
     expect(
       shouldNotify(
-        { changed: true, notices: [{ mentioned: false, direct: true }] },
+        {
+          changed: true,
+          errors: [],
+          notices: [{ mentioned: false, direct: true }],
+        },
         false,
       ),
     ).toBe(true);
-    expect(shouldNotify({ changed: true, notices: [] }, false)).toBe(false);
+    expect(
+      shouldNotify({ changed: true, errors: [], notices: [] }, false),
+    ).toBe(false);
   });
   it('restores validated preferences and recovers from corrupt or outdated storage', () => {
     for (const raw of [

@@ -247,20 +247,26 @@
       retry = 3000;
     while (!stopped) {
       try {
-        const events = await api.poll(profile.id, initial);
+        const wasInitial = initial;
+        const events = await api.poll(profile.id, wasInitial);
+        initial = false;
         if (stopped) break;
         if (
           prefs.notifications &&
-          shouldNotify(events, initial) &&
+          shouldNotify(events, wasInitial) &&
           (await isPermissionGranted())
         )
           sendNotification({
             title: 'Pheidippides',
             body: `New mention or direct message in ${profile.name}`,
           });
-        initial = initial && events.changed;
         retry = 3000;
-        if (syncErrors[profile.id]) {
+        if (events.errors.length) {
+          syncErrors = {
+            ...syncErrors,
+            [profile.id]: events.errors.join('; '),
+          };
+        } else if (syncErrors[profile.id]) {
           const next = { ...syncErrors };
           delete next[profile.id];
           syncErrors = next;

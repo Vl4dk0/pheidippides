@@ -315,6 +315,7 @@ fn epoch_rotation_keeps_history_and_binds_wrapped_key_routing() -> Result<(), Cr
             previous: None,
             space_id: f.space(),
             channel_id: next.channel_id(),
+            key_commitment: old.commitment(),
             epoch: 0,
             kind: ChannelKind::Group,
             members: vec![
@@ -330,6 +331,7 @@ fn epoch_rotation_keeps_history_and_binds_wrapped_key_routing() -> Result<(), Cr
             previous: Some(genesis.signature.clone()),
             space_id: f.space(),
             channel_id: next.channel_id(),
+            key_commitment: next.commitment(),
             epoch: next.epoch(),
             kind: ChannelKind::Group,
             members: vec![
@@ -344,6 +346,33 @@ fn epoch_rotation_keeps_history_and_binds_wrapped_key_routing() -> Result<(), Cr
         .directory()?
         .verify_membership(&membership, Some(&genesis))?;
     let wrapped = wrap_channel_key(&next, &member, &authorized, &mut f.entropy)?;
+    let relabeled = ChannelKey::from_bytes(
+        f.space(),
+        old.channel_id(),
+        next.epoch(),
+        *old.export_secret(),
+    );
+    assert!(wrap_channel_key(&relabeled, &member, &authorized, &mut f.entropy).is_err());
+    let mut substituted = membership.clone();
+    substituted.data.key_commitment = relabeled.commitment();
+    assert!(
+        f.directory()?
+            .verify_membership(&substituted, Some(&genesis))
+            .is_err()
+    );
+    let same_epoch_rebind = sign_membership(
+        ChannelMembershipData {
+            previous: Some(membership.signature.clone()),
+            key_commitment: relabeled.commitment(),
+            ..membership.data.clone()
+        },
+        &f.keys,
+    )?;
+    assert!(
+        f.directory()?
+            .verify_membership(&same_epoch_rebind, Some(&membership))
+            .is_err()
+    );
     let mut forged = membership.clone();
     forged.data.members.pop();
     assert!(f.directory()?.verify_membership(&forged, None).is_err());
@@ -1059,7 +1088,7 @@ fn wire_validation_is_strict_bounded_and_major_versioned() -> Result<(), CryptoE
     assert_eq!(upgrade.status_code(), 426);
     assert_eq!(
         serde_json::to_value(upgrade)?,
-        json!({"error":"upgrade","required_major":1})
+        json!({"error":"upgrade","required_major":PROTOCOL_MAJOR})
     );
     let response: Counts = serde_json::from_value(
         json!({"unread_threads":0,"mentions":0,"claimed_by_you":0,"channels":[],"latest_seq":0,"future":true}),

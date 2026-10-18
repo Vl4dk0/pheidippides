@@ -65,6 +65,7 @@ async fn wait_notifications_follow_event_commits_only() -> anyhow::Result<()> {
         Ok(CreateChannelRequest {
             membership: sign_membership(
                 ChannelMembershipData {
+                    key_commitment: PublicKey::from_bytes([42; 32]),
                     previous: None,
                     space_id: sid,
                     channel_id: id,

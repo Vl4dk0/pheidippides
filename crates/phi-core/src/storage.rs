@@ -3,6 +3,7 @@ use phi_crypto::{PinnedTrustState, VerifiedDirectory, verify_trust_bundle};
 use phi_proto::*;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use std::collections::BTreeMap;
 use std::{
     fs::{self, OpenOptions},
     path::{Path, PathBuf},
@@ -212,7 +213,28 @@ impl Cache {
         CREATE INDEX IF NOT EXISTS messages_thread ON messages(thread,seq);
         CREATE TABLE IF NOT EXISTS message_pins(id TEXT PRIMARY KEY,seq INTEGER UNIQUE NOT NULL,digest TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS reactions(message TEXT NOT NULL,person TEXT NOT NULL,handle TEXT NOT NULL,kind TEXT NOT NULL,raw TEXT NOT NULL,PRIMARY KEY(message,person,handle,kind));
+        CREATE TABLE IF NOT EXISTS observations(evidence TEXT PRIMARY KEY,thread TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS wait_outcomes(handle TEXT NOT NULL,seq INTEGER NOT NULL,digest TEXT NOT NULL,error TEXT,PRIMARY KEY(handle,seq));
+        CREATE TABLE IF NOT EXISTS pending_revocations(signature TEXT PRIMARY KEY,raw TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS cursors(thread TEXT PRIMARY KEY,seq INTEGER NOT NULL);")?;
+        if db.query_row("PRAGMA user_version", [], |r| r.get::<_, u32>(0))? < 2 {
+            let tx = db.unchecked_transaction()?;
+            tx.execute(
+                "UPDATE state SET value=? WHERE name LIKE 'activity/%'",
+                [crate::now().to_string()],
+            )?;
+            tx.execute(
+                "INSERT OR IGNORE INTO state SELECT 'activity/'||thread,? FROM messages",
+                [crate::now().to_string()],
+            )?;
+            tx.execute(
+                "INSERT OR IGNORE INTO observations SELECT 'message/'||id,thread FROM messages",
+                [],
+            )?;
+            tx.execute("INSERT OR IGNORE INTO observations SELECT 'reaction/'||r.raw,m.thread FROM reactions r JOIN messages m ON m.id=r.message", [])?;
+            tx.execute_batch("PRAGMA user_version=2")?;
+            tx.commit()?;
+        }
         Ok(Self { db })
     }
     pub fn get<T: DeserializeOwned>(&self, name: &str) -> Result<Option<T>> {
@@ -248,25 +270,109 @@ impl Cache {
         tx.commit()?;
         Ok(verified)
     }
+    pub fn record_revocation(
+        &mut self,
+        directory: &VerifiedDirectory,
+        revocation: &Revocation,
+    ) -> Result<VerifiedDirectory> {
+        let tx = self
+            .db
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let prior: String =
+            tx.query_row("SELECT value FROM state WHERE name='trust'", [], |r| {
+                r.get(0)
+            })?;
+        let prior: PinnedTrustState = serde_json::from_str(&prior)?;
+        let mut bundle = directory.trust_bundle();
+        if !bundle.revocations.contains(revocation) {
+            bundle.revocations.push(revocation.clone());
+        }
+        let verified =
+            verify_trust_bundle(directory.space_id(), &bundle, crate::now(), Some(&prior))?;
+        tx.execute(
+            "UPDATE state SET value=? WHERE name='trust'",
+            [serde_json::to_string(&verified.pinned_state())?],
+        )?;
+        tx.execute(
+            "INSERT OR IGNORE INTO pending_revocations VALUES(?,?)",
+            params![
+                serde_json::to_string(&revocation.signature)?,
+                serde_json::to_string(revocation)?
+            ],
+        )?;
+        tx.commit()?;
+        Ok(verified)
+    }
+    pub fn accept_settings(
+        &mut self,
+        directory: &VerifiedDirectory,
+        change: &SettingsChange,
+    ) -> Result<SpaceSettings> {
+        let tx = self
+            .db
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let previous: Option<String> = tx
+            .query_row("SELECT value FROM state WHERE name='settings'", [], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        let previous: Option<SettingsChange> =
+            previous.map(|v| serde_json::from_str(&v)).transpose()?;
+        if previous.as_ref() == Some(change) {
+            return Ok(change.data.settings.clone());
+        }
+        directory.verify_settings(change)?;
+        tx.execute("INSERT INTO state VALUES('settings',?) ON CONFLICT(name) DO UPDATE SET value=excluded.value", [serde_json::to_string(change)?])?;
+        tx.commit()?;
+        Ok(change.data.settings.clone())
+    }
+    pub fn trusted_settings(&self) -> Result<SpaceSettings> {
+        Ok(self
+            .get::<SettingsChange>("settings")?
+            .map(|s| s.data.settings)
+            .unwrap_or_default())
+    }
+    pub fn channel_epochs(
+        &self,
+        directory: &VerifiedDirectory,
+        channel: &Channel,
+    ) -> Result<BTreeMap<Epoch, PublicKey>> {
+        channel_epochs(&self.db, directory, channel)
+    }
     pub fn channel(&mut self, directory: &VerifiedDirectory, channel: &Channel) -> Result<()> {
         let tx = self
             .db
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let name = format!("roster/{}", channel.id);
-        let prior: Option<String> = tx
-            .query_row("SELECT value FROM state WHERE name=?", [&name], |r| {
-                r.get(0)
-            })
-            .optional()?;
-        let prior: Option<ChannelMembership> =
-            prior.map(|s| serde_json::from_str(&s)).transpose()?;
-        directory.verify_channel(channel, prior.as_ref())?;
-        tx.execute(
-            "INSERT INTO state VALUES(?,?) ON CONFLICT(name) DO UPDATE SET value=excluded.value",
-            params![name, serde_json::to_string(&channel.membership)?],
-        )?;
+        let epochs = channel_epochs(&tx, directory, channel)?;
+        for (name, value) in [
+            (
+                format!("roster/{}", channel.id),
+                serde_json::to_string(&channel.membership)?,
+            ),
+            (
+                format!("epochs/{}", channel.id),
+                serde_json::to_string(&epochs)?,
+            ),
+        ] {
+            tx.execute("INSERT INTO state VALUES(?,?) ON CONFLICT(name) DO UPDATE SET value=excluded.value", params![name, value])?;
+        }
         tx.commit()?;
         Ok(())
+    }
+    pub fn wait_outcome(
+        &self,
+        handle: &Handle,
+        event: &Event,
+        error: Option<&str>,
+    ) -> Result<bool> {
+        let digest = blake3::hash(&serde_json::to_vec(event)?)
+            .to_hex()
+            .to_string();
+        let changed = self.db.execute("INSERT INTO wait_outcomes VALUES(?,?,?,?) ON CONFLICT(handle,seq) DO UPDATE SET error=COALESCE(wait_outcomes.error,excluded.error) WHERE wait_outcomes.digest=excluded.digest", params![handle.as_str(), event.seq, digest, error])?;
+        if changed == 0 {
+            self.db.execute("UPDATE wait_outcomes SET error='server changed a previously observed event' WHERE handle=? AND seq=?", params![handle.as_str(), event.seq])?;
+        }
+        Ok(changed > 0)
     }
     pub fn message(&mut self, message: &Message, content: &MessageContent) -> Result<()> {
         let raw = serde_json::to_string(message)?;
@@ -304,15 +410,20 @@ impl Cache {
                 serde_json::to_string(content)?
             ],
         )?;
-        tx.commit()?;
-        self.activity(
+        observe_activity(
+            &tx,
             message.envelope.thread_id.unwrap_or(message.id),
-            message.created_at,
+            &format!("message/{}", message.id),
         )?;
+        tx.commit()?;
         Ok(())
     }
-    pub fn activity(&self, thread: MessageId, timestamp: u64) -> Result<()> {
-        self.db.execute("INSERT INTO state VALUES(?,?) ON CONFLICT(name) DO UPDATE SET value=CAST(MAX(CAST(state.value AS INTEGER),CAST(excluded.value AS INTEGER)) AS TEXT)", params![format!("activity/{thread}"), timestamp.to_string()])?;
+    pub fn activity(&mut self, thread: MessageId, evidence: &str) -> Result<()> {
+        let tx = self
+            .db
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        observe_activity(&tx, thread, evidence)?;
+        tx.commit()?;
         Ok(())
     }
     pub fn prune(&self, retention: u32) -> Result<()> {
@@ -320,7 +431,7 @@ impl Cache {
             return Ok(());
         }
         let cutoff = crate::now().saturating_sub(u64::from(retention) * 86400);
-        self.db.execute("DELETE FROM messages WHERE thread IN (SELECT thread FROM messages GROUP BY thread HAVING MAX(created)<? AND COALESCE((SELECT CAST(value AS INTEGER) FROM state WHERE name='activity/'||thread),0)<?)", params![cutoff, cutoff])?;
+        self.db.execute("DELETE FROM messages WHERE thread IN (SELECT thread FROM messages GROUP BY thread HAVING COALESCE((SELECT CAST(value AS INTEGER) FROM state WHERE name='activity/'||thread),0)<?)", [cutoff])?;
         self.db.execute(
             "DELETE FROM reactions WHERE message NOT IN (SELECT id FROM messages)",
             [],
@@ -331,6 +442,61 @@ impl Cache {
         )?;
         Ok(())
     }
+}
+fn observe_activity(db: &Connection, thread: MessageId, evidence: &str) -> Result<()> {
+    let inserted = db.execute(
+        "INSERT OR IGNORE INTO observations VALUES(?,?)",
+        params![evidence, thread.to_string()],
+    )?;
+    if inserted > 0 {
+        db.execute("INSERT INTO state VALUES(?,?) ON CONFLICT(name) DO UPDATE SET value=CAST(MAX(CAST(state.value AS INTEGER),CAST(excluded.value AS INTEGER)) AS TEXT)", params![format!("activity/{thread}"), crate::now().to_string()])?;
+    }
+    Ok(())
+}
+fn channel_epochs(
+    db: &Connection,
+    directory: &VerifiedDirectory,
+    channel: &Channel,
+) -> Result<BTreeMap<Epoch, PublicKey>> {
+    let prior: Option<String> = db
+        .query_row(
+            "SELECT value FROM state WHERE name=?",
+            [format!("roster/{}", channel.id)],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let prior: Option<ChannelMembership> = prior.map(|v| serde_json::from_str(&v)).transpose()?;
+    directory.verify_channel(channel, prior.as_ref())?;
+    let raw: Option<String> = db
+        .query_row(
+            "SELECT value FROM state WHERE name=?",
+            [format!("epochs/{}", channel.id)],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let mut epochs: BTreeMap<Epoch, PublicKey> = raw
+        .map(|v| serde_json::from_str(&v))
+        .transpose()?
+        .unwrap_or_default();
+    let records: Vec<_> = channel
+        .membership_history
+        .iter()
+        .chain(std::iter::once(&channel.membership))
+        .collect();
+    let start = prior
+        .as_ref()
+        .and_then(|p| records.iter().position(|r| *r == p))
+        .unwrap_or(0);
+    for record in &records[start..] {
+        if epochs
+            .get(&record.data.epoch)
+            .is_some_and(|old| old != &record.data.key_commitment)
+        {
+            return Err(user("epoch key commitment changed"));
+        }
+        epochs.insert(record.data.epoch, record.data.key_commitment.clone());
+    }
+    Ok(epochs)
 }
 pub(crate) fn private_dir(path: &Path) -> Result<()> {
     if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {

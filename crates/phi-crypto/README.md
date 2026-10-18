@@ -1,4 +1,4 @@
-# Cryptographic architecture (protocol major 1)
+# Cryptographic architecture (protocol major 2)
 
 This crate is pure: no files, network, clocks, or OS randomness. Pass an `Entropy`
 implementation backed by the OS CSPRNG from the application, and Unix seconds to
@@ -52,7 +52,7 @@ ambiguity. Mention lists preserve order and encode each mention as
 | `phi revocation v1` | space_id, target, issuer_device, created_at |
 | `phi reaction v1` | space_id, message_id, person_id, device_id, handle, kind, created_at, remove |
 | `phi settings v1` | space_id, issuer_device, created_at, retention_days, summary_mode, messages_per_minute, messages_per_hour |
-| `phi channel membership v1` | previous, space_id, channel_id, epoch, kind, members, issuer_device |
+| `phi channel membership v2` | previous, key_commitment, space_id, channel_id, epoch, kind, members, issuer_device |
 
 A certificate issuer is `['device', device_id]` or `['grant', grant_id]`; a
 revocation target is `['device', device_id]` or `['person', person_id]` (JSON uses
@@ -94,7 +94,14 @@ AAD. The wire box contains ephemeral_pub, nonce and ciphertext.
 
 Channel wrapping requires both a `VerifiedDevice` and `VerifiedMembership` from
 the same verified directory snapshot. It checks space, channel, epoch and person
-membership before sealing, so a valid space certificate alone is insufficient.
+membership and the signed key commitment before sealing, so a valid space
+certificate alone is insufficient. `ChannelKey::commitment()` is the 32-byte
+BLAKE3 derive-key hash with context `phi channel key commitment v2` over the fixed
+raw bytes `space_id || channel_id || epoch_u64_le || key`. It is public evidence,
+not a key. Before storing an unwrapped/grant key, clients must match this digest
+against the pinned, verified epoch history; a sealed box alone authenticates no
+sender. A former key holder therefore cannot poison a new epoch with old bytes,
+even by also forging valid metadata under those bytes.
 AAD is
 `J('phi wrapped key v1', [space_id, channel_id, epoch, device_id])`. Grant-sealed
 channel key AAD is `J('phi grant channel key v1', [space_id, grant_id, channel_id,
@@ -149,7 +156,7 @@ would expose equivocation; this prototype does not add a transparency service.
 ## Authenticated channel membership
 
 Create/update carry `ChannelMembership`; rotations require it in `PutKeysRequest`.
-Each proof signs space/channel/epoch/kind/members/issuer and the previous roster's
+Each proof signs space/channel/epoch/key commitment/kind/members/issuer and the previous roster's
 signature (`previous=null` for epoch-0 genesis). Updates and rotations must extend
 the currently stored proof; the server persists the complete oldest-first
 `Channel.membership_history` plus the current `membership`. Historical/self key
@@ -159,7 +166,7 @@ Before wrapping, call `VerifiedDirectory::verify_channel(channel, prior_roster)`
 and pass its `VerifiedMembership` to `wrap_channel_key`. M3 must persist each
 accepted current roster per channel, pass it on every refresh, and retain it on
 errors. The verifier checks history back to that exact pin, immutable space/id/kind,
-nondecreasing epoch, signatures, and that each new signer belonged to the prior
+nondecreasing epoch, immutable commitment within each epoch, signatures, and that each new signer belonged to the prior
 roster. It rejects a missing pin, fork, rollback or unsigned members projection.
 For locally proposed creation/rotation, `verify_membership(proposed, prior_roster)`
 checks the one-step transition before wrapping. `None` is only for a newly accepted
@@ -188,7 +195,10 @@ Links are `phi://authority/space_id#S` (HTTP) or `phis://...` (HTTPS), using the
 are accepted; credentials, paths, queries, percent escapes and padding are rejected.
 Encoded links use `Zeroizing<String>` and expose S only via explicit accessors.
 
-These changes tighten the unreleased prototype's major-1 contract. Old signed
-records lacking these fields cannot be upgraded by the host; development stores
-must be recreated or re-signed by their legitimate key owners. There is no unsigned
-or legacy-verification fallback.
+The signed commitment changes the unreleased prototype to protocol major 2.
+Major-1 peers are rejected at the protocol header. Old membership records lack the
+mandatory field/signature domain; recreate development spaces with upgraded
+components. The host cannot migrate signatures and no legacy verification exists.
+`VerifiedDirectory::certificate(id)` exposes authenticated ownership even after
+revocation; it grants no active authorization. `trust_bundle()` exports verified
+merged evidence for locally pinning a newly signed revocation before publication.
