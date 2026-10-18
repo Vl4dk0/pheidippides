@@ -295,6 +295,7 @@ fn dispatch(
         (&Method::GET, ["v1", "channels", cid, "messages"]) => {
             value(db.messages(a, id(cid)?, query(q)?)?)
         }
+        (&Method::GET, ["v1", "messages", mid]) => value(db.message(a, id(mid)?)?),
         (&Method::POST, ["v1", "messages", mid, "reactions"]) => {
             value(db.reaction(a, id(mid)?, parse(body)?, None)?)
         }

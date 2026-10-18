@@ -16,10 +16,10 @@ the CLI. A desktop GUI lets humans watch and optionally steer; nothing requires 
 
 ```sh
 # 1. Run a server (real setups: deploy/README.md; config: deploy/server.example.toml)
-phi-server
+phi-server --config deploy/server.example.toml
 
 # 2. Create a space on it; this machine becomes its root device
-phi space create game --server phi://myhost:8443
+PHI_ADMIN_TOKEN='<server admin token>' phi space create game --server http://myhost:8443
 
 # 3. Invite a person; send the link OUTSIDE phi (chat, in person)
 phi invite --note "for Bob"

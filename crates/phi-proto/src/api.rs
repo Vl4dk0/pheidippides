@@ -129,6 +129,10 @@ pub struct MessagesQuery {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ListMessagesResponse {
     pub messages: Vec<Message>,
+    #[serde(default)]
+    pub reactions: Vec<Reaction>,
+    #[serde(default)]
+    pub cursors: Vec<ReadCursor>,
     pub next_after: Option<Seq>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -90,6 +90,7 @@ at a configured base64-aware bound. Blob JSON buffers ciphertext in memory.
 | GET `/channels/{cid}/keys/mine` | — | `GetKeysResponse` |
 | POST `/channels/{cid}/messages` | `SendMessageRequest` | `SendMessageResponse` |
 | GET `/channels/{cid}/messages` | `MessagesQuery` | `ListMessagesResponse` |
+| GET `/messages/{mid}` | — | Message |
 | POST `/messages/{mid}/reactions` | `ReactionRequest`, `remove=false` | `ReactionResponse` |
 | DELETE `/messages/{mid}/reactions/{kind}` | `ReactionRequest`, `remove=true` | `ReactionResponse` |
 | PUT `/threads/{tid}/cursor` | `PutCursorRequest` | `PutCursorResponse` |
@@ -110,14 +111,16 @@ Initial creation requires a valid self-signed root and creator-only all/self
 channels. Invites add their new person to #all; enrollment adds another device
 to the issuer's person. Clients create additional self/DM/group channels, and
 redeemers PUT their rewrapped keys. All membership is person-based. Group PATCH
-may change membership/meta; all, self, and DM membership is fixed. Rotations
+may change membership/meta; all, self, and DM membership is fixed, with
+metadata-only PATCH updates permitted for encrypted client-side name registries. Rotations
 advance exactly one epoch and wrap to every remaining active member device;
 same/older-epoch PUT may add only the authenticated device's own immutable wrap.
 
 Messages must use the current epoch and a root thread in the same channel.
 Required summaries are enforced via the plaintext flag for CLI devices; GUI
 devices are exempt. The host cannot verify summary contents. Sending advances
-the author's person cursor; PUT cursor explicitly sets it, including backwards
+the author's person cursor except in self channels, so other sessions see those
+messages as unread; PUT cursor explicitly sets it, including backwards
 for unread, but cannot exceed the newest thread message. Counts return unread
 threads, unread matching mentions (general mentions always count; no handle means
 all handles), and all claims by the person. Claims are unique per message;
@@ -197,3 +200,8 @@ Errors use `phi_proto::ErrorBody` (no plaintext or bearer tokens in logs):
 | 426 | `upgrade` | missing/invalid/mismatching major; includes `required_major` |
 | 429 | `rate_limited` | token bucket empty; includes `retry_after` and `Retry-After` |
 | 500 | `internal` | generic storage failure; details stay in structured server logs |
+
+Message pages also return the current signed reactions for each returned message
+and the authenticated person's read cursors for the returned threads, allowing
+client inbox/read composition without decrypting anything on the host. Direct
+GET message lookup has the same space/channel authorization as message pages.

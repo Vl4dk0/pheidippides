@@ -114,13 +114,13 @@ impl Db {
                 "UPDATE threads SET activity=? WHERE id=?",
                 params![now(), thread.to_string()],
             )?;
-            db.conn.execute(
-                "
-            INSERT INTO cursors VALUES(?,?,?) ON CONFLICT(person_id,thread_id) DO
-            UPDATE SET seq=MAX(seq,excluded.seq)
-        ",
-                params![a.person().to_string(), thread.to_string(), seq],
-            )?;
+            // Self-channel recipients are other sessions of the same person; sending must leave their inbox unread.
+            if c.kind != ChannelKind::SelfChannel {
+                db.conn.execute(
+                    "INSERT INTO cursors VALUES(?,?,?) ON CONFLICT(person_id,thread_id) DO UPDATE SET seq=MAX(seq,excluded.seq)",
+                    params![a.person().to_string(), thread.to_string(), seq],
+                )?;
+            }
             db.event(
                 a.sid(),
                 seq,
@@ -160,8 +160,31 @@ impl Db {
             ],
         )?;
         let next_after = messages.last().map(|m| m.seq);
+        let mut reactions = Vec::new();
+        let mut cursors = Vec::new();
+        let mut threads = std::collections::BTreeSet::new();
+        for message in &messages {
+            reactions.extend(self.list::<Reaction>(
+                "SELECT json FROM reactions WHERE message_id=?",
+                [message.id.to_string()],
+            )?);
+            let thread = message.envelope.thread_id.unwrap_or(message.id);
+            if threads.insert(thread) {
+                let seq: u64 = self.conn.query_row(
+                    "SELECT COALESCE((SELECT seq FROM cursors WHERE person_id=? AND thread_id=?),0)",
+                    params![a.person().to_string(), thread.to_string()], |row| row.get(0),
+                )?;
+                cursors.push(ReadCursor {
+                    person_id: a.person(),
+                    thread_id: thread,
+                    last_read_seq: seq,
+                });
+            }
+        }
         Ok(ListMessagesResponse {
             messages,
+            reactions,
+            cursors,
             next_after,
         })
     }

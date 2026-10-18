@@ -24,6 +24,7 @@ preimages and derivations are in `../phi-crypto/README.md`.
 | GET /channels/{cid}/keys/mine | — | GetKeysResponse |
 | POST /channels/{cid}/messages | SendMessageRequest | SendMessageResponse |
 | GET /channels/{cid}/messages | MessagesQuery | ListMessagesResponse |
+| GET /messages/{mid} | — | Message |
 | POST /messages/{mid}/reactions | ReactionRequest (remove=false) | ReactionResponse |
 | DELETE /messages/{mid}/reactions/{kind} | ReactionRequest (remove=true) | ReactionResponse |
 | PUT /threads/{tid}/cursor | PutCursorRequest | PutCursorResponse |
@@ -84,3 +85,10 @@ updates/rotations must extend the stored proof. See phi-crypto's README for chan
 and directory pinning, #all expansion through signed invite origins, GUI enrollment
 policy, and bootstrap limits. `GrantRecordData.device_kind` is mandatory and signed.
 Text metadata fields are single-line and reject controls/bidi formatting.
+
+M3 additions: message pages include current reactions for returned messages and
+read cursors for their threads (scoped to the authenticated person). GET
+`/v1/messages/{mid}` locates a verified root without scanning unrelated channels.
+Channel PATCH supports metadata-only updates on all/self/DM channels while their
+member sets stay fixed; this keeps encrypted #all person-name metadata durable.
+Group membership updates retain the existing semantics.

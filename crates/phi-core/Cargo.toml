@@ -7,6 +7,24 @@ rust-version.workspace = true
 [dependencies]
 phi-proto.workspace = true
 phi-crypto.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true
+getrandom.workspace = true
+blake3.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+tokio = { version = "1", features = ["process", "io-util", "time"] }
+toml = "0.9"
+directories = "6"
+
+[dev-dependencies]
+phi-server = { path = "../phi-server" }
+axum = "0.8"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net"] }
+tempfile = "3"
+anyhow = "1"
 
 [lints]
 workspace = true

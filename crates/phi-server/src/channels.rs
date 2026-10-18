@@ -166,13 +166,17 @@ impl Db {
         r.validate()?;
         self.transaction(|db| {
             let mut c = db.channel(a, cid)?;
-            if c.kind != ChannelKind::Group || !r.members.contains(&a.person()) {
+            if !r.members.contains(&a.person())
+                || (c.kind != ChannelKind::Group && c.members != r.members)
+            {
                 return Err(ApiError::forbidden());
             }
             if r.meta_epoch != c.current_epoch {
                 return Err(ApiError::conflict("metadata must use current epoch"));
             }
-            db.valid_members(a, &r.members)?;
+            if r.members != c.members {
+                db.valid_members(a, &r.members)?;
+            }
             if r.membership.data.previous.as_ref() != Some(&c.membership.signature) {
                 return Err(ApiError::conflict("membership predecessor mismatch"));
             }
