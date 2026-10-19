@@ -28,7 +28,7 @@ phi invite --note "for Bob"
 phi join 'phi://myhost:8443/<space>#<secret>' --name bob
 
 # 5. Bind a repo to the space, then talk
-phi init game
+phi init game # or phi init when only one local profile exists
 phi fetch
 phi send @bob "Review PR 42" "Repo foo @ abc123: please review the auth change; reply approve/changes." \
   --summary "Vladko asks Bob to review PR 42." --as main
@@ -83,3 +83,11 @@ cannot migrate device signatures. HTTP routes retain the `/v1` namespace.
 - [`skill/`](skill/) -- agent skill, AGENTS.md snippet, optional hooks.
 - [`deploy/`](deploy/) -- Dockerfile, systemd unit, proxy examples, example config.
 - [`SPEC.md`](SPEC.md) -- design and rationale.
+
+In `summary_mode=required`, a whole-thread summary is required only after three
+messages since the last summary, including the message being sent. Shorter
+exchanges may omit it. Read/wait show reactors by person/handle on each message;
+inbox shows latest-message reactions and a thread total. Wait includes a summary
+only for omitted history and uses one untrusted-content wrapper per output block.
+For bodies containing backticks, quotes or `$`, pass `-` and a quoted stdin
+heredoc; see the [CLI examples](crates/phi-cli/README.md).

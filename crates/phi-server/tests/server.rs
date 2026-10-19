@@ -1027,6 +1027,33 @@ async fn messages_check_signatures_threads_summaries_and_pagination() -> TestRes
             .0,
         400
     );
+    let mut unsummarized = f.message(&f.root, f.all, None, vec![])?;
+    unsummarized.has_summary = false;
+    unsummarized.envelope.summary_covers_seq = None;
+    unsummarized.signature = f
+        .root
+        .key
+        .sign(&message_signing_bytes(&unsummarized.envelope)?);
+    let short: Message = ok(&f.app, "POST", &path, Some(&f.root.token), unsummarized).await?;
+    let mut first_reply = f.message(&f.root, f.all, Some(short.id), vec![])?;
+    first_reply.has_summary = false;
+    first_reply.envelope.summary_covers_seq = None;
+    first_reply.signature = f
+        .root
+        .key
+        .sign(&message_signing_bytes(&first_reply.envelope)?);
+    let _: Message = ok(&f.app, "POST", &path, Some(&f.root.token), first_reply).await?;
+    let mut third = f.message(&f.root, f.all, Some(short.id), vec![])?;
+    third.has_summary = false;
+    third.envelope.summary_covers_seq = None;
+    third.signature = f.root.key.sign(&message_signing_bytes(&third.envelope)?);
+    let (status, error, _) = request(&f.app, "POST", &path, Some(&f.root.token), third).await?;
+    assert_eq!(status, 400);
+    assert!(
+        error
+            .to_string()
+            .contains("3 messages since the last summary")
+    );
     let root = f.send(&f.root, f.all, None).await?;
     let mut overclaim = f.message(&f.root, f.all, Some(root.id), vec![])?;
     overclaim.envelope.summary_covers_seq = Some(u64::MAX);

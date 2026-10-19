@@ -309,6 +309,22 @@ async fn create_invite_join_attachment_fetch_read_reply() -> Result<()> {
     ensure!(view.messages.len() == 2 && view.summary_covers_seq == Some(root.seq));
     ensure!(view.messages[1].message.id == reply.id && view.newer_messages == 0);
     ensure!(view.text().contains("summary (as of #2; up to date)"));
+    let own_tail = bob
+        .read(
+            root.id,
+            ReadOptions {
+                all: false,
+                last: Some(1),
+            },
+        )
+        .await?;
+    ensure!(
+        own_tail.messages.len() == 1 && own_tail.messages[0].perspective == MessagePerspective::You
+    );
+    ensure!(
+        own_tail.text().matches("<UNTRUSTED:").count() == 1,
+        "the foreign root title stays framed even when only an own reply is shown"
+    );
     let own = format_message(&view.messages[0], &alice.names());
     ensure!(own.contains("(you · agent)") && !own.contains("UNTRUSTED"));
     let foreign = format_message(&view.messages[1], &alice.names());
@@ -370,7 +386,49 @@ async fn claim_exclusivity_reactions_unread_and_person_cursor() -> Result<()> {
     );
     alice.react(root.id, ReactionKind::Ack, false).await?;
     let view = alice.read(root.id, ReadOptions::default()).await?;
-    ensure!(view.text().contains("claimed by bob/cli") && view.text().contains("ack×1"));
+    ensure!(view.text().contains("claimed by bob/cli") && view.text().contains("ack by alice/cli"));
+    let mut other_handle =
+        Client::open(f.store("alice"), alice.profile.clone(), Some("reviewer")).await?;
+    other_handle
+        .react(root.id, ReactionKind::Ack, false)
+        .await?;
+    let reply = alice.reply(root.id, options("work ready")).await?;
+    carol.react(reply.id, ReactionKind::Down, false).await?;
+    let view = carol
+        .read(
+            root.id,
+            ReadOptions {
+                all: true,
+                last: None,
+            },
+        )
+        .await?;
+    let rendered = view.text();
+    ensure!(rendered.matches("<UNTRUSTED:").count() == 1);
+    let (first, second) = rendered
+        .split_once("── #2")
+        .ok_or_else(|| anyhow::anyhow!("missing reply"))?;
+    ensure!(
+        first.contains("ack by alice/cli, alice/reviewer") && first.contains("claimed by bob/cli")
+    );
+    ensure!(
+        !second.contains("ack by")
+            && !second.contains("claimed by")
+            && second.contains("down by carol/cli")
+    );
+    bob.unread(root.id).await?;
+    let inbox = bob.inbox().await?;
+    let preview = inbox
+        .iter()
+        .find(|entry| entry.id == root.id)
+        .ok_or_else(|| anyhow::anyhow!("missing inbox entry"))?
+        .text(&bob.names());
+    ensure!(
+        preview.contains("latest message reactions: down by carol/cli · 4 reactions in thread")
+            && !preview.contains("ack by")
+            && !preview.contains("claimed by")
+    );
+    carol.wait(0).await?;
     bob.react(root.id, ReactionKind::Claim, true).await?;
     ensure!(carol.wait(0).await?.is_empty());
     ensure!(
@@ -402,10 +460,11 @@ async fn wait_backlog_wakes_on_reply_and_keeps_per_handle_cursor() -> Result<()>
     ensure!(events.iter().any(|e| matches!(e, WaitEntry::Message(_))));
     let output = bob.format_wait_entry(&events[0]).await?;
     ensure!(
-        output.starts_with(&format!("thread {} · Task", root.id))
+        output.contains(&format!("thread {} · Task", root.id))
             && output.contains(&format!("{}#1", root.id))
             && output.contains("hello")
-            && output.contains("<UNTRUSTED: message")
+            && output.matches("<UNTRUSTED:").count() == 1
+            && !output.contains("summary (as of")
             && !output.contains("phi read")
     );
     ensure!(bob.wait(0).await?.is_empty());
@@ -430,7 +489,8 @@ async fn wait_backlog_wakes_on_reply_and_keeps_per_handle_cursor() -> Result<()>
         output.push_str(&alice.format_wait_entry(event).await?);
     }
     ensure!(
-        output.contains("claimed by bob/cli")
+        !output.contains("claimed by bob/cli")
+            && output.contains("summary (as of #2; up to date)")
             && output.contains("my reply")
             && output.contains(&format!("{}#2", root.id))
             && output.contains(&own.id.to_string())
@@ -470,10 +530,16 @@ async fn wait_backlog_wakes_on_reply_and_keeps_per_handle_cursor() -> Result<()>
     ensure!(started.elapsed() >= Duration::from_millis(900));
     let ack = alice.wait_text(0).await?;
     ensure!(ack.is_empty());
-    bob.reply(root.id, options("next message carries reaction context"))
+    let next_message = bob
+        .reply(root.id, options("next message carries reaction context"))
         .await?;
+    bob.react(next_message.id, ReactionKind::Up, false).await?;
     let next = alice.wait_text(0).await?;
-    ensure!(next.contains("ack×1") && next.contains("to: @bob"));
+    ensure!(
+        next.contains("up by bob/cli")
+            && !next.contains("ack by bob/cli")
+            && next.contains("to: @bob")
+    );
     ensure!(alice.wait_text(0).await?.is_empty());
     let mut reviewer = Client::open(f.store("bob"), bob.profile.clone(), Some("reviewer")).await?;
     reviewer.wait(0).await?;
@@ -560,15 +626,11 @@ async fn wait_backlog_wakes_on_reply_and_keeps_per_handle_cursor() -> Result<()>
             == 1
     );
     ensure!(
-        [
-            "batch root body",
-            "batch first reply",
-            "batch final reply",
-            "summary (as of #3; up to date)"
-        ]
-        .iter()
-        .all(|body| output.contains(body))
+        ["batch root body", "batch first reply", "batch final reply"]
+            .iter()
+            .all(|body| output.contains(body))
     );
+    ensure!(!output.contains("summary (as of #3;") && output.matches("<UNTRUSTED:").count() == 1);
     let sibling_header = format!("thread {} · Parallel batch", sibling.id);
     ensure!(output.matches(&sibling_header).count() == 1);
     ensure!(output.find("batch final reply") < output.find(&sibling_header));
@@ -627,9 +689,32 @@ async fn wait_backlog_wakes_on_reply_and_keeps_per_handle_cursor() -> Result<()>
 async fn summaries_required_off_explicit_and_local_summarizer() -> Result<()> {
     let f = Fixture::new().await?;
     let mut alice = f.alice().await?;
+    let unsummarized = alice
+        .send("#all", "No summary", SendOptions::default())
+        .await?;
+    alice.reply(unsummarized.id, SendOptions::default()).await?;
+    let error = alice
+        .reply(unsummarized.id, SendOptions::default())
+        .await
+        .err()
+        .ok_or_else(|| anyhow::anyhow!("third message must require a summary"))?;
+    ensure!(
+        error
+            .to_string()
+            .contains("3 messages since the last summary")
+            && error
+                .to_string()
+                .contains("including this message; threshold 3")
+    );
+    alice
+        .reply(unsummarized.id, options("first summary"))
+        .await?;
+    for _ in 0..2 {
+        alice.reply(unsummarized.id, SendOptions::default()).await?;
+    }
     ensure!(
         alice
-            .send("#all", "No summary", SendOptions::default())
+            .reply(unsummarized.id, SendOptions::default())
             .await
             .is_err()
     );
@@ -692,6 +777,7 @@ async fn summaries_required_off_explicit_and_local_summarizer() -> Result<()> {
     );
     alice.profile.summarizer = None;
     alice.set_settings("summary_mode", "off").await?;
+    alice.reply(unsummarized.id, SendOptions::default()).await?;
     alice
         .send("#all", "No summary needed", SendOptions::default())
         .await?;
@@ -961,6 +1047,9 @@ async fn groups_add_remove_rotate_and_enroll_after_rotation() -> Result<()> {
 async fn profile_resolution_binding_ambiguity_and_space_isolation() -> Result<()> {
     let f = Fixture::new().await?;
     let mut alice = f.alice().await?;
+    let repo = f.dir.path().join("repo");
+    std::fs::create_dir_all(&repo)?;
+    ensure!(f.store("alice").bind(&repo, None)?.space_id == alice.profile.space_id);
     let other = Client::create(f.store("alice"), &f.url, "company", "alice", None).await?;
     let store = f.store("alice");
     #[cfg(unix)]
@@ -986,10 +1075,20 @@ async fn profile_resolution_binding_ambiguity_and_space_isolation() -> Result<()
     ensure!(file_keys.put("identity", b"conflicting key").is_err());
     ensure!(file_keys.get("identity")? == prior);
     ensure!(store.resolve(f.dir.path(), None).is_err());
-    let repo = f.dir.path().join("repo");
+    let error = store
+        .bind(&repo, None)
+        .err()
+        .ok_or_else(|| anyhow::anyhow!("ambiguous init must fail"))?
+        .to_string();
+    for profile in [&alice.profile, &other.profile] {
+        ensure!(
+            error.contains(&format!("{} ({})", profile.name, profile.space_id))
+                && error.contains(&format!("phi init {}", profile.space_id))
+        );
+    }
     let nested = repo.join("deep");
     std::fs::create_dir_all(&nested)?;
-    store.bind(&repo, "game")?;
+    store.bind(&repo, Some("game"))?;
     ensure!(store.resolve(&nested, None)?.space_id == alice.profile.space_id);
     ensure!(store.resolve(&nested, Some("company"))?.space_id == other.profile.space_id);
     let message = alice.send("#all", "Isolated", options("space A")).await?;

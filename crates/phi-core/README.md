@@ -20,7 +20,9 @@ No daemon, GUI, listener or server process is started by the library.
   The redeeming client declares its kind; the GUI mark is a label trusted like
   handles, not proof of human authorship. `invite(true, true)` issues a never-expiring enrollment/recovery code;
   invite grants always expire. The CLI exposes the default seven-day grants.
-- `send`/`reply` enforce summaries, encrypt attachments and populate blob routing
+- `send`/`reply` require summaries in CLI required mode only at three messages
+  since the last summary, including the pending message (counting from the root
+  when absent), encrypt attachments and populate blob routing
   references. `read` returns `ThreadView` with decrypted paths; `inbox`, `wait`,
   `search`, `who`, reactions, groups, revocation/rotation and settings are shared.
   Returned content remains untrusted input to agents. Text formatting lives in
@@ -92,7 +94,8 @@ sequence/coverage data remain signed independently of these display positions.
 
 `MessagePerspective` distinguishes the exact device+handle (`You`), another
 session of the same person (`YourOtherSession`), and other people (`Other`). Text
-views omit the foreign-content wrapper only for verified own-person content;
+views use one foreign-content wrapper around a block containing other people's
+content and omit it for verified own-person blocks;
 verification failures remain visible. Summary headings use the summary message's
 thread number and the number of uncovered messages shown below.
 
@@ -104,8 +107,11 @@ shares this filter between counts and events; inbox/read remain person-wide.
 Settings/revocations and rejected-event
 outcomes remain visible. Message events and inbox entries carry the root's `to:`
 address, tag matching person/handles `(you)`, prioritize matching mentions, and
-include current thread reaction context. `wait_text` groups all available relevant
-messages by thread, renders full bodies with read's framing and summary context,
+include current reaction context. Read/wait text names reactors per exact
+message; inbox text filters to the latest message and adds the thread total
+(`InboxEntry.latest_message` identifies that message). `wait_text` groups all available relevant
+messages by thread, renders full bodies with read's framing, includes a summary only for omitted
+history, wraps the entire batch once when it contains foreign content,
 downloads attachments, then marks through each thread's last displayed message.
 Rendering/download failures leave the wait cursor pending for retry. Structured
 `wait` remains notification-only for GUI polling, and inbox does not mark read;
@@ -136,3 +142,8 @@ so this prototype sends 0. Cryptographic preimage domain suffixes (`v1`/`v2`) an
 the `/v1` HTTP namespace are fixed format labels, independent of package version.
 Server-advertised attachment/quota limits replace client hard-coded policy;
 multiline summaries remain multiline except in compact previews.
+
+`Store::bind(cwd, Option<&str>)` accepts no space only with exactly one local
+profile; ambiguity errors list names, IDs and exact init commands even if a repo
+is already bound. `format_last_seen` shares readable activity ages/UTC dates
+between who and device-list text output.

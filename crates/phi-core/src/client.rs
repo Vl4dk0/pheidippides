@@ -804,7 +804,18 @@ impl Client {
         history: &[DecodedMessage],
     ) -> Result<Message> {
         self.ensure_safe_epoch(channel).await?;
-        if options.summary.is_none() && history.iter().any(|m| m.verification_error.is_some()) {
+        let since_summary = history
+            .iter()
+            .rposition(|message| message.content.summary.is_some())
+            .map_or(history.len(), |index| history.len() - index - 1)
+            .saturating_add(1);
+        let summary_required = self.settings.summary_mode == SummaryMode::Required
+            && self.profile.kind == DeviceKind::Cli
+            && since_summary >= 3;
+        if options.summary.is_none()
+            && (summary_required || self.profile.summarizer.is_some())
+            && history.iter().any(|m| m.verification_error.is_some())
+        {
             return Err(user(
                 "thread contains unverifiable or unavailable messages; supply an explicit whole-thread summary after reviewing the errors",
             ));
@@ -818,12 +829,10 @@ impl Client {
                     options.body
                 ));
                 options.summary = Some(run_summarizer(command, &input).await?);
-            } else if self.settings.summary_mode == SummaryMode::Required
-                && self.profile.kind == DeviceKind::Cli
-            {
-                return Err(user(
-                    "this space requires --summary of the whole thread, or a summarizer in profile.toml",
-                ));
+            } else if summary_required {
+                return Err(user(format!(
+                    "--summary is required now: {since_summary} messages since the last summary (including this message; threshold 3) and summary_mode=required; summarize the whole thread or configure a summarizer in profile.toml"
+                )));
             }
         }
         if options.files.len() > MAX_ATTACHMENTS {
@@ -1257,6 +1266,7 @@ impl Client {
     ) -> Result<(String, Vec<(MessageId, Seq)>)> {
         let mut output = String::new();
         let mut read = Vec::new();
+        let mut foreign_content = false;
         let mut seen = BTreeSet::new();
         for event in events {
             match event {
@@ -1274,7 +1284,9 @@ impl Client {
                         })
                         .collect();
                     let latest = sequences.iter().next_back().copied().unwrap_or(0);
-                    output.push_str(&self.wait_thread(entry, &sequences).await?);
+                    let (text, foreign) = self.wait_thread(entry, &sequences).await?;
+                    output.push_str(&text);
+                    foreign_content |= foreign;
                     read.push((entry.id, latest));
                 }
                 WaitEntry::VerificationFailure { seq, description } => {
@@ -1296,13 +1308,13 @@ impl Client {
                 }
             }
         }
-        Ok((output, read))
+        Ok((wrap_untrusted(output, foreign_content), read))
     }
     async fn wait_thread(
         &mut self,
         entry: &InboxEntry,
         sequences: &BTreeSet<Seq>,
-    ) -> Result<String> {
+    ) -> Result<(String, bool)> {
         let latest = sequences.iter().next_back().copied().unwrap_or(0);
         let mut warnings = String::new();
         for sequence in sequences {
@@ -1346,6 +1358,19 @@ impl Client {
             &self.names(),
             to,
         )?;
+        let foreign_content = view.has_foreign_content();
+        let hidden_messages = view
+            .messages
+            .first()
+            .is_none_or(|message| message.message.id != entry.id)
+            || view
+                .messages
+                .iter()
+                .any(|message| !sequences.contains(&message.message.seq));
+        if !hidden_messages {
+            view.summary = None;
+            view.summary_perspective = None;
+        }
         view.messages
             .retain(|message| sequences.contains(&message.message.seq));
         view.reactions = self.thread_reactions(entry.id)?;
@@ -1363,7 +1388,10 @@ impl Client {
                 message.attachments.push(self.download(attachment).await?);
             }
         }
-        Ok(format!("{}{warnings}", view.text()))
+        Ok((
+            format!("{}{warnings}", view.text_unwrapped()),
+            foreign_content,
+        ))
     }
     pub async fn read(&mut self, thread: MessageId, options: ReadOptions) -> Result<ThreadView> {
         self.begin_operation().await?;
@@ -1561,6 +1589,7 @@ impl Client {
                         && m.verification_error.is_none()
                 }),
                 reactions: thread.iter().flat_map(|m| m.reactions.clone()).collect(),
+                latest_message: latest.message.id,
                 latest_seq: latest.message.seq,
             });
         }
@@ -1949,6 +1978,7 @@ impl Client {
                     own_agent_activity: message.author_person == self.profile.person_id
                         && author.certificate().data.kind == DeviceKind::Cli,
                     reactions: self.thread_reactions(root.id)?,
+                    latest_message: message.id,
                     latest_seq: message.seq,
                 })
             }
@@ -2338,7 +2368,7 @@ impl Client {
                     device.cert.data.kind,
                     device
                         .last_seen_at
-                        .map(|t| t.to_string())
+                        .map(format_last_seen)
                         .unwrap_or_else(|| "never".into()),
                     if device.revoked_at.is_some() {
                         " · revoked"

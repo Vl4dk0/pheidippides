@@ -27,14 +27,6 @@ impl Db {
         if e.mentions.iter().any(|m| !c.members.contains(&m.person_id)) {
             return Err(ApiError::invalid("mention is outside channel"));
         }
-        if self.space(a.sid())?.settings.summary_mode == SummaryMode::Required
-            && a.cert.data.kind == DeviceKind::Cli
-            && !r.has_summary
-        {
-            return Err(ApiError::invalid(
-                "CLI messages require a summary in this space",
-            ));
-        }
         phi_crypto::verify_message_signature(&a.cert.data.sign_pub, e, &r.signature)?;
         self.transaction(|db| {
             let thread = if let Some(tid) = e.thread_id {
@@ -55,6 +47,24 @@ impl Db {
                 )?;
                 r.id
             };
+            if db.space(a.sid())?.settings.summary_mode == SummaryMode::Required
+                && a.cert.data.kind == DeviceKind::Cli
+                && !r.has_summary
+            {
+                // Count at commit so simultaneous replies cannot both bypass the threshold.
+                let since_summary: u64 = db.conn.query_row(
+                    "SELECT COUNT(*)+1 FROM messages WHERE thread_id=?1 AND seq>COALESCE(
+                        (SELECT MAX(seq) FROM messages WHERE thread_id=?1
+                        AND json_extract(json,'$.has_summary')=1),0)",
+                    [thread.to_string()],
+                    |row| row.get(0),
+                )?;
+                if since_summary >= 3 {
+                    return Err(ApiError::invalid(format!(
+                        "--summary is required now: {since_summary} messages since the last summary (including this message; threshold 3) and summary_mode=required"
+                    )));
+                }
+            }
             let latest: u64 = db.conn.query_row(
                 "SELECT COALESCE(MAX(seq),0) FROM messages WHERE thread_id=?",
                 [thread.to_string()],

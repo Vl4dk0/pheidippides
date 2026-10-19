@@ -130,8 +130,11 @@ signed roster/commitment, metadata and complete remaining-device wraps. PUT only
 adds the authenticated device's own same/historical-epoch enrollment wrap.
 
 Messages must use the current epoch and a root thread in the same channel.
-Required summaries are enforced via the plaintext flag for CLI devices; GUI
-devices are exempt. The host cannot verify summary contents. Sending advances
+In required mode, summaries are enforced via the plaintext flag for CLI devices
+only at three messages since the last summary, including the pending message.
+With no summary, count from the root; the summary-bearing message resets the
+count. The server checks inside the send transaction and explains the current
+count/threshold in rejection errors. GUI devices are exempt. The host cannot verify summary contents. Sending advances
 the author's person cursor except in self channels, so other sessions see those
 messages as unread; PUT cursor explicitly sets it, including backwards
 for unread, but cannot exceed the newest thread message. Counts return unread

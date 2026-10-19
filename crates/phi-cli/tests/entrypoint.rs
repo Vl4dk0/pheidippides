@@ -93,18 +93,21 @@ async fn cli_workflow_references_wait_skill_and_exit_codes() -> phi_core::Result
         .and_then(|line| line.strip_prefix("created space game ("))
         .and_then(|id| id.strip_suffix(')'))
         .ok_or_else(|| phi_core::Error::User("missing created space ID".into()))?;
-    phi(binary, workspace.path(), &["init", space]).await?;
-    let sent = phi(
+    phi(binary, workspace.path(), &["init"]).await?;
+    assert!(std::fs::read_to_string(workspace.path().join(".phi"))?.contains(space));
+    let body = "first body: `code` and \"quotes\" and $HOME and $(false)";
+    let sent = phi_with_input(
         binary,
         workspace.path(),
         &[
             "send",
             "@alice/observer",
             "Task",
-            "first body",
+            "-",
             "--summary",
             "First summary",
         ],
+        Some(body),
     )
     .await?;
     let thread = sent
@@ -113,6 +116,18 @@ async fn cli_workflow_references_wait_skill_and_exit_codes() -> phi_core::Result
         .ok_or_else(|| phi_core::Error::User("missing thread ID".into()))?;
     let root = format!("{thread}#1");
     assert!(sent.contains(&format!("message {root}")));
+    let group = phi(
+        binary,
+        workspace.path(),
+        &["group", "create", "team", "@alice", "@alice"],
+    )
+    .await?;
+    assert!(group.starts_with("created #team (") && group.ends_with(") · members: @alice\n"));
+    let who = phi(binary, workspace.path(), &["who"]).await?;
+    let devices = phi(binary, workspace.path(), &["device", "list"]).await?;
+    assert!(who.contains("last seen just now") && devices.contains("last seen just now"));
+    let read_body = phi(binary, workspace.path(), &["read", &root]).await?;
+    assert!(read_body.contains(body));
     phi(binary, workspace.path(), &["react", &root, "ack"]).await?;
     let replied = phi(
         binary,
@@ -146,7 +161,9 @@ async fn cli_workflow_references_wait_skill_and_exit_codes() -> phi_core::Result
             && !events.contains("second body")
             && events.contains("your other session")
             && !events.contains("UNTRUSTED")
-            && events.contains("claimed by alice/main")
+            && events.contains("ack by alice/main")
+            && !events.contains("claimed by alice/main")
+            && !events.contains("summary (as of")
             && events.contains(&root)
     );
     assert!(!events.contains("reaction:"));
@@ -188,13 +205,22 @@ async fn cli_workflow_references_wait_skill_and_exit_codes() -> phi_core::Result
 }
 
 async fn phi(binary: &str, root: &std::path::Path, args: &[&str]) -> phi_core::Result<String> {
+    phi_with_input(binary, root, args, None).await
+}
+
+async fn phi_with_input(
+    binary: &str,
+    root: &std::path::Path,
+    args: &[&str],
+    input: Option<&str>,
+) -> phi_core::Result<String> {
     let home = root.join("home");
     std::fs::create_dir_all(&home)?;
     let mut command = tokio::process::Command::new(binary);
     if !args.contains(&"--as") {
         command.args(["--as", "main"]);
     }
-    let output = command
+    command
         .args(args)
         .current_dir(root)
         .env("HOME", &home)
@@ -204,8 +230,23 @@ async fn phi(binary: &str, root: &std::path::Path, args: &[&str]) -> phi_core::R
         .env("APPDATA", root.join("appdata"))
         .env("LOCALAPPDATA", root.join("localappdata"))
         .env_remove("PHI_ADMIN_TOKEN")
-        .output()
-        .await?;
+        .stdin(if input.is_some() {
+            std::process::Stdio::piped()
+        } else {
+            std::process::Stdio::null()
+        })
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = command.spawn()?;
+    if let Some(input) = input {
+        use tokio::io::AsyncWriteExt;
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| phi_core::Error::User("missing stdin".into()))?;
+        stdin.write_all(input.as_bytes()).await?;
+    }
+    let output = child.wait_with_output().await?;
     if !output.status.success() {
         return Err(phi_core::Error::User(format!(
             "phi {args:?}: {}",

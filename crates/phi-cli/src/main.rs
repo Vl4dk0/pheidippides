@@ -44,7 +44,7 @@ enum Command {
     },
     Init {
         #[arg(allow_hyphen_values = true)]
-        space: String,
+        space: Option<String>,
     },
     Who,
     Fetch,
@@ -227,7 +227,7 @@ async fn run(cli: Cli) -> Result<()> {
             );
         }
         Command::Init { space } => {
-            let profile = store.bind(&cwd, &space)?;
+            let profile = store.bind(&cwd, space.as_deref().or(cli.space.as_deref()))?;
             println!("bound {} to {}", cwd.display(), profile.name);
         }
         Command::Fetch => {
@@ -280,7 +280,7 @@ async fn run(cli: Cli) -> Result<()> {
                                 device.cert.data.kind,
                                 device
                                     .last_seen_at
-                                    .map(|t| t.to_string())
+                                    .map(format_last_seen)
                                     .unwrap_or_else(|| "never".into()),
                                 if device.revoked_at.is_some() {
                                     " · revoked"
@@ -345,7 +345,24 @@ async fn run(cli: Cli) -> Result<()> {
                 Command::Wait { seconds } => print!("{}", client.wait_text(seconds).await?),
                 Command::Group { command } => match command {
                     GroupCommand::Create { name, persons } => {
-                        println!("{}", client.group_create(&name, &persons).await?);
+                        let id = client.group_create(&name, &persons).await?;
+                        let channel = client
+                            .channels
+                            .iter()
+                            .find(|channel| channel.channel.id == id)
+                            .ok_or_else(|| {
+                                Error::User(
+                                    "created group unavailable in refreshed directory".into(),
+                                )
+                            })?;
+                        let members = channel
+                            .channel
+                            .members
+                            .iter()
+                            .map(|person| format!("@{}", client.person_name(*person)))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        println!("created #{name} ({id}) · members: {members}");
                     }
                     GroupCommand::Add { name, person } => {
                         client.group_member(&name, &person, false).await?;
@@ -422,6 +439,7 @@ mod tests {
             vec!["device", "list"],
             vec!["device", "revoke", id],
             vec!["init", "game"],
+            vec!["init"],
             vec!["who"],
             vec!["fetch"],
             vec!["inbox"],
@@ -496,6 +514,13 @@ mod tests {
                 .map(|error| error.kind()),
             Some(clap::error::ErrorKind::DisplayHelp)
         );
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| Error::User(error.to_string()))?
+            .as_secs();
+        assert_eq!(format_last_seen(now.saturating_sub(300)), "5 min ago");
+        assert_eq!(format_last_seen(now.saturating_sub(7200)), "2 h ago");
+        assert_eq!(format_last_seen(0), "1970-01-01 00:00 UTC");
         let directory = tempfile::tempdir()?;
         for name in ["phi-gui", "Pheidippides", "phi-gui.exe"] {
             std::fs::write(

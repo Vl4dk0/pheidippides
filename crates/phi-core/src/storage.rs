@@ -109,17 +109,18 @@ impl Store {
         if matching.len() == 1 {
             return Ok(matching[0].clone());
         }
-        Err(user(format!(
-            "select a space with phi init <space> or --space <name>; profiles: {}",
-            profiles
-                .iter()
-                .map(|p| format!("{} ({})", p.name, p.space_id))
-                .collect::<Vec<_>>()
-                .join(", ")
-        )))
+        Err(profile_selection_error(&profiles))
     }
-    pub fn bind(&self, cwd: &Path, name: &str) -> Result<Profile> {
-        let profile = self.resolve(cwd, Some(name))?;
+    pub fn bind(&self, cwd: &Path, name: Option<&str>) -> Result<Profile> {
+        let profile = if let Some(name) = name {
+            self.resolve(cwd, Some(name))?
+        } else {
+            let profiles = self.profiles()?;
+            match profiles.as_slice() {
+                [profile] => profile.clone(),
+                _ => return Err(profile_selection_error(&profiles)),
+            }
+        };
         atomic_write(
             &cwd.join(".phi"),
             &serde_json::to_vec_pretty(&Binding {
@@ -129,6 +130,25 @@ impl Store {
         )?;
         Ok(profile)
     }
+}
+
+fn profile_selection_error(profiles: &[Profile]) -> crate::Error {
+    if profiles.is_empty() {
+        return user(
+            "no local spaces; run phi space create <name> --server <url> or phi join '<link>' --name <name>",
+        );
+    }
+    user(format!(
+        "select a space; available spaces:\n{}",
+        profiles
+            .iter()
+            .map(|profile| format!(
+                "  {} ({}) · run: phi init {}",
+                profile.name, profile.space_id, profile.space_id
+            ))
+            .collect::<Vec<_>>()
+            .join("\n")
+    ))
 }
 
 // GUI implementations can put these accounts in the OS keychain; plaintext cache stays separate.
