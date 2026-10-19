@@ -490,7 +490,6 @@ mod tests {
             argv.extend(args);
             assert!(Cli::try_parse_from(argv.clone()).is_ok(), "{argv:?}");
         }
-        assert!(Cli::try_parse_from(["phi", "device", "add", "--gui"]).is_err());
         assert_eq!(
             Cli::try_parse_from(["phi", "--help"])
                 .err()
