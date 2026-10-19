@@ -12,6 +12,11 @@
     onclose: () => void;
   } = $props();
   let mode = $state<'join' | 'create'>('join');
+  let displayNameInput = $state<HTMLInputElement>();
+  $effect(() => {
+    mode;
+    displayNameInput?.focus({ preventScroll: true });
+  });
   let link = $state('');
   let displayName = $state('');
   let server = $state('https://');
@@ -60,6 +65,8 @@
   >
     <label
       >Your display name<input
+        data-modal-focus
+        bind:this={displayNameInput}
         bind:value={displayName}
         required
         maxlength="120"

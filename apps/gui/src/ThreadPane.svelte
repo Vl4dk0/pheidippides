@@ -126,19 +126,23 @@
               class="attachments"
             >
               {#each message.attachments as attachment}<li>
-                  {#if attachment.preview}<img
-                      src={attachment.preview}
-                      alt={attachment.name}
-                      loading="lazy"
-                    />{/if}<button
-                    class="file-chip"
+                  <button
+                    class={attachment.preview
+                      ? 'image-attachment'
+                      : 'file-chip'}
                     title={`Copy local path for ${attachment.name} · ${attachment.mime}`}
                     aria-label={`Copy local path for ${attachment.name}`}
                     onclick={() => copyPath(attachment.path, attachment.name)}
-                    ><Paperclip size={14} /><span>{attachment.name}</span><small
-                      >{Math.ceil(attachment.size / 1024)} KB</small
-                    ></button
                   >
+                    {#if attachment.preview}<img
+                        src={attachment.preview}
+                        alt={attachment.name}
+                        loading="lazy"
+                      />{:else}<Paperclip size={14} /><span
+                        >{attachment.name}</span
+                      ><small>{Math.ceil(attachment.size / 1024)} KB</small
+                      >{/if}
+                  </button>
                 </li>{/each}
             </ul>{/if}
           {#if prefs.reactions}<div
@@ -162,7 +166,7 @@
                   {label}
                   active={own}
                   pressed={own}
-                  variant={claimed ? 'claim-pill' : 'reaction-pill'}
+                  variant={`${claimed ? 'claim-pill' : 'reaction-pill'} ${members.length ? '' : 'reaction-empty'}`}
                   disabled={busy || (claimed && !own)}
                   onclick={() => onreact(message.id, item.kind, own)}
                   >{#if claimed}<span class="claim-author"

@@ -10,6 +10,18 @@ import {
 } from '../src/lib/api';
 
 const id = (n: number) => n.toString(16).padStart(22, '0');
+// Stable random-looking ids keep distinct devices recognizable in visual fixtures.
+const deviceId = (n: number) => {
+  let seed = n;
+  const bytes = Array.from({ length: 16 }, () => {
+    seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+    return seed >>> 24;
+  });
+  return btoa(String.fromCharCode(...bytes))
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
+};
 const now = Date.UTC(2026, 9, 20, 9, 30) / 1000;
 const people = ['vladko', 'bob', 'alice'];
 const agents = ['haiku', 'flash', 'luna', 'grok'];
@@ -20,7 +32,7 @@ const profiles = ['cli-lab', 'apps'].map((name, i) =>
     server: 'https://phi.example.com',
     space_id: id(100 + i),
     person_id: id(1 + i * 10),
-    device_id: id(50 + i),
+    device_id: deviceId(50 + i),
     display_name: 'Vladko',
     summarizer_configured: false,
   }),
@@ -250,14 +262,14 @@ const snapshots = profiles.map((profile, i) =>
     members: Object.fromEntries(people.map((p, n) => [id(n + 1 + i * 10), p])),
     devices: people.flatMap((_, n) => [
       {
-        id: id(50 + i + n * 10),
+        id: deviceId(50 + i + n * 10),
         person_id: id(n + 1 + i * 10),
         kind: 'gui',
         revoked_at: null,
         last_seen_at: now - n * 120,
       },
       {
-        id: id(500 + i + n * 10),
+        id: deviceId(500 + i + n * 10),
         person_id: id(n + 1 + i * 10),
         kind: 'cli',
         revoked_at: null,
@@ -269,7 +281,9 @@ const snapshots = profiles.map((profile, i) =>
 
 const payloadSchema = z.object({
   profile: z.string(),
-  request: z.object({ kind: z.string(), thread: z.string().optional() }),
+  request: z
+    .object({ kind: z.string(), thread: z.string().optional() })
+    .passthrough(),
 });
 mockWindows('main');
 mockIPC((command, payload) => {
@@ -281,6 +295,22 @@ mockIPC((command, payload) => {
     const snapshot = snapshots.find((s) => s.profile.id === profile);
     if (!snapshot) throw new Error(`Unknown screenshot profile: ${profile}`);
     if (request.kind === 'snapshot') return snapshot;
+    if (request.kind === 'display_name') {
+      const { name } = z.object({ name: z.string() }).parse(request);
+      snapshot.profile.display_name = name;
+      return null;
+    }
+    if (request.kind === 'settings') {
+      const settings = z
+        .object({
+          retention_days: z.number(),
+          summary_mode: z.enum(['required', 'off']),
+          summary_every: z.number(),
+        })
+        .parse(request);
+      Object.assign(snapshot, settings);
+      return null;
+    }
     if (request.kind === 'read') {
       const thread = threads.find((t) => t.id === request.thread);
       if (!thread || !snapshot.threads.some((t) => t.id === thread.id))

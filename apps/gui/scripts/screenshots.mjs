@@ -93,7 +93,17 @@ try {
             return 'Workspace overflows horizontally';
           const dialog = document.querySelector('dialog[open]');
           if (dialog) {
-            const bounds = dialog.getBoundingClientRect();
+            const overlay = dialog.getBoundingClientRect();
+            if (
+              overlay.x !== 0 ||
+              overlay.y !== 0 ||
+              overlay.width !== innerWidth ||
+              overlay.height !== innerHeight
+            )
+              return 'Modal backdrop does not cover the full window';
+            const bounds = dialog
+              .querySelector('.modal')
+              .getBoundingClientRect();
             if (
               bounds.x < 0 ||
               bounds.y < 0 ||
@@ -126,14 +136,35 @@ try {
         .getByRole('region', { name: 'Thread summary', exact: true })
         .waitFor();
       await capture('main');
-      for (const panel of ['spaces', 'thread list', 'thread view']) {
-        await page
-          .getByRole('button', { name: `Hide ${panel}`, exact: true })
-          .click();
-        await page
-          .getByRole('button', { name: `Show ${panel}`, exact: true })
-          .click();
-      }
+      const quietReaction = page
+        .locator('.message')
+        .nth(1)
+        .getByRole('button', { name: 'Like', exact: true });
+      if (
+        (await quietReaction.evaluate((el) => getComputedStyle(el).opacity)) !==
+        '0'
+      )
+        throw new Error('Empty reaction is visible at rest');
+      await page.locator('.message').nth(1).hover();
+      if (
+        (await quietReaction.evaluate((el) => getComputedStyle(el).opacity)) !==
+        '1'
+      )
+        throw new Error('Hover did not reveal reactions');
+      await capture('main-hover');
+      await page.mouse.move(0, 0);
+      await quietReaction.focus();
+      if (
+        (await quietReaction.evaluate((el) => getComputedStyle(el).opacity)) !==
+        '1'
+      )
+        throw new Error('Keyboard focus did not reveal reactions');
+      await page
+        .getByRole('button', { name: 'Hide thread list', exact: true })
+        .click();
+      await page
+        .getByRole('button', { name: 'Show thread list', exact: true })
+        .click();
       await page.locator('.summary-card summary').click();
       if (
         (await page.locator('.summary-card details').getAttribute('open')) !==
@@ -141,7 +172,10 @@ try {
       )
         throw new Error('Summary did not collapse');
       await page.locator('.summary-card summary').click();
-      await page.locator('.appearance > summary').click();
+      await page
+        .getByRole('button', { name: 'Space settings', exact: true })
+        .click();
+      await page.getByRole('button', { name: 'View', exact: true }).click();
       for (const decoration of [
         'summary',
         'reactions',
@@ -166,7 +200,13 @@ try {
         await page
           .getByRole('checkbox', { name: decoration, exact: true })
           .check();
-      await page.locator('.appearance > summary').click();
+      for (const panel of ['spaces', 'threads', 'Thread view']) {
+        await page
+          .getByRole('checkbox', { name: panel, exact: true })
+          .uncheck();
+        await page.getByRole('checkbox', { name: panel, exact: true }).check();
+      }
+      await page.keyboard.press('Escape');
       const message = page.getByRole('textbox', {
         name: 'Message',
         exact: true,
@@ -201,8 +241,52 @@ try {
         JSON.stringify(await page.locator('.workspace').boundingBox())
       )
         throw new Error('Opening settings moved the workspace');
+      if (
+        (await page.evaluate(() =>
+          document.activeElement?.getAttribute('aria-label'),
+        )) !== 'General'
+      )
+        throw new Error('Settings did not focus the active tab');
       await capture('settings');
-      for (const section of ['Members', 'Devices', 'Recovery']) {
+      await page.getByLabel('Display name', { exact: true }).fill('Vladko J.');
+      await page.getByLabel('Retention · days', { exact: true }).fill('30');
+      await page.getByLabel('Summary interval', { exact: true }).fill('4');
+      await page
+        .getByRole('button', { name: 'Save changes', exact: true })
+        .click();
+      await page.waitForFunction(
+        () =>
+          !document.querySelector('button[aria-label="Save changes"]').disabled,
+      );
+      await page.keyboard.press('Escape');
+      await page
+        .getByRole('button', { name: 'Space settings', exact: true })
+        .click();
+      if (
+        (await page
+          .getByLabel('Display name', { exact: true })
+          .inputValue()) !== 'Vladko J.' ||
+        (await page
+          .getByLabel('Retention · days', { exact: true })
+          .inputValue()) !== '30' ||
+        (await page
+          .getByLabel('Summary interval', { exact: true })
+          .inputValue()) !== '4'
+      )
+        throw new Error(
+          'Single Save did not persist both profile and space settings',
+        );
+      await page.getByLabel('Display name', { exact: true }).fill('Vladko');
+      await page.getByLabel('Retention · days', { exact: true }).fill('14');
+      await page.getByLabel('Summary interval', { exact: true }).fill('3');
+      await page
+        .getByRole('button', { name: 'Save changes', exact: true })
+        .click();
+      await page.waitForFunction(
+        () =>
+          !document.querySelector('button[aria-label="Save changes"]').disabled,
+      );
+      for (const section of ['Members', 'Devices', 'Recovery', 'View']) {
         await page.getByRole('button', { name: section, exact: true }).click();
         await capture(`settings-${section.toLowerCase()}`);
       }
@@ -215,10 +299,18 @@ try {
       await page
         .getByRole('region', { name: 'Connect a space', exact: true })
         .waitFor();
+      if (
+        (await page.evaluate(() => document.activeElement?.tagName)) !== 'INPUT'
+      )
+        throw new Error('Connect did not focus its first input');
       await capture('connect');
       await page
         .getByRole('button', { name: 'Create space', exact: true })
         .click();
+      if (
+        (await page.evaluate(() => document.activeElement?.tagName)) !== 'INPUT'
+      )
+        throw new Error('Create did not focus its first input');
       await capture('create');
       await page.keyboard.press('Escape');
       if (await page.getByRole('dialog').count())
@@ -239,6 +331,13 @@ try {
       await page
         .getByRole('button', { name: 'New thread', exact: true })
         .click();
+      const draft = await page.locator('.thread-draft').boundingBox();
+      const heading = await page.locator('.thread-draft h2').boundingBox();
+      const body = await page
+        .getByRole('textbox', { name: 'Message', exact: true })
+        .boundingBox();
+      if (body.y - heading.y > 250 || draft.width > 640)
+        throw new Error('New-thread fields are detached from their heading');
       await capture('compose');
       await context.close();
     }

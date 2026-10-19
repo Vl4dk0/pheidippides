@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { untrack } from 'svelte';
+  import { untrack, type Snippet } from 'svelte';
   import IconButton from './IconButton.svelte';
   import {
     X,
@@ -18,6 +18,7 @@
     Bot,
     User,
     ChevronDown,
+    Eye,
   } from '@lucide/svelte';
   import { relativeTime, dateLabel } from './lib/presentation';
   import { grantLink, nothing, type Request, type Snapshot } from './lib/api';
@@ -27,6 +28,7 @@
     busy,
     request,
     onclose,
+    children,
   }: {
     snapshot: Snapshot;
     busy: boolean;
@@ -35,6 +37,7 @@
       schema: z.ZodType<T>,
     ) => Promise<T | undefined>;
     onclose: () => void;
+    children: Snippet;
   } = $props();
   let name = $state(untrack(() => snapshot.profile.display_name));
   let retention = $state(untrack(() => snapshot.retention_days));
@@ -73,12 +76,15 @@
     confirmation = '';
     await request({ kind: 'revoke', target }, nothing);
   }
-  let tab = $state<'general' | 'members' | 'devices' | 'recovery'>('general');
+  let tab = $state<'general' | 'members' | 'devices' | 'recovery' | 'view'>(
+    'general',
+  );
   const tabs = [
     { key: 'general', label: 'General', icon: SlidersHorizontal },
     { key: 'members', label: 'Members', icon: Users },
     { key: 'devices', label: 'Devices', icon: Monitor },
     { key: 'recovery', label: 'Recovery', icon: KeyRound },
+    { key: 'view', label: 'View', icon: Eye },
   ] as const;
 </script>
 
@@ -92,6 +98,7 @@
   </div>
   <nav class="settings-tabs" aria-label="Settings sections">
     {#each tabs as item}{@const Icon = item.icon}<button
+        data-modal-focus={item.key === tab ? '' : undefined}
         class:active={tab === item.key}
         title={item.label}
         aria-label={item.label}
@@ -102,36 +109,32 @@
   </nav>
   {#if tab === 'general'}
     <form
-      class="name-form"
+      class="settings-form"
       onsubmit={async (event) => {
         event.preventDefault();
-        await request({ kind: 'display_name', name }, nothing);
+        const settingsChanged =
+          retention !== snapshot.retention_days ||
+          summaryMode !== snapshot.summary_mode ||
+          summaryEvery !== snapshot.summary_every;
+        if (name !== snapshot.profile.display_name) {
+          const result = await request({ kind: 'display_name', name }, nothing);
+          if (result === undefined) return;
+        }
+        if (settingsChanged)
+          await request(
+            {
+              kind: 'settings',
+              retention_days: retention,
+              summary_mode: summaryMode,
+              summary_every: summaryEvery,
+            },
+            nothing,
+          );
       }}
     >
       <label
         >Display name<input bind:value={name} required maxlength="120" /></label
-      ><IconButton
-        icon={Save}
-        label="Save display name"
-        type="submit"
-        disabled={busy}
-      />
-    </form>
-    <form
-      class="settings-form"
-      onsubmit={async (event) => {
-        event.preventDefault();
-        await request(
-          {
-            kind: 'settings',
-            retention_days: retention,
-            summary_mode: summaryMode,
-            summary_every: summaryEvery,
-          },
-          nothing,
-        );
-      }}
-    >
+      >
       <div class="settings-fields">
         <label
           >Retention · days<input
@@ -168,7 +171,7 @@
           Summaries refresh every N messages.</small
         ><IconButton
           icon={Save}
-          label="Save space settings"
+          label="Save changes"
           variant="primary"
           type="submit"
           disabled={busy}
@@ -318,6 +321,8 @@
       Revocation protects future messages only. Previously read content remains
       compromised.
     </p>
+  {:else if tab === 'view'}
+    {@render children()}
   {:else}
     <div class="recovery-intro">
       <span class="empty-symbol"><KeyRound size={28} /></span>

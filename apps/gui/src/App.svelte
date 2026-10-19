@@ -23,7 +23,6 @@
   import {
     Plus,
     Settings as SettingsIcon,
-    SlidersHorizontal,
     SquarePen,
     Layers,
     Hash,
@@ -36,7 +35,6 @@
     X,
     PanelLeftClose,
     PanelLeft,
-    PanelRightClose,
     SendHorizontal,
     MessageCircle,
     Bell,
@@ -383,41 +381,77 @@
   });
 </script>
 
-<div class="shell">
-  <div class="utility-dock" aria-label="Workspace controls">
-    {#if !prefs.view}<IconButton
-        icon={MessageCircle}
-        label="Show thread view"
-        onclick={() => (prefs.view = true)}
-      />{:else}<IconButton
-        icon={PanelRightClose}
-        label="Hide thread view"
-        onclick={() => (prefs.view = false)}
-      />{/if}
-    <details class="appearance">
-      <summary
-        class="icon-button"
-        title="View options"
-        aria-label="View options"
-        ><SlidersHorizontal size={18} strokeWidth={1.75} /></summary
-      >
-      <div class="menu">
-        {#each toggles as key}<label class="check"
-            ><input type="checkbox" bind:checked={prefs[key]} />{key === 'view'
-              ? 'Thread view'
-              : key}</label
-          >{/each}
-        <label class="check"
-          ><input
-            type="checkbox"
-            checked={prefs.notifications}
-            onchange={(event) =>
-              toggleNotifications(event.currentTarget.checked)}
-          /><Bell size={14} />Notifications</label
+{#snippet messageForm()}
+  <form
+    class="composer"
+    class:thread-draft={composing}
+    onsubmit={(event) => {
+      event.preventDefault();
+      void send();
+    }}
+  >
+    {#if composing}<header class="thread-heading">
+        <small class="eyebrow">COMPOSE</small>
+        <h2>New thread</h2>
+      </header>
+      <div class="new-thread-fields">
+        <label
+          >To<input
+            bind:value={to}
+            required
+            placeholder="#all or @person"
+          /></label
+        ><label
+          >Title<input
+            bind:value={title}
+            required
+            maxlength="240"
+            placeholder="What needs attention?"
+          /></label
         >
-      </div>
-    </details>
+      </div>{/if}
+    <div class="composer-line">
+      <span
+        class="avatar human-avatar"
+        title={`Write as ${snapshot?.profile.display_name ?? 'yourself'} · GUI device`}
+        ><User size={17} /></span
+      ><textarea
+        aria-label="Message"
+        bind:value={body}
+        required
+        rows="1"
+        maxlength="262144"
+        placeholder="Add a human perspective…"
+        bind:this={composerInput}
+      ></textarea><IconButton
+        icon={SendHorizontal}
+        label={busy ? 'Sending…' : composing ? 'Start thread' : 'Send reply'}
+        variant="primary"
+        type="submit"
+        disabled={busy || !body.trim()}
+      />
+    </div>
+  </form>
+{/snippet}
+
+{#snippet viewControls()}
+  <div class="view-options" aria-label="View options">
+    {#each toggles as key}<label class="check"
+        ><input type="checkbox" bind:checked={prefs[key]} />{key === 'view'
+          ? 'Thread view'
+          : key}</label
+      >{/each}
+    <label class="check"
+      ><input
+        type="checkbox"
+        checked={prefs.notifications}
+        onchange={(event) => toggleNotifications(event.currentTarget.checked)}
+      /><Bell size={14} />Notifications</label
+    >
   </div>
+{/snippet}
+
+<div class="shell">
   {#snippet errorNotice()}
     {#if error}<div class="error banner" role="alert">
         <span>{error}</span><IconButton
@@ -448,15 +482,28 @@
         onclose={() => (connecting = false)}
       /></Modal
     >{/if}
-  {#if settings && snapshot}<Modal
-      label="Space settings"
-      onclose={() => (settings = false)}
-      >{@render errorNotice()}{#key snapshot.profile.id}<Settings
-          {snapshot}
-          {busy}
-          {request}
-          onclose={() => (settings = false)}
-        />{/key}</Modal
+  {#if settings}<Modal label="Space settings" onclose={() => (settings = false)}
+      >{@render errorNotice()}{#if snapshot}{#key snapshot.profile.id}<Settings
+            {snapshot}
+            {busy}
+            {request}
+            onclose={() => (settings = false)}
+          >
+            {@render viewControls()}
+          </Settings>{/key}{:else}<section
+          class="settings"
+          aria-label="View options"
+        >
+          <div class="row modal-heading">
+            <h2 tabindex="-1" data-modal-focus>View</h2>
+            <IconButton
+              icon={X}
+              label="Close"
+              onclick={() => (settings = false)}
+            />
+          </div>
+          {@render viewControls()}
+        </section>{/if}</Modal
     >{/if}
   <main class="workspace">
     <aside class="space-rail" aria-label="Spaces">
@@ -483,11 +530,6 @@
             >{/each}
         </div>{/if}
       <div class="rail-actions">
-        <IconButton
-          icon={prefs.spaces ? PanelLeftClose : Layers}
-          label={prefs.spaces ? 'Hide spaces' : 'Show spaces'}
-          onclick={() => (prefs.spaces = !prefs.spaces)}
-        />
         {#if !prefs.threads}<IconButton
             icon={PanelLeft}
             label="Show thread list"
@@ -510,7 +552,7 @@
         <IconButton
           icon={SettingsIcon}
           label="Space settings"
-          disabled={!snapshot || busy}
+          disabled={busy}
           onclick={() => (settings = true)}
         />
       </div>
@@ -599,14 +641,17 @@
                   ></span>{/if}</span
               >
               <span class="card-meta"
-                ><span class="channel-name">{entry.channel}</span><span
-                  class="author-name"
-                  title={entry.from}>{entry.from.split('/')[0]}</span
-                >{#if prefs.reactions && entry.reaction_summary.claims.length}<span
+                ><span class="channel-name">{entry.channel}</span
+                >{#if !prefs.reactions || !entry.reaction_summary.claims.some((claim) => claim.author === entry.from.split('/')[0])}<span
+                    class="author-name"
+                    title={entry.from}>{entry.from.split('/')[0]}</span
+                  >{/if}{#if prefs.reactions && entry.reaction_summary.claims.length}<span
                     class="claim-badge"
                     title={`Claimed by ${entry.reaction_summary.claims.map((c) => `${c.author}/${c.handle}`).join(', ')}`}
-                    ><Flag size={12} />{entry.reaction_summary.claims[0]
-                      .author}</span
+                    ><Flag
+                      size={12}
+                    />{#if entry.channel !== `@${entry.reaction_summary.claims[0].author}`}{entry
+                        .reaction_summary.claims[0].author}{/if}</span
                   >{/if}{#if prefs.metadata}<time
                     title={dateLabel(entry.created_at)}
                     >{relativeTime(entry.created_at)}</time
@@ -663,64 +708,13 @@
                   onclick={() => (connecting = true)}
                 />{/if}
             </div>
-          {:else}<header class="thread-heading">
-              <small class="eyebrow">COMPOSE</small>
-              <h2>New thread</h2>
-            </header>{/if}
+          {:else}{@render messageForm()}{/if}
         </div>
-        {#if selected && (composing || thread)}<form
-            class="composer"
-            onsubmit={(event) => {
-              event.preventDefault();
-              void send();
-            }}
-          >
-            {#if composing}<div class="new-thread-fields">
-                <label
-                  >To<input
-                    bind:value={to}
-                    required
-                    placeholder="#all or @person"
-                  /></label
-                ><label
-                  >Title<input
-                    bind:value={title}
-                    required
-                    maxlength="240"
-                    placeholder="What needs attention?"
-                  /></label
-                >
-              </div>{/if}
-            <div class="composer-line">
-              <span
-                class="avatar human-avatar"
-                title={`Write as ${snapshot?.profile.display_name ?? 'yourself'} · GUI device`}
-                ><User size={17} /></span
-              ><textarea
-                aria-label="Message"
-                bind:value={body}
-                required
-                rows="1"
-                maxlength="262144"
-                placeholder="Add a human perspective…"
-                bind:this={composerInput}
-              ></textarea><IconButton
-                icon={SendHorizontal}
-                label={busy
-                  ? 'Sending…'
-                  : composing
-                    ? 'Start thread'
-                    : 'Send reply'}
-                variant="primary"
-                type="submit"
-                disabled={busy || !body.trim()}
-              />
-            </div>
-          </form>{/if}
+        {#if selected && thread && !composing}{@render messageForm()}{/if}
       </section>{/if}
     {#if !prefs.threads && !prefs.view}<div class="empty">
         <MessageCircle size={32} />
-        <p class="muted">Restore a panel using the view controls.</p>
+        <p class="muted">Restore a panel in Settings → View.</p>
       </div>{/if}
   </main>
 </div>

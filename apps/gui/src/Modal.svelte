@@ -12,9 +12,17 @@
   let dialog: HTMLDialogElement;
   $effect(() => {
     dialog.showModal();
+    dialog
+      .querySelector<HTMLElement>('[data-modal-focus]')
+      ?.focus({ preventScroll: true });
   });
 </script>
 
-<dialog bind:this={dialog} aria-label={label} oncancel={onclose}>
-  {@render children()}
+<dialog
+  class="modal-backdrop"
+  bind:this={dialog}
+  aria-label={label}
+  oncancel={onclose}
+>
+  <div class="modal">{@render children()}</div>
 </dialog>
