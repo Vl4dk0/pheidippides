@@ -1,5 +1,6 @@
 node_modules
 dist
+screenshots
 pnpm-lock.yaml
 src-tauri/gen
 src-tauri/icons

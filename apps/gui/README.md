@@ -31,6 +31,33 @@ No Tauri CLI is needed. Vite's production output must exist before Rust compiles
 `tauri::generate_context!()`. Builds and tests do not open the app or start a dev
 server. This milestone was verified headlessly only.
 
+## Headless design screenshots
+
+From this directory, run `pnpm screenshots`. On first use it installs Playwright's
+WebKit browser; subsequent runs capture 20 viewport PNGs in under 30 seconds:
+
+```text
+screenshots/{main,unread,settings,connect,empty}-{light,dark}-{1440x900,1024x700}.png
+```
+
+The command starts Vite on a random loopback port, renders the real Svelte UI in
+headless WebKit, navigates using its controls, and closes both browser and server
+on completion or failure. It never runs Tauri or opens a visible window. Theme
+comes from the browser's `prefers-color-scheme`, matching the app's OS preference.
+Screenshots are ignored by Git and Prettier.
+
+Edit `scripts/screenshot-mock.ts` to change the two-space fixture: six threads,
+agent/human messages, claims/acks, mentions, summaries, and raster/file attachments.
+The `apps` space is intentionally empty. Tauri's `mockIPC` and `mockWindows`
+feed the normal Zod-validated command boundary. Unsupported IPC fails the run;
+background polls stay pending, with notifications off. No real server, Keychain,
+or external network is used. This checks frontend rendering only.
+
+`vite.config.ts` substitutes the mock entrypoint only when serving in the
+`screenshots` development mode. `pnpm build` uses the unchanged production
+entrypoint and includes neither mocks nor fixtures. The runner is separate from
+Vitest and adds no tests.
+
 ## Run (human only)
 
 After building, a human can launch `target/debug/phi-gui` from the repository root,
@@ -112,7 +139,7 @@ Six headless Vitest cases cover filters/order, boundary rejection, notification
 eligibility, preference recovery, claims/reaction labels and selection races.
 The existing core GUI integration case also covers all/read thread listings,
 own-agent activity and encrypted display-name changes without touching the OS
-keychain. GUI runtime, OS dialogs and non-macOS builds are not exercised here.
+keychain. Native GUI runtime, OS dialogs and non-macOS builds are not exercised here.
 
 Core supplies thread-relative message numbers, summary positions and structured
 reaction counts plus every claimant; Svelte renders them without recalculating

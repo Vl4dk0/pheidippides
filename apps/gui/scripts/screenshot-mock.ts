@@ -1,0 +1,299 @@
+import { mockIPC, mockWindows } from '@tauri-apps/api/mocks';
+import { z } from 'zod';
+import {
+  profileSchema,
+  snapshotSchema,
+  threadSchema,
+  type Reaction,
+  type ReactionSummary,
+  type Thread,
+} from '../src/lib/api';
+
+const id = (n: number) => n.toString(16).padStart(22, '0');
+const now = Date.UTC(2026, 9, 20, 9, 30) / 1000;
+const people = ['vladko', 'bob', 'alice'];
+const agents = ['haiku', 'flash', 'luna', 'grok'];
+const profiles = ['cli-lab', 'apps'].map((name, i) =>
+  profileSchema.parse({
+    id: (i + 1).toString().repeat(64),
+    name,
+    server: 'https://phi.example.com',
+    space_id: id(100 + i),
+    person_id: id(1 + i * 10),
+    device_id: id(50 + i),
+    display_name: 'Vladko',
+    summarizer_configured: false,
+  }),
+);
+
+// A local raster exercises the same validated data URL path as decrypted previews.
+const canvas = document.createElement('canvas');
+canvas.width = 260;
+canvas.height = 64;
+const ctx = canvas.getContext('2d');
+if (!ctx) throw new Error('Screenshot fixture needs a canvas context');
+ctx.fillStyle = '#edf3ed';
+ctx.fillRect(0, 0, 260, 64);
+ctx.fillStyle = '#376552';
+ctx.font = '12px sans-serif';
+ctx.fillText('agent → phi-core → encrypted relay', 16, 26);
+ctx.fillText('verified locally · keys stay on device', 16, 46);
+const preview = canvas.toDataURL('image/png');
+
+function summarize(message: string, reactions: Reaction[]): ReactionSummary {
+  return {
+    up: reactions.filter((r) => r.kind === 'up').length,
+    down: reactions.filter((r) => r.kind === 'down').length,
+    ack: reactions.filter((r) => r.kind === 'ack').length,
+    claims: reactions
+      .filter((r) => r.kind === 'claim')
+      .map((r) => ({
+        message,
+        person: r.person_id,
+        author: r.author,
+        handle: r.handle,
+      })),
+  };
+}
+
+const conversations = [
+  {
+    title: 'Encrypted relay ready for review',
+    channel: '#all',
+    count: 5,
+    summary:
+      'The relay verifies signatures locally. Flash owns the final review; the CLI and GUI share the same protocol.',
+    bodies: [
+      '@vladko/haiku: relay review is ready at 8ac42fe. Attached the flow and review notes.',
+      'Keep the UI calm and make the unread state easy to scan. — Vladko',
+      'Claimed the protocol review. Checking certificate chains and epoch commitments.',
+      'The malformed signature case fails closed. No plaintext reaches the relay.',
+      'Review complete. The attachment round trip and reconnect checks both pass.',
+    ],
+  },
+  {
+    title: 'CLI release checklist',
+    channel: '#all',
+    count: 3,
+    summary:
+      'Help text and install instructions are ready. Waiting for the macOS package check.',
+    bodies: [
+      'Please check the release checklist before tagging 0.1.',
+      'Help output matches the shipped skill.',
+      'macOS packaging is the last item; I will report the result here.',
+    ],
+  },
+  {
+    title: 'Reconnect without losing unread messages',
+    channel: '#protocol',
+    count: 8,
+    summary:
+      'Durable cursors preserve messages between sessions. Testing a reconnect after a brief network interruption.',
+    bodies: [
+      'Can we verify cursor recovery after disconnect?',
+      'The wait cursor is durable per profile and handle.',
+      'I am checking the retry path.',
+      'Queued two replies during the interruption.',
+      'Both replies arrived in sequence.',
+      'Read cursors advanced only after rendering.',
+      'No duplicate notification on the next poll.',
+      'Reconnect checks pass; ready for review.',
+    ],
+  },
+  {
+    title: 'Attachment size limits',
+    channel: '#protocol',
+    count: 4,
+    summary:
+      'Client and server enforce the same upload bounds, including encryption and base64 overhead.',
+    bodies: [
+      'Review upload bounds for the 25 MiB limit.',
+      'Accounted for the AEAD tag.',
+      'Proxy limit includes transport expansion.',
+      'Confirmed: oversized uploads produce a useful error.',
+    ],
+  },
+  {
+    title: 'Review the enrollment copy',
+    channel: '@bob',
+    count: 3,
+    summary:
+      'Use the normal add-device code. The redeeming client chooses its device kind.',
+    bodies: [
+      'Please review the join screen wording.',
+      'The text now distinguishes invitations from enrollment.',
+      'Looks clear. I will check the recovery-code wording next.',
+    ],
+  },
+  {
+    title: 'Cache search follow-up',
+    channel: '@alice',
+    count: 6,
+    summary:
+      'Search stays local and verifies cached signed rows. Remote history is fetched only when explicitly needed.',
+    bodies: [
+      'Can you check local search on the new cache?',
+      'I indexed the decrypted titles and bodies.',
+      'Signature verification still precedes display.',
+      'No network request is made for local search.',
+      'The empty result state is clear.',
+      'Ready for the next review pass.',
+    ],
+  },
+];
+
+const threads: Thread[] = conversations.map((c, index) => {
+  const tid = id(200 + index * 10);
+  const messages = Array.from({ length: c.count }, (_, position) => {
+    const human = index === 0 && position === 1;
+    const person = human ? 0 : (position + 1) % people.length;
+    const reactions: Reaction[] =
+      position === 0
+        ? [
+            {
+              kind: 'claim',
+              person_id: id(2),
+              author: 'bob',
+              handle: 'flash',
+              created_at: now - 480,
+            },
+            {
+              kind: 'ack',
+              person_id: id(3),
+              author: 'alice',
+              handle: 'luna',
+              created_at: now - 420,
+            },
+            {
+              kind: 'up',
+              person_id: id(1),
+              author: 'vladko',
+              handle: 'haiku',
+              created_at: now - 360,
+            },
+          ]
+        : [];
+    const messageId = id(200 + index * 10 + position);
+    return {
+      id: messageId,
+      number: position + 1,
+      author: people[person],
+      person_id: id(person + 1),
+      handle: human ? 'gui' : agents[position % agents.length],
+      kind: human ? 'gui' : 'cli',
+      created_at: now - 1800 + position * 180,
+      body: c.bodies[position],
+      verification_error: null,
+      reactions,
+      reaction_summary: summarize(messageId, reactions),
+      attachments:
+        index === 0 && position === 0
+          ? [
+              {
+                name: 'relay-flow.png',
+                mime: 'image/png',
+                size: 3214,
+                path: '/Users/you/Library/Caches/pheidippides/gui/blobs/relay-flow.png',
+                preview,
+              },
+              {
+                name: 'review-notes.md',
+                mime: 'text/markdown',
+                size: 1820,
+                path: '/Users/you/Library/Caches/pheidippides/gui/blobs/review-notes.md',
+                preview: null,
+              },
+            ]
+          : [],
+    };
+  });
+  return threadSchema.parse({
+    id: tid,
+    title: c.title,
+    participants: people.map((p, i) => `${p}/${agents[i]}`),
+    summary: c.summary,
+    summary_number: 3,
+    newer_messages: c.count - 3,
+    messages,
+  });
+});
+
+const snapshots = profiles.map((profile, i) =>
+  snapshotSchema.parse({
+    profile,
+    channels: ['#all', '#protocol', '@bob', '@alice'].map((name, n) => ({
+      id: id(400 + i * 10 + n),
+      name,
+      kind: n === 0 ? 'all' : n === 1 ? 'group' : 'dm',
+    })),
+    threads:
+      i === 0
+        ? threads.map((t, n) => ({
+            id: t.id,
+            channel: conversations[n].channel,
+            to: conversations[n].channel,
+            title: t.title,
+            from: `${t.messages[0].author}/${t.messages[0].handle}`,
+            created_at: now - 600 - n * 300,
+            summary: t.summary,
+            mentioned: n === 0,
+            unread: n % 2 === 0,
+            own_agent_activity: n < 3,
+            latest_seq: 100 - n,
+            reactions: t.messages[0].reactions,
+            reaction_summary: t.messages[0].reaction_summary,
+          }))
+        : [],
+    retention_days: 14,
+    summary_mode: 'required',
+    summary_every: 3,
+    members: Object.fromEntries(people.map((p, n) => [id(n + 1 + i * 10), p])),
+    devices: people.flatMap((_, n) => [
+      {
+        id: id(50 + i + n * 10),
+        person_id: id(n + 1 + i * 10),
+        kind: 'gui',
+        revoked_at: null,
+        last_seen_at: now - n * 120,
+      },
+      {
+        id: id(500 + i + n * 10),
+        person_id: id(n + 1 + i * 10),
+        kind: 'cli',
+        revoked_at: null,
+        last_seen_at: now - 300,
+      },
+    ]),
+  }),
+);
+
+const payloadSchema = z.object({
+  profile: z.string(),
+  request: z.object({ kind: z.string(), thread: z.string().optional() }),
+});
+mockWindows('main');
+mockIPC((command, payload) => {
+  if (command === 'profiles') return profiles;
+  // A pending long-poll avoids a hot loop and cannot generate a notification.
+  if (command === 'poll') return new Promise(() => {});
+  if (command === 'execute') {
+    const { profile, request } = payloadSchema.parse(payload);
+    const snapshot = snapshots.find((s) => s.profile.id === profile);
+    if (!snapshot) throw new Error(`Unknown screenshot profile: ${profile}`);
+    if (request.kind === 'snapshot') return snapshot;
+    if (request.kind === 'read') {
+      const thread = threads.find((t) => t.id === request.thread);
+      if (!thread || !snapshot.threads.some((t) => t.id === thread.id))
+        throw new Error('Unknown screenshot thread');
+      snapshot.threads = snapshot.threads.map((t) =>
+        t.id === thread.id ? { ...t, unread: false, mentioned: false } : t,
+      );
+      return thread;
+    }
+  }
+  throw new Error(
+    `Unexpected screenshot IPC: ${command} ${JSON.stringify(payload)}`,
+  );
+});
+
+await import('../src/main');
