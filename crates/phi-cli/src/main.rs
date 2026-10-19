@@ -1,6 +1,6 @@
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use phi_core::*;
-use phi_proto::{DeviceId, DeviceKind, ReactionKind, RevocationTarget};
+use phi_proto::{DeviceId, ReactionKind, RevocationTarget};
 use std::{
     io::{self, Read},
     path::PathBuf,
@@ -8,6 +8,7 @@ use std::{
 };
 
 const SKILL: &str = include_str!("../../../skill/SKILL.md");
+mod desktop;
 #[derive(Parser)]
 #[command(
     name = "phi",
@@ -136,10 +137,7 @@ enum SpaceCommand {
 }
 #[derive(Subcommand)]
 enum DeviceCommand {
-    Add {
-        #[arg(long)]
-        gui: bool,
-    },
+    Add,
     List,
     Revoke {
         #[arg(allow_hyphen_values = true)]
@@ -163,6 +161,14 @@ enum ReactionArg {
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    if std::env::args_os().len() == 1 {
+        if !desktop::open_installed() {
+            eprintln!("Install the Pheidippides desktop app to open it with phi.");
+            let _ = Cli::command().print_help();
+            println!();
+        }
+        return ExitCode::SUCCESS;
+    }
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(error) => {
@@ -262,22 +268,8 @@ async fn run(cli: Cli) -> Result<()> {
                     println!("{}", client.invite(false, false).await?.as_str());
                 }
                 Command::Device { command } => match command {
-                    DeviceCommand::Add { gui } => {
-                        println!(
-                            "{}",
-                            client
-                                .invite_for_device(
-                                    true,
-                                    false,
-                                    if gui {
-                                        DeviceKind::Gui
-                                    } else {
-                                        DeviceKind::Cli
-                                    }
-                                )
-                                .await?
-                                .as_str()
-                        )
+                    DeviceCommand::Add => {
+                        println!("{}", client.invite(true, false).await?.as_str())
                     }
                     DeviceCommand::List => {
                         for device in &client.devices {
@@ -412,7 +404,7 @@ async fn run(cli: Cli) -> Result<()> {
 mod tests {
     use super::*;
     #[test]
-    fn complete_spec_command_grammar() {
+    fn complete_spec_command_grammar() -> Result<()> {
         let id = "AAAAAAAAAAAAAAAAAAAAAA";
         let cases: Vec<Vec<&str>> = vec![
             vec![
@@ -498,5 +490,33 @@ mod tests {
             argv.extend(args);
             assert!(Cli::try_parse_from(argv.clone()).is_ok(), "{argv:?}");
         }
+        assert!(Cli::try_parse_from(["phi", "device", "add", "--gui"]).is_err());
+        assert_eq!(
+            Cli::try_parse_from(["phi", "--help"])
+                .err()
+                .map(|error| error.kind()),
+            Some(clap::error::ErrorKind::DisplayHelp)
+        );
+        let directory = tempfile::tempdir()?;
+        for name in ["phi-gui", "Pheidippides", "phi-gui.exe"] {
+            std::fs::write(
+                directory.path().join(name),
+                b"test launcher; never executed",
+            )?;
+        }
+        let path = directory.path().as_os_str();
+        let mac = desktop::candidates("macos", path);
+        assert_eq!(mac[0].program, PathBuf::from("/usr/bin/open"));
+        assert_eq!(mac[0].args, ["-a", "Pheidippides"]);
+        let linux = desktop::candidates("linux", path);
+        assert_eq!(linux.len(), 2);
+        assert_eq!(linux[0].program, directory.path().join("phi-gui"));
+        let windows = desktop::candidates("windows", path);
+        assert_eq!(windows[0].program, directory.path().join("phi-gui.exe"));
+        assert!(
+            desktop::candidates("linux", &directory.path().join("missing").into_os_string())
+                .is_empty()
+        );
+        Ok(())
     }
 }

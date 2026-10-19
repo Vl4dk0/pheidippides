@@ -83,8 +83,9 @@ epoch; PUT keys is only for same/historical-epoch enrollment self-rewraps.
 `Channel` returns current membership plus oldest-first membership_history. Proofs
 include the previous proof's signature, key commitment, scope, epoch, kind, members and issuer;
 updates/rotations must extend the stored proof. See phi-crypto's README for channel
-and directory pinning, #all expansion through signed invite origins, GUI enrollment
-policy, and bootstrap limits. `GrantRecordData.device_kind` is mandatory and signed.
+and directory pinning, #all expansion through signed invite origins, and bootstrap
+limits. Grants do not constrain device kind; the redeeming client declares it in
+its certificate. This replaces the earlier prototype's signed target-kind format.
 Titles/names remain single-line; summaries allow bounded multiline text. Bidi and
 non-text controls remain forbidden.
 

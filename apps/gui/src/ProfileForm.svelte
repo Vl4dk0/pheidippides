@@ -57,7 +57,7 @@
     >
     {#if mode === 'join'}
       <label
-        >GUI invitation or enrollment link<input
+        >Invitation or enrollment link<input
           type="password"
           bind:value={link}
           required
@@ -66,8 +66,8 @@
         /></label
       >
       <p class="muted">
-        Use a grant issued for a GUI device. Grants for CLI devices cannot
-        enroll the desktop app.
+        Use a normal invitation to join a space, or a device-add code from any
+        of your devices to enroll as the same person.
       </p>
     {:else}
       <label

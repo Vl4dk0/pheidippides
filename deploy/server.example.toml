@@ -12,7 +12,8 @@ listen = "0.0.0.0:8443"
 
 # Who may create spaces. "token" keeps a public server from being an open relay:
 # creating a space then requires admin_token. Joining an existing space is
-# always governed by invite links, not by this setting.
+# always governed by invite links, not by this setting. "anyone" is fine on a
+# private network. Clients pass the matching token via PHI_ADMIN_TOKEN.
 allow_space_creation = "token"
 admin_token = "change-me-to-a-long-random-string"
 

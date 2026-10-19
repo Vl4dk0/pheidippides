@@ -19,7 +19,6 @@
   let name = $state(untrack(() => snapshot.profile.display_name));
   let retention = $state(untrack(() => snapshot.retention_days));
   let summaryMode = $state(untrack(() => snapshot.summary_mode));
-  let deviceKind = $state<'gui' | 'cli'>('gui');
   let code = $state('');
   let codeType = $state('');
   let confirmation = $state('');
@@ -30,7 +29,6 @@
         kind: 'grant',
         enroll,
         recovery,
-        device_kind: recovery ? 'gui' : deviceKind,
       },
       grantLink,
     );
@@ -137,14 +135,6 @@
       </li>
     {/each}
   </ul>
-  <label
-    >Target application for invitation / device code<select
-      bind:value={deviceKind}
-      ><option value="gui">GUI desktop</option><option value="cli"
-        >CLI / agents</option
-      ></select
-    ></label
-  >
   <div class="row">
     <button disabled={busy} onclick={() => grant(false, false)}
       >Invite member</button
@@ -207,8 +197,8 @@
   </p>
   <h3>Recovery</h3>
   <p class="muted">
-    Export a single-use GUI enrollment code with no expiry. Anyone holding it
-    can enroll as you. Store it securely outside phi; it is shown only here.
+    Export a single-use enrollment code with no expiry. Anyone holding it can
+    enroll as you. Store it securely; it is shown only here.
   </p>
   <button disabled={busy} onclick={() => grant(true, true)}
     >Export recovery code</button
@@ -216,7 +206,7 @@
   {#if code}
     <section class="secret" aria-label={codeType}>
       <h3>{codeType}</h3>
-      <p>Share outside phi. This code contains a secret.</p>
+      <p>Share only with its intended recipient. This code grants access.</p>
       <pre>{code}</pre>
       <button onclick={() => (code = '')}>I saved it — hide code</button>
     </section>

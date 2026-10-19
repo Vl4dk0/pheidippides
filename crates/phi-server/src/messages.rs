@@ -8,25 +8,10 @@ use rusqlite::{named_params, params};
 // Notification routing shares one predicate so counts and long-polls agree without
 // changing person-wide read cursors or restricting access to other conversations.
 const NOTIFICATION_MESSAGE: &str = "
-    (:handle IS NULL OR EXISTS (
+    (:handle IS NULL OR m.author_person<>:person OR EXISTS (
         SELECT 1 FROM message_mentions direct WHERE direct.message_id=m.id
         AND direct.person_id=:person AND direct.handle=:handle
-    ) OR (m.author_person<>:person AND (
-        NOT EXISTS (
-            SELECT 1 FROM messages participant WHERE participant.thread_id=m.thread_id
-            AND (participant.author_person=:person OR EXISTS (
-                SELECT 1 FROM message_mentions addressed WHERE addressed.message_id=participant.id
-                AND addressed.person_id=:person AND addressed.handle<>''
-            ))
-        ) OR EXISTS (
-            SELECT 1 FROM messages participant WHERE participant.thread_id=m.thread_id
-            AND ((participant.author_person=:person
-                AND json_extract(participant.json,'$.envelope.handle')=:handle) OR EXISTS (
-                SELECT 1 FROM message_mentions addressed WHERE addressed.message_id=participant.id
-                AND addressed.person_id=:person AND addressed.handle=:handle
-            ))
-        )
-    )))
+    ))
 ";
 
 impl Db {

@@ -79,7 +79,7 @@ impl Fixture {
                 grant_id: grant.id(),
                 grant_pub: grant.public(),
                 kind: GrantKind::Invite,
-                device_kind: DeviceKind::Gui,
+
                 person_id: PersonId::from_bytes([2; 16]),
                 created_at: 20,
                 expires_at: Some(90),
@@ -572,7 +572,7 @@ fn trust_resolves_out_of_order_recursive_grants_to_the_root() -> Result<(), Cryp
             grant_id: enroll.id(),
             grant_pub: enroll.public(),
             kind: GrantKind::Enroll,
-            device_kind: DeviceKind::Cli,
+
             person_id: PersonId::from_bytes([2; 16]),
             created_at: 40,
             expires_at: None,
@@ -702,25 +702,25 @@ fn grant_person_time_and_expiry_are_enforced_at_redemption() -> Result<(), Crypt
     other_person_enroll.grants[0] =
         sign_grant(other_person_enroll.grants[0].data.clone(), &f.keys)?;
     assert!(verify_trust_bundle(f.space(), &other_person_enroll, 100, None).is_err());
-    let gui_grant = GrantSecret::from_bytes([88; 32]).derive()?;
+    let enroll_grant = GrantSecret::from_bytes([88; 32]).derive()?;
     let record = GrantRecordData {
         space_id: f.space(),
-        grant_id: gui_grant.id(),
-        grant_pub: gui_grant.public(),
+        grant_id: enroll_grant.id(),
+        grant_pub: enroll_grant.public(),
         kind: GrantKind::Enroll,
-        device_kind: DeviceKind::Gui,
+
         person_id: f.bundle.root.data.person_id,
         created_at: 20,
         expires_at: None,
         issuer_device: f.root(),
     };
-    let mut hostile = f.bundle.clone();
-    hostile.grants.push(sign_grant(record, &f.keys)?);
-    assert!(verify_trust_bundle(f.space(), &hostile, 100, None).is_ok());
-    let mut wrong_kind = f.bundle.clone();
-    wrong_kind.grants[0].data.device_kind = DeviceKind::Cli;
-    wrong_kind.grants[0] = sign_grant(wrong_kind.grants[0].data.clone(), &f.keys)?;
-    assert!(verify_trust_bundle(f.space(), &wrong_kind, 100, None).is_err());
+    let mut with_enrollment = f.bundle.clone();
+    with_enrollment.grants.push(sign_grant(record, &f.keys)?);
+    assert!(verify_trust_bundle(f.space(), &with_enrollment, 100, None).is_ok());
+    let mut cli_label = f.bundle.clone();
+    cli_label.certificates[0].data.kind = DeviceKind::Cli;
+    cli_label.certificates[0] = certify_with_grant(cli_label.certificates[0].data.clone(), &grant)?;
+    assert!(verify_trust_bundle(f.space(), &cli_label, 100, None).is_ok());
     let mut invalid = f.bundle.grants[0].data.clone();
     invalid.expires_at = None;
     assert!(sign_grant(invalid, &f.keys).is_err());

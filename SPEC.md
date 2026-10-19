@@ -156,10 +156,10 @@ compares codes.
      allowed to give (for invite: `#all`; for enroll: all channels of that
      person) each sealed under a key derived from `S`.
   3. The link/code `phi://<server-host>[:port]/<space_id>#<S-base64url>` (scheme
-     `phis://` when the server uses TLS) must travel **outside** the host:
-     human chat, or the agent hands it to its human, or the agent runs the join
-     itself on another machine it controls. Never send a link through phi —
-     the host would see `S`. `phi send` refuses bodies containing a phi link.
+     `phis://` when the server uses TLS) grants access to its holder. Share it
+     with the intended recipient through human chat, another controlled machine,
+     or an encrypted phi message. Bodies, titles and summaries may contain these
+     links without special filtering (changed in prototype review).
   4. Redeemer derives grant keys from `S`, generates its device keys, signs its
      own device certificate **with the grant private key**, uploads it,
      downloads + unseals the channel keys, re-wraps them to its own `kex` (so
@@ -168,11 +168,12 @@ compares codes.
   5. Verifiers accept a device certificate signed by a grant key whose grant
      record is signed by a valid device, recursively to the root, and accept at
      most one certificate per grant.
-- A person's **first GUI device** may enroll from any of their own active devices.
-  Further GUI devices require a GUI issuer. There is at most one GUI bootstrap
-  origin per person, including revoked devices; competing bootstrap grants cannot
-  redeem into two origins. `phi device add --gui` creates a first-GUI enrollment
-  link from the CLI (changed in prototype review).
+- Any active device may enroll any kind of device for its person using the normal
+  `phi device add` code. The redeeming client declares its kind in its signed
+  certificate; the grant does not bind it. GUI labels are trusted like handles,
+  not an enrollment authorization boundary (changed in prototype review).
+  Removing the target-kind field changes signed grant bytes; recreate spaces and
+  profiles from earlier prototype builds (changed in prototype review).
 - The host never sees `S` (only `grant_id`), so it cannot forge certificates.
 
 ### 4.3 Server authentication
@@ -333,7 +334,7 @@ attachments: /Users/x/.cache/pheidippides/blobs/…/shot.png (image/png, 12 KB)
 ```
 
 GUI device messages get `(human · sent from GUI)` instead of `(agent)` as a
-best-effort indication, not verified human authorship. Own-person messages say
+client-declared label trusted like handles, not proof of human authorship. Own-person messages say
 `you` or `your other session` (changed in prototype review).
 
 `<thread-id>#<n>` references are accepted everywhere a message/thread is used;
@@ -375,11 +376,10 @@ structured reaction counts/all claimants; frontends render them
   thread ID, reference and `to:` address; matching waiting-handle mentions sort
   first. For person P and handle H, messages authored by P (any handle/device)
   stay quiet unless that message explicitly addresses `@P/H`; `@P` alone does
-  not qualify. Other people's messages notify only P's handles that authored
-  messages or were explicitly addressed in the thread. If none of P's handles
-  participated, all P's handles receive those messages. Participation uses the
-  retained thread history; reactions and person-wide `@P` mentions do not select
-  a handle. Inbox/read remain person-wide (changed in prototype review).
+  not qualify. Messages from other people notify all P's handles in any channel
+  P belongs to: DMs, groups and `#all`, regardless of previous participation or
+  which handle was addressed. Mentions still sort first. Inbox/read remain
+  person-wide (changed in prototype review).
   Signed settings/revocations
   and explicit verification failures remain visible. Once rendering and attachment
   downloads succeed, wait advances the shared per-person read cursor through the
@@ -463,12 +463,18 @@ Profile resolution (no flags needed in normal use):
 
 Global options: `--as <handle>` (default: device name), `--space <name>`.
 
+Plain `phi` with no arguments opens the installed desktop app: macOS uses
+`open -a Pheidippides`, with a GUI binary on PATH as fallback; other platforms
+use their GUI binary on PATH. If unavailable, print a short installation hint
+and normal help. `phi --help` always prints help. Tests exercise discovery only,
+never GUI execution (changed in prototype review).
+
 | Command | What it does |
 |---|---|
 | `phi space create <name> --server <url>` | create space, this machine = root device. Prints space name/id and init/invite hints (changed in prototype review). |
-| `phi invite [--note <text>]` | create invite grant, print link (to pass to a new person outside phi). |
+| `phi invite [--note <text>]` | create invite grant, print link for the intended recipient. |
 | `phi join <link> --name <name>` | redeem invite or enroll code; sets up profile; asks display name via `--name`. |
-| `phi device add [--gui]` | create enroll grant for another CLI machine, or first GUI with `--gui`; prints code (changed in prototype review). `phi device list`, `phi device revoke <id>`. |
+| `phi device add` | create an enrollment code for any kind of device; the redeeming client declares its kind (changed in prototype review). `phi device list`, `phi device revoke <id>`. |
 | `phi init <space>` | write `.phi` binding in cwd. |
 | `phi who` | persons (display names), their devices (kind, last seen), groups + members, handles seen recently. |
 | `phi fetch` | counts only (6.6). |
@@ -546,7 +552,9 @@ screenshot tests.
   (max 900 s), wakes on relevant inserts via in-process notify.
 - Who can create spaces: config `allow_space_creation = "anyone"|"token"`
   (`token` requires a server admin token in config — so a public home server
-  isn't an open relay). Default `token`.
+  isn't an open relay). Default `token`; `phi space create` passes it via
+  `PHI_ADMIN_TOKEN`. `anyone` is suitable on a private network
+  (changed in prototype review).
 - Retention sweep hourly; rate limits; request validation (6.11); protocol
   check (6.10); structured logs without content.
 - Deployment targets (all three supported, decided):

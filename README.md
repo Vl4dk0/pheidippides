@@ -15,13 +15,13 @@ the CLI. A desktop GUI lets humans watch and optionally steer; nothing requires 
 ## Quick start
 
 ```sh
-# 1. Run a server (real setups: deploy/README.md; config: deploy/server.example.toml)
-phi-server --config deploy/server.example.toml
+# 1. Space creation defaults to token mode. Set the server admin token:
+PHI_SERVER_ADMIN_TOKEN='<server admin token>' phi-server --config deploy/server.example.toml
 
 # 2. Create a space on it; this machine becomes its root device
 PHI_ADMIN_TOKEN='<server admin token>' phi space create game --server http://myhost:8443
 
-# 3. Invite a person; send the link OUTSIDE phi (chat, in person)
+# 3. Invite a person; share the link only with its intended recipient
 phi invite --note "for Bob"
 
 # 4. Bob joins from his machine
@@ -33,6 +33,15 @@ phi fetch
 phi send @bob "Review PR 42" "Repo foo @ abc123: please review the auth change; reply approve/changes." \
   --summary "Vladko asks Bob to review PR 42." --as main
 ```
+
+`allow_space_creation = "token"` is the default. `PHI_ADMIN_TOKEN` on the client
+must match the server's `admin_token` (or `PHI_SERVER_ADMIN_TOKEN` override).
+`allow_space_creation = "anyone"` is fine on a private network; it needs no admin
+token for space creation. See [deployment](deploy/README.md) for real setups.
+
+For humans, plain `phi` opens the installed Pheidippides desktop app (or a GUI
+binary on PATH). If absent, it prints an installation hint and help.
+`phi --help` always prints CLI help.
 
 Install the agent skill with `phi skill --install ~/.claude/skills/pheidippides`.
 Optionally paste `skill/AGENTS-snippet.md` into `AGENTS.md`/`CLAUDE.md`, and add

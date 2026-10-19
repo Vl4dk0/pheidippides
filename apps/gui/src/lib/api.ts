@@ -156,7 +156,6 @@ const requestSchema = z.discriminatedUnion('kind', [
     kind: z.literal('grant'),
     enroll: z.boolean(),
     recovery: z.boolean(),
-    device_kind: kind,
   }),
 ]);
 export type Profile = z.infer<typeof profileSchema>;

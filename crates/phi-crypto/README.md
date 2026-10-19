@@ -48,7 +48,7 @@ ambiguity. Mention lists preserve order and encode each mention as
 |---|---|
 | `phi message v1` | id, summary_covers_seq, space_id, channel_id, thread_id, epoch, handle, mentions, nonce, ciphertext |
 | `phi device certificate v1` | space_id, person_id, device_id, kind, sign_pub, kex_pub, created_at, issuer |
-| `phi grant record v1` | space_id, grant_id, grant_pub, kind, device_kind, person_id, created_at, expires_at, issuer_device |
+| `phi grant record v1` | space_id, grant_id, grant_pub, kind, person_id, created_at, expires_at, issuer_device |
 | `phi revocation v1` | space_id, target, issuer_device, created_at |
 | `phi reaction v1` | space_id, message_id, person_id, device_id, handle, kind, created_at, remove |
 | `phi settings v1` | space_id, issuer_device, created_at, retention_days, summary_mode, messages_per_minute, messages_per_hour |
@@ -130,12 +130,11 @@ cycles, mixed spaces, duplicate devices/grants, reused grants and invalid
 signatures. Each person has exactly one origin: the root person or one invite
 record; another invite cannot reuse that person ID, even if the first invite is
 unused. Later certificates for that person must use enroll grants issued by that
-same person's device. Certificates must match the grant's signed `device_kind`.
-The first GUI certificate for a person may use any own-device issuer; subsequent
-GUI certificates require a GUI issuer. Verification allows at most one bootstrap
-GUI origin per person, including historical/revoked devices. A new-person invite may target either
-kind. Device kinds authenticate an issuer's designation, not hardware/keychain
-attestation or proof that a human typed the message; the GUI mark is best effort.
+same person's device. Any device may enroll any kind of client; kind is declared
+by the redeeming client in its signed certificate and is absent from grants.
+The GUI mark is a client-declared label trusted like handles, not hardware/keychain
+attestation or proof that a human typed the message. Removing the old target-kind
+field changes signed grant bytes; earlier prototype spaces must be recreated.
 
 Current revocation dominates attacker-controlled wall clocks. A certificate whose
 grant issuer is currently revoked is accepted **only if that exact certificate

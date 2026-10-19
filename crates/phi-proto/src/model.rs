@@ -70,7 +70,6 @@ pub struct GrantRecordData {
     pub grant_id: GrantId,
     pub grant_pub: PublicKey,
     pub kind: GrantKind,
-    pub device_kind: DeviceKind,
     pub person_id: PersonId,
     pub created_at: Timestamp,
     pub expires_at: Option<Timestamp>,

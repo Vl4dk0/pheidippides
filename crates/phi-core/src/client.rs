@@ -229,9 +229,6 @@ impl Client {
         {
             return Err(user("grant does not match the link"));
         }
-        if data.device_kind != device.kind {
-            return Err(user("grant device kind does not match this application"));
-        }
         let keys = DeviceKeys::generate(&mut entropy)?;
         let did = DeviceId::from_bytes(random_id(&mut entropy)?);
         let certificate = certify_with_grant(
@@ -239,7 +236,7 @@ impl Client {
                 space_id: link.space_id(),
                 person_id: data.person_id,
                 device_id: did,
-                kind: data.device_kind,
+                kind: device.kind,
                 sign_pub: keys.sign_public(),
                 kex_pub: keys.kex_public(),
                 created_at: now(),
@@ -623,15 +620,6 @@ impl Client {
         ))
     }
     pub async fn invite(&mut self, enroll: bool, never_expires: bool) -> Result<Zeroizing<String>> {
-        self.invite_for_device(enroll, never_expires, self.profile.kind)
-            .await
-    }
-    pub async fn invite_for_device(
-        &mut self,
-        enroll: bool,
-        never_expires: bool,
-        kind: DeviceKind,
-    ) -> Result<Zeroizing<String>> {
         self.begin_operation().await?;
         if !enroll && never_expires {
             return Err(user("only enrollment grants may have no expiry"));
@@ -648,7 +636,6 @@ impl Client {
                 } else {
                     GrantKind::Invite
                 },
-                device_kind: kind,
                 person_id: if enroll {
                     self.profile.person_id
                 } else {
@@ -795,14 +782,12 @@ impl Client {
     }
     pub async fn send(&mut self, to: &str, title: &str, options: SendOptions) -> Result<Message> {
         self.begin_operation().await?;
-        reject_links(&options.body)?;
         let (channel, mentions) = self.destination(to).await?;
         self.send_inner(channel, None, Some(title.into()), mentions, options, &[])
             .await
     }
     pub async fn reply(&mut self, thread: MessageId, options: SendOptions) -> Result<Message> {
         self.begin_operation().await?;
-        reject_links(&options.body)?;
         let history = self.load_thread(thread).await?;
         let root = history.first().ok_or_else(|| user("thread not found"))?;
         let channel = root.message.envelope.channel_id;
@@ -840,12 +825,6 @@ impl Client {
                     "this space requires --summary of the whole thread, or a summarizer in profile.toml",
                 ));
             }
-        }
-        if let Some(summary) = &options.summary {
-            reject_links(summary)?;
-        }
-        if let Some(title) = &title {
-            reject_links(title)?;
         }
         if options.files.len() > MAX_ATTACHMENTS {
             return Err(user("at most 32 attachments"));
@@ -2524,15 +2503,6 @@ fn unique_slug(name: &str, people: &BTreeMap<PersonId, String>) -> String {
         suffix += 1;
     }
     candidate
-}
-fn reject_links(body: &str) -> Result<()> {
-    let lowercase = body.to_ascii_lowercase();
-    if lowercase.contains("phi://") || lowercase.contains("phis://") {
-        return Err(user(
-            "phi links contain secret grant keys; send the link outside phi",
-        ));
-    }
-    Ok(())
 }
 fn mime(name: &str, bytes: &[u8]) -> &'static str {
     match name

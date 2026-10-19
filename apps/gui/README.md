@@ -38,12 +38,12 @@ or run `cargo run -p phi-gui`. These commands open the desktop app. Packaging,
 signing, OS URL-scheme registration and auto-updates are outside this prototype.
 
 Use **Connect → Create space** for the first GUI identity, or **Join with link**
-to paste a `phi://…` / `phis://…` GUI invitation or enrollment link. The link is
-not opened in a browser and its secret is never sent to the host. A CLI-issued
-grant must explicitly target GUI kind. Use `phi device add --gui` from any own
-CLI device to bootstrap your first GUI. Later GUI devices require a GUI issuer.
-The “sent from GUI” mark is a best-effort device-kind indication, not a security
-guarantee or proof of human authorship. An existing GUI member can issue either GUI or CLI grants in settings.
+to paste a `phi://…` / `phis://…` invitation or enrollment link. The link is
+not opened in a browser and its secret is never sent to the host. Use the normal
+`phi device add` code from any own device, for any CLI or GUI client. The redeeming
+client declares its device kind. “Sent from GUI” is a label trusted like handles,
+not proof of human authorship. Settings issue the same codes without a target-kind
+picker. Plain `phi` opens the installed desktop app; `phi --help` prints CLI help.
 
 Each space has its own profiles/channels, all/unread/own-agent/mention thread
 filters (mentions include your agents’ handles), verified thread content, summary coverage, reaction/claim controls and
@@ -58,7 +58,7 @@ Space settings change display name (slugified with collision handling),
 retention and summary mode; invite/remove members; inspect/revoke devices;
 generate single-use enrollment codes; and export a never-expiring GUI recovery
 code. Codes are held only in the current settings panel, cleared when hidden or
-closed, and must be shared outside phi. Device/person revocation protects future
+closed, and should be shared only with intended recipients. Device/person revocation protects future
 messages only; previously read content stays compromised. Retention deletion
 beyond the server and local cache is best-effort.
 

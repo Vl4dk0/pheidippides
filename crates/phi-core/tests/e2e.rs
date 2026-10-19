@@ -414,8 +414,15 @@ async fn wait_backlog_wakes_on_reply_and_keeps_per_handle_cursor() -> Result<()>
     let own = bob.reply(root.id, options("my reply")).await?;
     let mut alice_reviewer =
         Client::open(f.store("alice"), alice.profile.clone(), Some("reviewer")).await?;
-    ensure!(alice_reviewer.wait(0).await?.is_empty());
-    ensure!(alice_reviewer.fetch().await?.is_empty());
+    ensure!(
+        alice_reviewer
+            .wait(0)
+            .await?
+            .iter()
+            .any(|event| matches!(event,
+        WaitEntry::Message(entry) if entry.latest_seq == own.seq))
+    );
+    ensure!(alice_reviewer.fetch().await?.contains("1 unread threads"));
     ensure!(alice.counts().await?.unread_threads == 1);
     let events = alice.wait(0).await?;
     let mut output = String::new();
@@ -448,8 +455,12 @@ async fn wait_backlog_wakes_on_reply_and_keeps_per_handle_cursor() -> Result<()>
     }
     ensure!(bob.wait(0).await?.is_empty());
     let mut second = Client::open(f.store("bob"), bob.profile.clone(), Some("second")).await?;
-    ensure!(second.wait(0).await?.is_empty());
-    ensure!(second.counts().await?.unread_threads == 0);
+    let entries = second.wait(0).await?;
+    ensure!(entries.iter().any(|event| matches!(event,
+        WaitEntry::Message(entry) if entry.latest_seq == message.seq)));
+    ensure!(entries.iter().all(|event| !matches!(event,
+        WaitEntry::Message(entry) if entry.latest_seq == own.seq)));
+    ensure!(second.counts().await?.unread_threads == 1);
     let mut reopened = Client::open(f.store("bob"), bob.profile.clone(), None).await?;
     ensure!(reopened.wait(0).await?.is_empty());
     // An own-only backlog consumes the original timeout instead of waking the session.
@@ -486,14 +497,14 @@ async fn wait_backlog_wakes_on_reply_and_keeps_per_handle_cursor() -> Result<()>
     ensure!(
         entries
             .iter()
-            .all(|e| !matches!(e, WaitEntry::Message(entry) if entry.id == other.id))
+            .any(|e| matches!(e, WaitEntry::Message(entry) if entry.id == other.id))
     );
     ensure!(
         entries
             .iter()
             .any(|e| matches!(e, WaitEntry::Message(entry) if entry.id == general.id))
     );
-    ensure!(reviewer.counts().await?.unread_threads == 2);
+    ensure!(reviewer.counts().await?.unread_threads == 3);
     // Inbox remains person-wide; notification routing does not change read state.
     let inbox = reviewer.inbox().await?;
     ensure!(inbox[0].id == targeted.id && inbox[0].to == "@bob/reviewer (you)");
@@ -505,13 +516,17 @@ async fn wait_backlog_wakes_on_reply_and_keeps_per_handle_cursor() -> Result<()>
     let unrelated = async {
         tokio::time::sleep(Duration::from_millis(40)).await;
         bob.reply(targeted.id, options("own untargeted reply"))
-            .await?;
-        alice.reply(root.id, options("reply for bob/cli")).await
+            .await
     };
     let (waiting, sent) = tokio::join!(reviewer.wait(1), unrelated);
     sent?;
     ensure!(waiting?.is_empty());
     ensure!(started.elapsed() >= Duration::from_millis(900));
+    let external = alice
+        .reply(root.id, options("reply for every bob handle"))
+        .await?;
+    ensure!(reviewer.wait(0).await?.iter().any(|event| matches!(event,
+        WaitEntry::Message(entry) if entry.latest_seq == external.seq)));
     let direct = alice
         .send("@bob/reviewer", "Called reviewer", options("please review"))
         .await?;
@@ -558,7 +573,7 @@ async fn wait_backlog_wakes_on_reply_and_keeps_per_handle_cursor() -> Result<()>
     ensure!(output.matches(&sibling_header).count() == 1);
     ensure!(output.find("batch final reply") < output.find(&sibling_header));
     ensure!(output.contains("parallel root body") && output.contains("parallel reply body"));
-    ensure!(!output.contains("not displayed") && !output.contains("phi read"));
+    ensure!(output.contains("not displayed") && !output.contains("phi read"));
     let cache =
         rusqlite::Connection::open(f.store("bob").cache_dir(&bob.profile).join("cache.db"))?;
     let cursor: u64 = cache.query_row(
@@ -583,6 +598,29 @@ async fn wait_backlog_wakes_on_reply_and_keeps_per_handle_cursor() -> Result<()>
             .all(|entry| entry.id != batch.id && entry.id != sibling.id)
     );
     ensure!(reviewer.wait_text(0).await?.is_empty());
+    alice
+        .group_create("notifications", &["@bob".into()])
+        .await?;
+    let grouped = alice
+        .send(
+            "#notifications",
+            "Group task",
+            options("for all bob handles"),
+        )
+        .await?;
+    for client in [&mut reviewer, &mut second] {
+        ensure!(client.wait(0).await?.iter().any(|event| matches!(event,
+            WaitEntry::Message(entry) if entry.id == grouped.id)));
+        ensure!(
+            client
+                .counts()
+                .await?
+                .channels
+                .iter()
+                .any(|channel| channel.channel_id == grouped.envelope.channel_id
+                    && channel.unread_threads == 1)
+        );
+    }
     Ok(())
 }
 #[tokio::test]
@@ -965,7 +1003,7 @@ async fn profile_resolution_binding_ambiguity_and_space_isolation() -> Result<()
     Ok(())
 }
 #[tokio::test]
-async fn names_slug_collisions_self_channel_and_secret_link_refusal() -> Result<()> {
+async fn names_slug_collisions_self_channel_and_link_content() -> Result<()> {
     let f = Fixture::new().await?;
     let mut alice = f.alice().await?;
     let link = alice.invite(false, false).await?;
@@ -1017,22 +1055,31 @@ async fn names_slug_collisions_self_channel_and_secret_link_refusal() -> Result<
         WaitEntry::Message(entry) if entry.id == called.id)));
     ensure!(other_session.wait(0).await?.is_empty());
     for body in ["phi://host/space#secret", "PHIS://host/space#secret"] {
-        ensure!(alice.send("#all", "Unsafe", options(body)).await.is_err());
-    }
-    ensure!(
-        alice
-            .send(
-                "#all",
-                "Unsafe summary",
-                SendOptions {
-                    body: "fine".into(),
-                    summary: Some("phi://secret".into()),
-                    files: vec![]
-                }
+        let linked = alice.send("#all", body, options(body)).await?;
+        let reply = alice.reply(linked.id, options(body)).await?;
+        let view = alice
+            .read(
+                linked.id,
+                ReadOptions {
+                    all: true,
+                    last: None,
+                },
             )
-            .await
-            .is_err()
-    );
+            .await?;
+        ensure!(
+            view.title == body
+                && view
+                    .messages
+                    .iter()
+                    .all(|message| message.content.body == body)
+        );
+        ensure!(
+            view.messages
+                .last()
+                .is_some_and(|message| message.message.id == reply.id)
+        );
+        ensure!(view.summary.as_deref() == Some(format!("Summary: {body}").as_str()));
+    }
     Ok(())
 }
 #[tokio::test]
@@ -1454,35 +1501,29 @@ fn gui_device(keys: MemoryKeys) -> DeviceOptions {
     }
 }
 #[tokio::test]
-async fn gui_keystore_boundary_and_authenticated_device_kind() -> Result<()> {
+async fn gui_keystore_boundary_and_self_declared_device_kind() -> Result<()> {
     let f = Fixture::new().await?;
     let keys = MemoryKeys::default();
     let mut origin = Client::create(f.store("origin"), &f.url, "gui-space", "alice", None).await?;
-    let first = origin
-        .invite_for_device(true, false, DeviceKind::Gui)
-        .await?;
-    let competing = origin
-        .invite_for_device(true, false, DeviceKind::Gui)
-        .await?;
+    let first = origin.invite(true, false).await?;
+    let competing = origin.invite(true, false).await?;
     let mut gui =
         Client::join_for_device(f.store("gui"), &first, "alice", gui_device(keys.clone())).await?;
-    ensure!(
-        Client::join_for_device(
-            f.store("competing-gui"),
-            &competing,
-            "alice",
-            gui_device(MemoryKeys::default())
-        )
-        .await
-        .is_err()
-    );
+    let competing_gui = Client::join_for_device(
+        f.store("competing-gui"),
+        &competing,
+        "alice",
+        gui_device(MemoryKeys::default()),
+    )
+    .await?;
+    ensure!(competing_gui.profile.kind == DeviceKind::Gui);
     ensure!(
         !f.store("gui")
             .profile_dir(&gui.profile)
             .join("keys")
             .exists()
     );
-    let link = gui.invite_for_device(true, false, DeviceKind::Cli).await?;
+    let link = gui.invite(true, false).await?;
     let mut cli = Client::join(f.store("cli"), &link, "alice").await?;
     let root = gui
         .send(
@@ -1521,14 +1562,19 @@ async fn gui_keystore_boundary_and_authenticated_device_kind() -> Result<()> {
             .iter()
             .any(|entry| entry.id == mention.id && entry.mentioned)
     );
-    let cli_gui_enroll = cli.invite_for_device(true, false, DeviceKind::Gui).await;
-    ensure!(cli_gui_enroll.is_err());
-    let gui_code = gui.invite_for_device(true, true, DeviceKind::Gui).await?;
-    ensure!(
-        Client::join(f.store("wrong-kind"), &gui_code, "alice")
-            .await
-            .is_err()
-    );
+    let cli_gui_enroll = cli.invite(true, false).await?;
+    let cli_enrolled_gui = Client::join_for_device(
+        f.store("cli-enrolled-gui"),
+        &cli_gui_enroll,
+        "alice",
+        gui_device(MemoryKeys::default()),
+    )
+    .await?;
+    ensure!(cli_enrolled_gui.profile.kind == DeviceKind::Gui);
+    let gui_code = gui.invite(true, true).await?;
+    let recovered_cli = Client::join(f.store("recovered-cli"), &gui_code, "alice").await?;
+    ensure!(recovered_cli.profile.kind == DeviceKind::Cli);
+    let gui_code = cli.invite(true, false).await?;
     let gui2 = Client::join_for_device(
         f.store("gui2"),
         &gui_code,

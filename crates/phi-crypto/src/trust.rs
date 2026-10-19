@@ -29,7 +29,6 @@ pub fn grant_signing_bytes(data: &GrantRecordData) -> Result<Vec<u8>, CryptoErro
             data.grant_id,
             &data.grant_pub,
             data.kind,
-            data.device_kind,
             data.person_id,
             data.created_at,
             data.expires_at,
@@ -407,16 +406,13 @@ pub fn verify_trust_bundle(
             };
             if let Some(grant) = grants.get(&grant_id) {
                 if cert.data.person_id != grant.data.person_id
-                    || cert.data.kind != grant.data.device_kind
                     || cert.data.created_at < grant.data.created_at
                     || grant
                         .data
                         .expires_at
                         .is_some_and(|end| cert.data.created_at >= end)
                 {
-                    return Err(CryptoError::Trust(
-                        "grant person, device kind or validity mismatch",
-                    ));
+                    return Err(CryptoError::Trust("grant person or validity mismatch"));
                 }
                 verify_cert(cert, &grant.data.grant_pub)?;
                 certificates.insert(id, cert.clone());
@@ -500,29 +496,6 @@ pub fn verify_trust_bundle(
         &revocations,
     ))?)
     .as_bytes();
-    let mut gui_origins = BTreeSet::new();
-    for certificate in certificates
-        .values()
-        .filter(|c| c.data.kind == DeviceKind::Gui)
-    {
-        let bootstrap = match certificate.data.issuer {
-            CertificateIssuer::Device { .. } => true,
-            CertificateIssuer::Grant { grant_id } => {
-                let grant = grants
-                    .get(&grant_id)
-                    .ok_or(CryptoError::Trust("GUI grant missing"))?;
-                grant.data.kind == GrantKind::Invite
-                    || certificates
-                        .get(&grant.data.issuer_device)
-                        .is_some_and(|issuer| issuer.data.kind != DeviceKind::Gui)
-            }
-        };
-        if bootstrap && !gui_origins.insert(certificate.data.person_id) {
-            return Err(CryptoError::Trust(
-                "further GUI devices require a GUI issuer",
-            ));
-        }
-    }
     Ok(VerifiedDirectory {
         context,
         space_id: expected_space,

@@ -249,7 +249,7 @@ impl Fixture {
                 grant_id: grant.id(),
                 grant_pub: grant.public(),
                 kind,
-                device_kind: DeviceKind::Cli,
+
                 person_id: person,
                 created_at: (timestamp() - 10).max(issuer.cert.data.created_at),
                 expires_at: expires,
@@ -427,6 +427,10 @@ async fn bootstrap_persists_only_hashed_tokens_and_reopens() -> TestResult {
 }
 #[tokio::test]
 async fn admin_creation_auth_and_major_version_are_enforced() -> TestResult {
+    assert!(matches!(
+        Config::default().allow_space_creation,
+        Creation::Token
+    ));
     let f = Fixture::with_config(|c| {
         c.allow_space_creation = Creation::Token;
         c.admin_token = Some("admin-secret".into())
@@ -581,29 +585,6 @@ async fn invite_and_enrollment_preserve_signed_directory_and_membership() -> Tes
     let trusted = verify_trust_bundle(f.sid, &directory.directory, timestamp(), None)?;
     assert_eq!(trusted.active_devices().count(), 3);
     assert_eq!(directory.persons.len(), 2);
-    let (enroll, _) = f.grant(&f.root, GrantKind::Enroll, None).await?;
-    let mut gui = enroll.record.data.clone();
-    gui.device_kind = DeviceKind::Gui;
-    let bootstrap = GrantSecret::from_bytes([99; 32]).derive()?;
-    gui.grant_id = bootstrap.id();
-    gui.grant_pub = bootstrap.public();
-    let gui = CreateGrantRequest {
-        record: sign_grant(gui, &f.root.key)?,
-        sealed_keys: enroll.sealed_keys,
-    };
-    assert_eq!(
-        request(
-            &f.app,
-            "POST",
-            &f.space("/grants"),
-            Some(&f.root.token),
-            gui
-        )
-        .await?
-        .0,
-        200
-    );
-
     let list: ListChannelsResponse = ok(
         &f.app,
         "GET",
@@ -648,17 +629,13 @@ async fn redeem_is_atomic_single_use_and_rejects_forged_certificates() -> TestRe
     forged.certificate.signature = Signature::from_bytes([0; 64]);
     let path = format!("/v1/grants/{}/redeem", k.id());
     assert_eq!(request(&f.app, "POST", &path, None, forged).await?.0, 400);
-    let mut wrong_kind = r.clone();
-    wrong_kind.certificate.data.kind = DeviceKind::Gui;
-    wrong_kind.certificate = certify_with_grant(wrong_kind.certificate.data, &k)?;
-    assert_eq!(
-        request(&f.app, "POST", &path, None, wrong_kind).await?.0,
-        400
-    );
+    let mut declared_gui = r.clone();
+    declared_gui.certificate.data.kind = DeviceKind::Gui;
+    declared_gui.certificate = certify_with_grant(declared_gui.certificate.data, &k)?;
 
     let (a, b) = tokio::join!(
-        request(&f.app, "POST", &path, None, &r),
-        request(&f.app, "POST", &path, None, &r)
+        request(&f.app, "POST", &path, None, &declared_gui),
+        request(&f.app, "POST", &path, None, &declared_gui)
     );
     let mut status = [a?.0, b?.0];
     status.sort();
@@ -1226,7 +1203,7 @@ async fn counts_mentions_claims_and_read_cursors_are_per_person() -> TestResult 
         json!(null),
     )
     .await?;
-    assert_eq!((c.unread_threads, c.mentions), (0, 0));
+    assert_eq!((c.unread_threads, c.mentions), (1, 0));
     let _: ReadCursor = ok(
         &f.app,
         "PUT",
@@ -1273,8 +1250,8 @@ async fn counts_mentions_claims_and_read_cursors_are_per_person() -> TestResult 
     )
     .await?;
     assert_eq!((c.unread_threads, c.mentions, c.claimed_by_you), (1, 1, 1));
-    // An explicit reply address enrolls another handle without changing the
-    // person-wide read cursor; both notification endpoints use that evidence.
+    // Foreign messages notify every handle; explicit addresses still contribute
+    // only to that handle's mention count, without changing person-wide reads.
     let addressed: Message = ok(
         &f.app,
         "POST",

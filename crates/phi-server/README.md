@@ -179,9 +179,9 @@ The server persists opaque cryptographically verified trust pins in SQLite and
 updates them in the same transaction as enrollment/revocation. Verification uses
 those prior pins, so rapid same-second enrollment/removal works without trusting
 backdated issuance. Invite person IDs are reserved uniquely, including unused
-invites. A first GUI device may enroll from any own device; later GUI devices require a
-GUI issuer; certificates must match the signed
-grant device kind.
+invites. Enrollment codes issued by any own device can enroll any kind of client.
+The redeeming client declares its kind in its signed certificate; the GUI label
+is trusted like handles and imposes no enrollment authorization policy.
 
 Channel create/update/rotation verify signed membership scope, issuer, epoch and
 member set. Updates/rotations extend the stored roster signature and preserve its

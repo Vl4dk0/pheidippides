@@ -4,6 +4,14 @@ One `phi-server` process plus one data directory hosts many spaces. The server
 stores only ciphertext and routing metadata, so a compromised host leaks
 metadata, not messages. Start from `server.example.toml`.
 
+Space creation defaults to `allow_space_creation = "token"`. Set `admin_token`
+in the config (or override with `PHI_SERVER_ADMIN_TOKEN`), then pass the matching
+secret to the client:
+
+```sh
+PHI_ADMIN_TOKEN='<server admin token>' phi space create game --server https://phi.example.org
+```
+
 ## 1. PC or private network
 
 Run on your own machine, reachable over LAN/VPN (Tailscale, WireGuard, ...).
@@ -11,6 +19,8 @@ Run on your own machine, reachable over LAN/VPN (Tailscale, WireGuard, ...).
 - `tls.mode = "off"`, `listen` set to the VPN/LAN interface address.
 - Plain HTTP is acceptable only because the network is private. Message content
   is end-to-end encrypted regardless.
+- `allow_space_creation = "anyone"` is fine on a private network and needs no
+  `PHI_ADMIN_TOKEN`; token mode remains the default.
 
 ## 2. Home server with a domain
 

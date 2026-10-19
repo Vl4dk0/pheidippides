@@ -114,13 +114,6 @@ impl Db {
                 "invalid grant issuer or validity interval",
             ));
         }
-        if d.kind == GrantKind::Enroll
-            && d.device_kind == DeviceKind::Gui
-            && a.cert.data.kind != DeviceKind::Gui
-            && self.conn.query_row("SELECT EXISTS(SELECT 1 FROM devices WHERE space_id=? AND person_id=? AND json_extract(json,'$.cert.data.kind')='gui')", params![a.sid().to_string(), a.person().to_string()], |row| row.get::<_,bool>(0))?
-        {
-            return Err(ApiError::forbidden());
-        }
         self.verify(a, &phi_crypto::grant_signing_bytes(d)?, &r.record.signature)?;
         let existing: bool = self.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM persons WHERE id=?)",
@@ -205,7 +198,6 @@ impl Db {
             let cert = &r.certificate;
             if cert.data.space_id != data.space_id
                 || cert.data.person_id != data.person_id
-                || cert.data.kind != data.device_kind
                 || cert.data.issuer != (CertificateIssuer::Grant { grant_id: id })
             {
                 return Err(ApiError::invalid("certificate grant identity mismatch"));

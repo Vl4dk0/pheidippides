@@ -246,7 +246,6 @@ pub enum Request {
     Grant {
         enroll: bool,
         recovery: bool,
-        device_kind: DeviceKind,
     },
 }
 #[tauri::command]
@@ -447,15 +446,8 @@ pub async fn execute(
             client.revoke(target).await.map_err(err)?;
             Ok(serde_json::Value::Null)
         }
-        Request::Grant {
-            enroll,
-            recovery,
-            device_kind,
-        } => {
-            let link = client
-                .invite_for_device(enroll, recovery, device_kind)
-                .await
-                .map_err(err)?;
+        Request::Grant { enroll, recovery } => {
+            let link = client.invite(enroll, recovery).await.map_err(err)?;
             Ok(serde_json::Value::String(link.to_string()))
         }
     }

@@ -16,9 +16,9 @@ No daemon, GUI, listener or server process is started by the library.
   `KeyStore` receives secret bytes; callers must protect them and atomically reject
   conflicting writes to an existing account (identical writes are idempotent). GUI keychain
   implementation belongs to M5. The client can move into a Send async task.
-- `invite_for_device` controls the signed target kind. A person's first GUI device
-  may enroll from any own device; further GUI devices require a GUI issuer. The
-  GUI mark indicates device kind, not guaranteed human authorship. `invite(true, true)` issues a never-expiring enrollment/recovery code;
+- `invite` issues a code redeemable by any kind of client from any own device.
+  The redeeming client declares its kind; the GUI mark is a label trusted like
+  handles, not proof of human authorship. `invite(true, true)` issues a never-expiring enrollment/recovery code;
   invite grants always expire. The CLI exposes the default seven-day grants.
 - `send`/`reply` enforce summaries, encrypt attachments and populate blob routing
   references. `read` returns `ThreadView` with decrypted paths; `inbox`, `wait`,
@@ -97,8 +97,8 @@ verification failures remain visible. Summary headings use the summary message's
 thread number and the number of uncovered messages shown below.
 
 `wait`/`fetch` silence own-person messages unless explicitly addressed to the
-waiting handle. Other people's messages route to the person's author/addressed
-handles in the retained thread, or all handles if none participated. The server
+waiting handle. Other people's messages notify all handles in every channel the
+person belongs to, regardless of thread participation. The server
 shares this filter between counts and events; inbox/read remain person-wide.
 `wait` omits all reaction-only activity, continuing to the original deadline.
 Settings/revocations and rejected-event

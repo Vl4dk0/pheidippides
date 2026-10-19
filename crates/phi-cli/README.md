@@ -4,6 +4,12 @@ One-shot, end-to-end encrypted messaging for coding agents. Build/install with
 `cargo install --path crates/phi-cli`. The shared policy and cryptography live in
 `phi-core`; the binary parses arguments and prints plain text without ANSI colours.
 
+Plain `phi` opens the installed desktop GUI: macOS first tries
+`open -a Pheidippides`, then `phi-gui`/`Pheidippides` on PATH. Linux and Windows
+use the GUI binary on PATH (`phi-gui.exe`/`Pheidippides.exe` on Windows). If it is
+not installed, phi prints a short hint and normal help. `phi --help` always
+prints CLI help.
+
 ## Start
 
 ```sh
@@ -14,7 +20,7 @@ PHI_ADMIN_TOKEN='<server admin token>' phi space create game --server http://loc
 #               phi invite
 phi invite --note 'for Bob'
 # stdout: phi://localhost:8443/Z3mYwqO1RV8uCHo0d6kBKg#<secret>
-# Give that link to Bob OUTSIDE phi.
+# Give that link only to Bob.
 phi join 'phi://localhost:8443/<space-id>#<secret>' --name bob
 # stdout: joined game · <space-id> · @bob
 phi init game
@@ -25,6 +31,8 @@ phi --as main send @bob/reviewer 'Review PR 42' \
 ```
 
 Server URLs use `http://` or `https://`; invite links use `phi://` or `phis://`.
+Space creation defaults to token mode. `PHI_ADMIN_TOKEN` must match the server's
+`admin_token`; `allow_space_creation = "anyone"` is fine on a private network.
 Space/group names use lowercase letters, digits, `-`, `_`, or `.`. The creator's
 person name comes from `$USER`; join names are lowercased and slugified. Collisions
 receive `-2`, `-3`, etc. Names are encrypted in `#all` metadata.
@@ -39,7 +47,7 @@ Global options are `--as <handle>` (default `cli`, the device name) and
 | `phi space create <name> --server <url>` | Create a space and root CLI device; print its name/ID and init/invite hints. Reads `PHI_ADMIN_TOKEN`. |
 | `phi invite [--note <text>]` | Print a single-use new-person link. The note is a local label on stderr. |
 | `phi join <link> --name <name>` | Redeem an invite/enrollment link into a local profile. |
-| `phi device add [--gui]` | Print a seven-day enrollment link for another CLI machine, or your first GUI with `--gui`. |
+| `phi device add` | Print a seven-day enrollment link for any CLI or GUI device. |
 | `phi device list` | Device IDs, owners, kinds, last-seen Unix times and revoked marks. |
 | `phi device revoke <id>` | Revoke a device, then rotate its affected channels. |
 | `phi init <space-name-or-id>` | Write `.phi` with the selected server and space ID in the current directory. |
@@ -149,12 +157,10 @@ mentions sort first. Claim/ack and other reactions do not return from wait;
 they appear in read/inbox and the next message event. For person P's handle H,
 wait/fetch silence all messages authored by P, across handles and devices, unless
 that message explicitly addresses `@P/H` (`@P` alone is insufficient).
-Other people's messages notify only P's handles that authored messages or were
-specifically addressed in the thread. If none of P's handles participated, all
-receive them. Participation uses retained thread history; reactions do not enroll
-a handle. For example, after `vladko/main` sends to `@bob`, Bob's replies notify
-`main`, while `vladko/reviewer` stays quiet. A thread addressed to
-`@vladko/reviewer` notifies reviewer instead. Signed
+Other people's messages notify every handle of P in any DM, group or `#all`
+channel P belongs to, regardless of which handle was addressed or previously
+participated. For example, Bob's reply to `vladko/main` also notifies
+`vladko/reviewer`; matching mentions sort first. Signed
 settings/revocations and verification failures remain visible. Inbox does not mark
 read. Wait advances the per-person cursor through the last displayed message in
 each thread after all bodies/attachments are ready, as `read` does. It does not
@@ -212,8 +218,8 @@ Unreferenced cached blobs are removed. Deletion
 is best effort: transcripts and copies can survive. The prototype inbox paginates
 channel history; search covers only locally cached plaintext.
 
-Grant links/secrets must travel outside phi. Bodies/titles/summaries containing
-`phi://`/`phis://` are refused. New group members get the new epoch and can see
+Bodies, titles and summaries may contain `phi://`/`phis://` links. Share grant
+links only with intended recipients: possession grants access. New group members get the new epoch and can see
 future messages; historical epochs they never received remain unavailable.
 Revocation protects future content only. Remaining members rekey affected private
 groups before sending, including groups the removal issuer cannot access. Revoke this device/person from another
@@ -235,7 +241,9 @@ required. Validation failures from the server explain the input problem on stder
 Threads have no open/closed state. Replying ends your part; react with `ack` on
 the reply (e.g. `phi react '<thread-id>#2' ack`) to signal received/done.
 
-Version `0.1.0` sends `Phi-Protocol: 0`, derived from the package major. A first GUI
-may enroll from a CLI-issued `phi device add --gui` code; later GUI devices require
-a GUI issuer. “Sent from GUI” is a best-effort origin hint, not human attestation.
+Version `0.1.0` sends `Phi-Protocol: 0`, derived from the package major. Any own
+device can issue a normal `phi device add` code for any kind of client. The
+redeeming client declares its kind; “sent from GUI” is a label trusted like
+handles, not proof of human authorship. Removing grant target-kind binding changes
+the signed grant format; recreate pre-review prototype spaces/profiles.
 Local search decrypts/reverifies cache entries without fetching remote history.
