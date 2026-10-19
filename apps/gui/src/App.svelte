@@ -17,7 +17,31 @@
   } from './lib/state';
   import ProfileForm from './ProfileForm.svelte';
   import Settings from './Settings.svelte';
-  import ReactionSummaryView from './ReactionSummary.svelte';
+  import IconButton from './IconButton.svelte';
+  import Modal from './Modal.svelte';
+  import { relativeTime, dateLabel, monogram } from './lib/presentation';
+  import {
+    Plus,
+    Settings as SettingsIcon,
+    SlidersHorizontal,
+    SquarePen,
+    Layers,
+    Hash,
+    User,
+    Bot,
+    Inbox,
+    CircleDot,
+    AtSign,
+    Flag,
+    X,
+    PanelLeftClose,
+    PanelLeft,
+    PanelRightClose,
+    SendHorizontal,
+    MessageCircle,
+    Bell,
+    BellOff,
+  } from '@lucide/svelte';
   import ThreadPane from './ThreadPane.svelte';
   let profiles = $state<api.Profile[]>([]);
   let selected = $state('');
@@ -34,6 +58,7 @@
   let settings = $state(false);
   let composing = $state(false);
   let body = $state('');
+  let composerInput = $state<HTMLTextAreaElement>();
   let title = $state('');
   let to = $state('#all');
   let prefs = $state<Preferences>(parsePreferences(null));
@@ -59,6 +84,19 @@
     'attachments',
     'metadata',
   ] as const;
+  const filters = [
+    { value: 'all', label: 'All threads', icon: Inbox },
+    { value: 'unread', label: 'Unread threads', icon: CircleDot },
+    { value: 'agents', label: 'My agents’ activity', icon: Bot },
+    { value: 'mentions', label: 'Mentions', icon: AtSign },
+  ] as const;
+  $effect(() => {
+    body;
+    if (composerInput) {
+      composerInput.style.height = 'auto';
+      composerInput.style.height = `${Math.min(composerInput.scrollHeight, 160)}px`;
+    }
+  });
   $effect(() => {
     if (mounted) {
       localStorage.setItem('phi.preferences', JSON.stringify(prefs));
@@ -346,178 +384,290 @@
 </script>
 
 <div class="shell">
-  <header class="toolbar">
-    <strong>Pheidippides</strong>
-    <div class="row actions">
-      <button onclick={() => (connecting = !connecting)} disabled={busy}
-        >Connect</button
-      ><button disabled={!selected || busy} onclick={newThread}
-        >New thread</button
-      ><button
-        disabled={!snapshot || busy}
-        onclick={() => (settings = !settings)}>Space settings</button
+  <div class="utility-dock" aria-label="Workspace controls">
+    {#if !prefs.view}<IconButton
+        icon={MessageCircle}
+        label="Show thread view"
+        onclick={() => (prefs.view = true)}
+      />{:else}<IconButton
+        icon={PanelRightClose}
+        label="Hide thread view"
+        onclick={() => (prefs.view = false)}
+      />{/if}
+    <details class="appearance">
+      <summary
+        class="icon-button"
+        title="View options"
+        aria-label="View options"
+        ><SlidersHorizontal size={18} strokeWidth={1.75} /></summary
       >
-      <details class="appearance">
-        <summary>View</summary>
-        <div class="menu">
-          {#each toggles as key}<label class="check"
-              ><input type="checkbox" bind:checked={prefs[key]} />{key}</label
-            >{/each}<label class="check"
-            ><input
-              type="checkbox"
-              checked={prefs.notifications}
-              onchange={(event) =>
-                toggleNotifications(event.currentTarget.checked)}
-            />Desktop notifications</label
-          >
-        </div>
-      </details>
-    </div>
-  </header>
-  {#if error}<div class="error banner" role="alert">
-      <span>{error}</span><button onclick={() => (error = '')}>Dismiss</button>
-    </div>{/if}
+      <div class="menu">
+        {#each toggles as key}<label class="check"
+            ><input type="checkbox" bind:checked={prefs[key]} />{key === 'view'
+              ? 'Thread view'
+              : key}</label
+          >{/each}
+        <label class="check"
+          ><input
+            type="checkbox"
+            checked={prefs.notifications}
+            onchange={(event) =>
+              toggleNotifications(event.currentTarget.checked)}
+          /><Bell size={14} />Notifications</label
+        >
+      </div>
+    </details>
+  </div>
+  {#snippet errorNotice()}
+    {#if error}<div class="error banner" role="alert">
+        <span>{error}</span><IconButton
+          icon={X}
+          label="Dismiss error"
+          onclick={() => (error = '')}
+        />
+      </div>{/if}
+  {/snippet}
+  {#if !connecting && !settings}{@render errorNotice()}{/if}
   {#each Object.entries(syncErrors) as [profileId, syncError]}<div
       class="error banner"
       role="status"
     >
-      Sync paused · {syncError}<button
+      <span>Sync paused · {syncError}</span><IconButton
+        icon={Layers}
+        label="Open affected space"
         disabled={busy}
-        onclick={() => selectProfile(profileId)}>Open space</button
-      >
+        onclick={() => selectProfile(profileId)}
+      />
     </div>{/each}
-  {#if connecting}<ProfileForm
-      {busy}
-      onsubmit={connect}
+  {#if connecting}<Modal
+      label="Connect a space"
       onclose={() => (connecting = false)}
-    />{/if}
-  {#if settings && snapshot}{#key snapshot.profile.id}<Settings
-        {snapshot}
+      >{@render errorNotice()}<ProfileForm
         {busy}
-        {request}
-        onclose={() => (settings = false)}
-      />{/key}{/if}
+        onsubmit={connect}
+        onclose={() => (connecting = false)}
+      /></Modal
+    >{/if}
+  {#if settings && snapshot}<Modal
+      label="Space settings"
+      onclose={() => (settings = false)}
+      >{@render errorNotice()}{#key snapshot.profile.id}<Settings
+          {snapshot}
+          {busy}
+          {request}
+          onclose={() => (settings = false)}
+        />{/key}</Modal
+    >{/if}
   <main class="workspace">
-    {#if prefs.spaces}<aside
-        class="spaces panel"
-        aria-label="Profiles and channels"
+    <aside class="space-rail" aria-label="Spaces">
+      <div
+        class="brand"
+        title="Pheidippides · encrypted agent messaging"
+        aria-label="Pheidippides"
       >
-        <div class="row">
-          <h2>Spaces</h2>
-          <button
-            aria-label="Hide spaces"
-            onclick={() => (prefs.spaces = false)}>‹</button
-          >
-        </div>
-        {#each profiles as profile (profile.id)}<section class="space-item">
-            <button
-              class="space-button"
+        <MessageCircle size={23} strokeWidth={1.75} />
+      </div>
+      {#if prefs.spaces}<div class="space-list">
+          {#each profiles as profile (profile.id)}<button
+              class="space-avatar"
               class:active={selected === profile.id}
+              title={`${profile.name} · ${profile.server}`}
+              aria-label={`Open ${profile.name}`}
+              aria-pressed={selected === profile.id}
               disabled={busy}
               onclick={() => selectProfile(profile.id)}
-              >{profile.name}<small>{profile.server}</small></button
-            >
-            {#if selected === profile.id && snapshot}<nav aria-label="Channels">
-                <button class:active={!channel} onclick={() => (channel = '')}
-                  >All channels</button
-                >{#each snapshot.channels as c (c.id)}<button
-                    class:active={channel === c.name}
-                    onclick={() => (channel = c.name)}>{c.name}</button
-                  >{/each}
-              </nav>{/if}
-          </section>{/each}
-        {#if !profiles.length}<p class="muted">
-            Connect with a GUI invitation, or create your first space.
-          </p>{/if}
-      </aside>{/if}
-    {#if prefs.threads}<section class="threads panel" aria-label="Threads">
-        <div class="row">
-          <h2>{channel || 'Threads'}</h2>
+              >{monogram(profile.name)}<span
+                class="status-dot"
+                class:offline={!!syncErrors[profile.id]}
+              ></span></button
+            >{/each}
+        </div>{/if}
+      <div class="rail-actions">
+        <IconButton
+          icon={prefs.spaces ? PanelLeftClose : Layers}
+          label={prefs.spaces ? 'Hide spaces' : 'Show spaces'}
+          onclick={() => (prefs.spaces = !prefs.spaces)}
+        />
+        {#if !prefs.threads}<IconButton
+            icon={PanelLeft}
+            label="Show thread list"
+            onclick={() => (prefs.threads = true)}
+          />{/if}
+        <IconButton
+          icon={Plus}
+          label="Connect"
+          disabled={busy}
+          onclick={() => (connecting = true)}
+        />
+        <IconButton
+          icon={prefs.notifications ? Bell : BellOff}
+          label={prefs.notifications
+            ? 'Disable notifications'
+            : 'Enable notifications'}
+          active={prefs.notifications}
+          onclick={() => toggleNotifications(!prefs.notifications)}
+        />
+        <IconButton
+          icon={SettingsIcon}
+          label="Space settings"
+          disabled={!snapshot || busy}
+          onclick={() => (settings = true)}
+        />
+      </div>
+    </aside>
+    {#if prefs.threads}<section class="threads" aria-label="Threads">
+        <header class="sidebar-heading">
+          <div>
+            <small class="eyebrow">SPACE</small>
+            <h1>{snapshot?.profile.name ?? 'Pheidippides'}</h1>
+          </div>
+          <div class="inline-actions">
+            <IconButton
+              icon={SquarePen}
+              label="New thread"
+              disabled={!selected || busy}
+              onclick={newThread}
+            /><IconButton
+              icon={PanelLeftClose}
+              label="Hide thread list"
+              onclick={() => (prefs.threads = false)}
+            />
+          </div>
+        </header>
+        <nav class="channels" aria-label="Channels">
           <button
-            aria-label="Hide thread list"
-            onclick={() => (prefs.threads = false)}>‹</button
+            class="channel-pill"
+            class:active={!channel}
+            title="All channels"
+            aria-label="All channels"
+            aria-pressed={!channel}
+            onclick={() => (channel = '')}
+            ><Layers size={16} /><span>All</span></button
+          >
+          {#each snapshot?.channels ?? [] as c (c.id)}<button
+              class="channel-pill"
+              class:active={channel === c.name}
+              title={c.name}
+              aria-label={`Channel ${c.name}`}
+              aria-pressed={channel === c.name}
+              onclick={() => (channel = c.name)}
+              >{#if c.kind === 'dm' || c.kind === 'self'}<User
+                  size={16}
+                />{:else}<Hash size={16} />{/if}<span
+                >{c.name.replace(/^[#@]/, '')}</span
+              ></button
+            >{/each}
+        </nav>
+        <div class="filter-bar" aria-label="Thread filters">
+          {#each filters as item}<IconButton
+              icon={item.icon}
+              label={item.label}
+              active={filter === item.value}
+              pressed={filter === item.value}
+              onclick={() => (filter = item.value)}
+            />{/each}<span class="thread-count" title="Threads in this view"
+            >{visibleThreads.length}</span
           >
         </div>
-        <label class="filter"
-          >Show<select bind:value={filter}
-            ><option value="all">All threads</option><option value="unread"
-              >Unread</option
-            ><option value="agents">My agents’ activity</option><option
-              value="mentions">Mentions</option
-            ></select
-          ></label
-        >
-        {#each visibleThreads as entry (entry.id)}<button
-            class="thread-card"
-            class:active={selectedThread === entry.id}
-            class:unread={entry.unread}
-            disabled={busy}
-            onclick={() => {
-              prefs.view = true;
-              void selectThread(entry.id);
-            }}
-            ><span class="row"
-              ><strong>{entry.title || 'Untitled thread'}</strong
-              >{#if entry.unread}<span aria-label="Unread" class="dot"
-                ></span>{/if}</span
-            ><small>{entry.channel} · to: {entry.to} · {entry.from}</small
-            >{#if prefs.metadata}<small
-                >{new Date(
-                  entry.created_at * 1000,
-                ).toLocaleString()}{entry.mentioned
-                  ? ' · mentioned you'
-                  : ''}</small
-              >{/if}{#if prefs.summary && entry.summary}<p class="excerpt">
-                {entry.summary}
-              </p>{/if}{#if prefs.reactions && entry.reactions.length}<small
-                ><ReactionSummaryView summary={entry.reaction_summary} /></small
-              >{/if}</button
-          >{/each}
-        {#if !visibleThreads.length}<p class="muted">
-            {loading ? 'Loading threads…' : 'No threads in this view.'}
-          </p>{/if}
+        <div class="thread-list">
+          {#each visibleThreads as entry (entry.id)}<button
+              class="thread-card"
+              class:active={selectedThread === entry.id}
+              class:unread={entry.unread}
+              title={[
+                entry.title || 'Untitled thread',
+                prefs.summary ? entry.summary : '',
+                prefs.reactions
+                  ? `${entry.reaction_summary.up} likes · ${entry.reaction_summary.down} dislikes · ${entry.reaction_summary.ack} acknowledgements`
+                  : '',
+              ]
+                .filter(Boolean)
+                .join('\n')}
+              disabled={busy}
+              onclick={() => {
+                prefs.view = true;
+                void selectThread(entry.id);
+              }}
+            >
+              <span class="card-title"
+                ><strong>{entry.title || 'Untitled thread'}</strong
+                >{#if entry.mentioned}<AtSign
+                    size={14}
+                    class="mention"
+                    aria-label="Mentioned you"
+                  />{:else if entry.unread}<span aria-label="Unread" class="dot"
+                  ></span>{/if}</span
+              >
+              <span class="card-meta"
+                ><span class="channel-name">{entry.channel}</span><span
+                  class="author-name"
+                  title={entry.from}>{entry.from.split('/')[0]}</span
+                >{#if prefs.reactions && entry.reaction_summary.claims.length}<span
+                    class="claim-badge"
+                    title={`Claimed by ${entry.reaction_summary.claims.map((c) => `${c.author}/${c.handle}`).join(', ')}`}
+                    ><Flag size={12} />{entry.reaction_summary.claims[0]
+                      .author}</span
+                  >{/if}{#if prefs.metadata}<time
+                    title={dateLabel(entry.created_at)}
+                    >{relativeTime(entry.created_at)}</time
+                  >{/if}</span
+              >
+              {#if entry.to !== entry.channel}<span
+                  class="recipient"
+                  title="Addressed to">{entry.to}</span
+                >{/if}
+            </button>{/each}
+          {#if !visibleThreads.length}<div class="list-empty">
+              <Inbox size={28} strokeWidth={1.25} />
+              <p>{loading ? 'Loading threads…' : 'No threads in this view.'}</p>
+            </div>{/if}
+        </div>
       </section>{/if}
-    {#if prefs.view}<section class="thread-view panel" aria-label="Thread view">
-        <div class="row view-controls">
-          <span class="muted"
-            >{snapshot?.profile.display_name ?? 'Human view'}{busy
-              ? ' · saving…'
-              : ''}</span
-          ><button
-            aria-label="Hide thread view"
-            onclick={() => (prefs.view = false)}>›</button
-          >
+    {#if prefs.view}<section class="thread-view" aria-label="Thread view">
+        <div class="thread-scroll">
+          {#if thread && snapshot}<ThreadPane
+              {thread}
+              {prefs}
+              {busy}
+              personId={snapshot.profile.person_id}
+              onreact={(message, reaction, remove) =>
+                request(
+                  { kind: 'react', message, reaction, remove },
+                  api.nothing,
+                )}
+              onunread={async () => {
+                const result = await request(
+                  { kind: 'unread', thread: selectedThread },
+                  api.nothing,
+                );
+                if (result === null) {
+                  selectedThread = '';
+                  thread = null;
+                  threadSelection.change();
+                }
+              }}
+            />
+          {:else if !composing}<div class="empty">
+              <div class="empty-symbol">
+                <MessageCircle size={32} strokeWidth={1.25} />
+              </div>
+              <h2>{loading ? 'Loading…' : 'Room to follow the work.'}</h2>
+              <p class="muted">
+                {profiles.length
+                  ? 'Choose a thread to get started.'
+                  : 'Connect a space to get started.'}
+              </p>
+              {#if !profiles.length}<IconButton
+                  icon={Plus}
+                  label="Connect a space"
+                  onclick={() => (connecting = true)}
+                />{/if}
+            </div>
+          {:else}<header class="thread-heading">
+              <small class="eyebrow">COMPOSE</small>
+              <h2>New thread</h2>
+            </header>{/if}
         </div>
-        {#if thread && snapshot}<ThreadPane
-            {thread}
-            {prefs}
-            {busy}
-            personId={snapshot.profile.person_id}
-            onreact={(message, reaction, remove) =>
-              request(
-                { kind: 'react', message, reaction, remove },
-                api.nothing,
-              )}
-            onunread={async () => {
-              const result = await request(
-                { kind: 'unread', thread: selectedThread },
-                api.nothing,
-              );
-              if (result === null) {
-                selectedThread = '';
-                thread = null;
-                threadSelection.change();
-              }
-            }}
-          />
-        {:else if !composing}<div class="empty">
-            <h2>
-              {loading ? 'Loading…' : 'A little space to follow the work.'}
-            </h2>
-            <p class="muted">
-              Choose a thread to read, react, or write as yourself.
-            </p>
-          </div>{/if}
         {#if selected && (composing || thread)}<form
             class="composer"
             onsubmit={(event) => {
@@ -525,44 +675,52 @@
               void send();
             }}
           >
-            {#if composing}<h2>New thread</h2>
-              <label
-                >To<input
-                  bind:value={to}
-                  required
-                  placeholder="#all or @person"
-                /></label
-              ><label
-                >Title<input
-                  bind:value={title}
-                  required
-                  maxlength="240"
-                /></label
-              >{/if}<label
-              >Write as human<textarea
+            {#if composing}<div class="new-thread-fields">
+                <label
+                  >To<input
+                    bind:value={to}
+                    required
+                    placeholder="#all or @person"
+                  /></label
+                ><label
+                  >Title<input
+                    bind:value={title}
+                    required
+                    maxlength="240"
+                    placeholder="What needs attention?"
+                  /></label
+                >
+              </div>{/if}
+            <div class="composer-line">
+              <span
+                class="avatar human-avatar"
+                title={`Write as ${snapshot?.profile.display_name ?? 'yourself'} · GUI device`}
+                ><User size={17} /></span
+              ><textarea
+                aria-label="Message"
                 bind:value={body}
                 required
-                rows="4"
+                rows="1"
                 maxlength="262144"
-                placeholder="Add context or steer the conversation…"
-              ></textarea></label
-            >
-            <div class="row">
-              <small class="muted"
-                >Sent from GUI{snapshot?.profile.summarizer_configured
-                  ? ' · local summarizer enabled'
-                  : ' · no summary required'}</small
-              ><button
-                class="primary"
+                placeholder="Add a human perspective…"
+                bind:this={composerInput}
+              ></textarea><IconButton
+                icon={SendHorizontal}
+                label={busy
+                  ? 'Sending…'
+                  : composing
+                    ? 'Start thread'
+                    : 'Send reply'}
+                variant="primary"
                 type="submit"
                 disabled={busy || !body.trim()}
-                >{composing ? 'Start thread' : 'Send reply'}</button
-              >
+              />
             </div>
           </form>{/if}
       </section>{/if}
-    {#if !prefs.spaces && !prefs.threads && !prefs.view}<p class="muted empty">
-        Use View to bring panels back.
-      </p>{/if}
+    {#if !prefs.threads && !prefs.view}<div class="empty">
+        <MessageCircle size={32} />
+        <p class="muted">Restore a panel using the view controls.</p>
+      </div>{/if}
   </main>
 </div>

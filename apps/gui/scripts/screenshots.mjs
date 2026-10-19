@@ -88,6 +88,25 @@ try {
         );
         if (await page.getByRole('alert').count())
           throw new Error(await page.getByRole('alert').allTextContents());
+        const layoutIssue = await page.evaluate(() => {
+          if (document.documentElement.scrollWidth > innerWidth)
+            return 'Workspace overflows horizontally';
+          const dialog = document.querySelector('dialog[open]');
+          if (dialog) {
+            const bounds = dialog.getBoundingClientRect();
+            if (
+              bounds.x < 0 ||
+              bounds.y < 0 ||
+              bounds.right > innerWidth ||
+              bounds.bottom > innerHeight
+            )
+              return 'Dialog extends outside viewport';
+            if (!dialog.contains(document.activeElement))
+              return 'Focus escaped the modal';
+          }
+          return '';
+        });
+        if (layoutIssue) throw new Error(`${view}: ${layoutIssue}`);
         const file = `${view}-${colorScheme}-${viewport.width}x${viewport.height}.png`;
         await page.screenshot({
           path: fileURLToPath(new URL(file, output)),
@@ -95,6 +114,7 @@ try {
         });
         files.push(file);
       }
+      await page.clock.setFixedTime(new Date('2026-10-20T09:30:00Z'));
       await page.goto(url);
       await page
         .getByRole('button', {
@@ -106,9 +126,62 @@ try {
         .getByRole('region', { name: 'Thread summary', exact: true })
         .waitFor();
       await capture('main');
+      for (const panel of ['spaces', 'thread list', 'thread view']) {
+        await page
+          .getByRole('button', { name: `Hide ${panel}`, exact: true })
+          .click();
+        await page
+          .getByRole('button', { name: `Show ${panel}`, exact: true })
+          .click();
+      }
+      await page.locator('.summary-card summary').click();
+      if (
+        (await page.locator('.summary-card details').getAttribute('open')) !==
+        null
+      )
+        throw new Error('Summary did not collapse');
+      await page.locator('.summary-card summary').click();
+      await page.locator('.appearance > summary').click();
+      for (const decoration of [
+        'summary',
+        'reactions',
+        'attachments',
+        'metadata',
+      ])
+        await page
+          .getByRole('checkbox', { name: decoration, exact: true })
+          .uncheck();
+      if (
+        await page
+          .locator('.summary-card, .reaction-bar, .attachments, .message-meta')
+          .count()
+      )
+        throw new Error('Hidden decorations remain visible');
+      for (const decoration of [
+        'summary',
+        'reactions',
+        'attachments',
+        'metadata',
+      ])
+        await page
+          .getByRole('checkbox', { name: decoration, exact: true })
+          .check();
+      await page.locator('.appearance > summary').click();
+      const message = page.getByRole('textbox', {
+        name: 'Message',
+        exact: true,
+      });
+      await message.fill(
+        Array(20).fill('A longer human perspective.').join('\n'),
+      );
+      if ((await message.boundingBox()).height > 161)
+        throw new Error('Composer expanded beyond its height limit');
+      await message.fill('');
       // Reload restores the unread fixture, including the thread just read above.
       await page.reload();
-      await page.getByRole('combobox').selectOption('unread');
+      await page
+        .getByRole('button', { name: 'Unread threads', exact: true })
+        .click();
       await page
         .getByRole('button', {
           name: 'Encrypted relay ready for review',
@@ -116,13 +189,24 @@ try {
         })
         .waitFor();
       await capture('unread');
+      const workspaceBounds = await page.locator('.workspace').boundingBox();
       await page
         .getByRole('button', { name: 'Space settings', exact: true })
         .click();
       await page
         .getByRole('region', { name: 'Space settings', exact: true })
         .waitFor();
+      if (
+        JSON.stringify(workspaceBounds) !==
+        JSON.stringify(await page.locator('.workspace').boundingBox())
+      )
+        throw new Error('Opening settings moved the workspace');
       await capture('settings');
+      for (const section of ['Members', 'Devices', 'Recovery']) {
+        await page.getByRole('button', { name: section, exact: true }).click();
+        await capture(`settings-${section.toLowerCase()}`);
+      }
+      await page.getByRole('button', { name: 'General', exact: true }).click();
       await page
         .getByRole('region', { name: 'Space settings', exact: true })
         .getByRole('button', { name: 'Close', exact: true })
@@ -133,13 +217,18 @@ try {
         .waitFor();
       await capture('connect');
       await page
-        .getByRole('region', { name: 'Connect a space', exact: true })
-        .getByRole('button', { name: 'Close', exact: true })
+        .getByRole('button', { name: 'Create space', exact: true })
         .click();
-      await page.getByRole('combobox').selectOption('all');
+      await capture('create');
+      await page.keyboard.press('Escape');
+      if (await page.getByRole('dialog').count())
+        throw new Error('Escape did not close the connection dialog');
+      await page
+        .getByRole('button', { name: 'All threads', exact: true })
+        .click();
       await page
         .getByRole('button', {
-          name: 'apps https://phi.example.com',
+          name: 'Open apps',
           exact: true,
         })
         .click();
@@ -147,6 +236,10 @@ try {
         .getByText('No threads in this view.', { exact: true })
         .waitFor();
       await capture('empty');
+      await page
+        .getByRole('button', { name: 'New thread', exact: true })
+        .click();
+      await capture('compose');
       await context.close();
     }
   }

@@ -1,4 +1,6 @@
 <script lang="ts">
+  import IconButton from './IconButton.svelte';
+  import { X, Link, Plus, ArrowRight, ShieldCheck } from '@lucide/svelte';
   import type { Provision } from './lib/api';
   let {
     busy,
@@ -20,13 +22,22 @@
 <section class="setup panel" aria-label="Connect a space">
   <div class="row">
     <h2>Connect a space</h2>
-    <button onclick={onclose}>Close</button>
+    <IconButton icon={X} label="Close" onclick={onclose} />
   </div>
-  <div class="row">
-    <button class:active={mode === 'join'} onclick={() => (mode = 'join')}
-      >Join with link</button
-    ><button class:active={mode === 'create'} onclick={() => (mode = 'create')}
-      >Create space</button
+  <div class="mode-switch" aria-label="Connection method">
+    <button
+      title="Join with link"
+      aria-label="Join with link"
+      class:active={mode === 'join'}
+      aria-pressed={mode === 'join'}
+      onclick={() => (mode = 'join')}><Link size={16} />Join</button
+    >
+    <button
+      title="Create space"
+      aria-label="Create space"
+      class:active={mode === 'create'}
+      aria-pressed={mode === 'create'}
+      onclick={() => (mode = 'create')}><Plus size={16} />Create</button
     >
   </div>
   <form
@@ -89,12 +100,16 @@
         /></label
       >
     {/if}
-    <p class="muted">
-      This creates a separate GUI identity. Private keys stay in your OS
-      keychain.
-    </p>
-    <button class="primary" type="submit" disabled={busy}
-      >{mode === 'join' ? 'Join space' : 'Create space'}</button
-    >
+    <div class="form-footer">
+      <small class="muted"
+        ><ShieldCheck size={15} />Keys stay in your OS keychain.</small
+      ><IconButton
+        icon={ArrowRight}
+        label={mode === 'join' ? 'Join space' : 'Create space'}
+        variant="primary"
+        type="submit"
+        disabled={busy}
+      />
+    </div>
   </form>
 </section>
