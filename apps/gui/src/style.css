@@ -242,8 +242,33 @@ time {
   text-transform: capitalize;
 }
 .check input {
-  width: auto;
-  accent-color: var(--accent);
+  appearance: none;
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  padding: 0;
+  margin: 0;
+  border: 1.5px solid var(--muted);
+  border-radius: 4px;
+  background: var(--surface);
+}
+.check input::after {
+  content: '';
+  width: 8px;
+  height: 4px;
+  border-left: 2px solid var(--bg);
+  border-bottom: 2px solid var(--bg);
+  transform: translateY(-1px) rotate(-45deg);
+  opacity: 0;
+}
+.check input:checked {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+.check input:checked::after {
+  opacity: 1;
 }
 .threads {
   width: 280px;
@@ -484,6 +509,7 @@ time {
   gap: 12px;
 }
 .message {
+  position: relative;
   padding: 15px 17px;
   background: var(--surface);
   border: 1px solid var(--line);
@@ -561,6 +587,26 @@ time {
   align-items: center;
   margin-top: 12px;
   min-height: 27px;
+}
+.reaction-bar.floating {
+  position: absolute;
+  top: 0;
+  right: 12px;
+  transform: translateY(-50%);
+  z-index: 1;
+  margin: 0;
+  padding: 4px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  box-shadow: 0 4px 12px #0002;
+  opacity: 0;
+  pointer-events: none;
+}
+.message:hover .reaction-bar.floating,
+.message:focus-within .reaction-bar.floating {
+  opacity: 1;
+  pointer-events: auto;
 }
 .reaction-bar .icon-button {
   width: auto;
@@ -1015,6 +1061,10 @@ code {
   display: inline-flex;
 }
 @media (hover: none) {
+  .reaction-bar.floating {
+    opacity: 1;
+    pointer-events: auto;
+  }
   .reaction-bar .reaction-empty {
     display: inline-flex;
   }

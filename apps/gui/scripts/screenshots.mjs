@@ -164,7 +164,21 @@ try {
         'none'
       )
         throw new Error('Empty reaction is visible at rest');
-      await page.locator('.message').nth(1).hover();
+      const quietMessage = page.locator('.message').nth(1);
+      const restingBounds = await quietMessage.boundingBox();
+      const bottomSpace = await quietMessage.evaluate(
+        (card) =>
+          card.getBoundingClientRect().bottom -
+          card.querySelector('.body').getBoundingClientRect().bottom,
+      );
+      if (bottomSpace > 30)
+        throw new Error('Empty reactions reserve card space');
+      await quietMessage.hover();
+      if (
+        JSON.stringify(restingBounds) !==
+        JSON.stringify(await quietMessage.boundingBox())
+      )
+        throw new Error('Hover reactions moved or resized the message');
       if (
         !(await quietReaction.evaluate((el) => el.getClientRects().length > 0))
       )
@@ -344,6 +358,23 @@ try {
                 first.x !== second.x
               );
             });
+          const matchingCheckboxes = await page
+            .locator('.view-options')
+            .evaluate((options) => {
+              const checked = options.querySelector('input:checked');
+              const unchecked = options.querySelector('input:not(:checked)');
+              const first = getComputedStyle(checked);
+              const second = getComputedStyle(unchecked);
+              return (
+                ['width', 'height', 'borderRadius', 'appearance'].every(
+                  (key) => first[key] === second[key],
+                ) && first.appearance === 'none'
+              );
+            });
+          if (!matchingCheckboxes)
+            throw new Error(
+              'Checked and unchecked controls have different shapes',
+            );
           if (!columns)
             throw new Error(
               'View options are not a consistent two-column grid',

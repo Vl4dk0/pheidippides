@@ -147,6 +147,7 @@
             </ul>{/if}
           {#if prefs.reactions}<div
               class="reaction-bar"
+              class:floating={message.reactions.length === 0}
               role="toolbar"
               tabindex="0"
               aria-label={`Reactions to message ${message.number}`}
