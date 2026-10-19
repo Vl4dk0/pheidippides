@@ -66,6 +66,7 @@ export const snapshotSchema = z.object({
   threads: z.array(entrySchema),
   retention_days: integer.max(4294967295),
   summary_mode: summaryMode,
+  summary_every: integer.min(1).max(4294967295),
   members: z.record(id, z.string()),
   devices: z.array(
     z.object({
@@ -146,6 +147,7 @@ const requestSchema = z.discriminatedUnion('kind', [
     kind: z.literal('settings'),
     retention_days: integer.max(4294967295),
     summary_mode: summaryMode,
+    summary_every: integer.min(1).max(4294967295),
   }),
   z.object({
     kind: z.literal('display_name'),

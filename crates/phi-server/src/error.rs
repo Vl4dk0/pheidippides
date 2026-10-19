@@ -26,6 +26,7 @@ impl ApiError {
     pub fn conflict(message: impl ToString) -> Self {
         Self(ErrorBody::Conflict {
             message: message.to_string(),
+            claim: None,
         })
     }
     pub fn unauthorized() -> Self {

@@ -4,6 +4,7 @@ import {
   pollSchema,
   threadSchema,
   reactionSummarySchema,
+  snapshotSchema,
   type Entry,
 } from './api';
 import {
@@ -101,6 +102,11 @@ describe('desktop state boundary', () => {
         messages: [message],
       }).success,
     ).toBe(false);
+    const interval = snapshotSchema.shape.summary_every;
+    expect(interval.parse(3)).toBe(3);
+    for (const bad of [0, -1, 1.5, 4294967296]) {
+      expect(interval.safeParse(bad).success).toBe(false);
+    }
     expect(entrySchema.parse(entry)).toEqual(entry);
   });
   it('keeps the initial event backlog quiet and notifies only on mentions or DMs', () => {

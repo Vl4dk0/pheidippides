@@ -809,9 +809,10 @@ impl Client {
             .rposition(|message| message.content.summary.is_some())
             .map_or(history.len(), |index| history.len() - index - 1)
             .saturating_add(1);
+        let summary_every = self.settings.summary_every;
         let summary_required = self.settings.summary_mode == SummaryMode::Required
             && self.profile.kind == DeviceKind::Cli
-            && since_summary >= 3;
+            && u64::try_from(since_summary).unwrap_or(u64::MAX) >= u64::from(summary_every);
         if options.summary.is_none()
             && (summary_required || self.profile.summarizer.is_some())
             && history.iter().any(|m| m.verification_error.is_some())
@@ -831,7 +832,7 @@ impl Client {
                 options.summary = Some(run_summarizer(command, &input).await?);
             } else if summary_required {
                 return Err(user(format!(
-                    "--summary is required now: {since_summary} messages since the last summary (including this message; threshold 3) and summary_mode=required; summarize the whole thread or configure a summarizer in profile.toml"
+                    "--summary is required now: {since_summary} messages since the last summary (including this message; threshold {summary_every}) and summary_mode=required; summarize the whole thread or configure a summarizer in profile.toml"
                 )));
             }
         }
@@ -1294,10 +1295,11 @@ impl Client {
                         "verification failed · to: unavailable · event {seq}: {description} (recorded locally; skipped)\n"
                     ));
                 }
+                WaitEntry::Reaction(notice) => output.push_str(&notice.text()),
                 WaitEntry::Settings(change) => {
                     output.push_str(&format!(
-                        "to: #all · space settings changed: retention_days={} summary_mode={:?}\n",
-                        change.data.settings.retention_days, change.data.settings.summary_mode
+                        "to: #all · space settings changed: retention_days={} summary_mode={:?} summary_every={}\n",
+                        change.data.settings.retention_days, change.data.settings.summary_mode, change.data.settings.summary_every
                     ));
                 }
                 WaitEntry::Revocation(revocation) => {
@@ -1700,7 +1702,7 @@ impl Client {
         } else {
             format!("/messages/{message}/reactions")
         };
-        let response: ReactionResponse = self
+        let response: Result<ReactionResponse> = self
             .http
             .send(
                 if remove { Method::DELETE } else { Method::POST },
@@ -1709,7 +1711,28 @@ impl Client {
                     reaction: reaction.clone(),
                 },
             )
-            .await?;
+            .await;
+        let response = match response {
+            Err(Error::ClaimConflict(claim)) => {
+                if self.directory.certificate(claim.data.device_id).is_err() {
+                    self.refresh().await?;
+                }
+                self.directory.verify_reaction(&claim)?;
+                if claim.data.message_id != message
+                    || claim.data.kind != ReactionKind::Claim
+                    || claim.data.remove
+                {
+                    return Err(user("server returned an invalid conflicting claim"));
+                }
+                return Err(user(format!(
+                    "already claimed by {}/{} {}",
+                    self.person_name(claim.data.person_id),
+                    claim.data.handle,
+                    format_last_seen(claim.data.created_at)
+                )));
+            }
+            result => result?,
+        };
         self.directory.verify_reaction(&response)?;
         if response != reaction {
             return Err(user("server changed reaction"));
@@ -1847,7 +1870,14 @@ impl Client {
                     return Err(user("invalid event sequence or scope"));
                 }
                 previous = event.seq;
-                let result = self.process_wait_event(&event);
+                let result = match self.process_wait_event(&event).await {
+                    Err(
+                        error @ (Error::Network(_)
+                        | Error::RateLimited(_)
+                        | Error::Server { status: 500.., .. }),
+                    ) => return Err(error),
+                    result => result,
+                };
                 let error = result.as_ref().err().map(ToString::to_string);
                 let unchanged = self
                     .cache
@@ -1926,7 +1956,7 @@ impl Client {
             // with the original deadline, rather than returning a false notification.
         }
     }
-    fn process_wait_event(&mut self, event: &Event) -> Result<Option<WaitEntry>> {
+    async fn process_wait_event(&mut self, event: &Event) -> Result<Option<WaitEntry>> {
         let entry = match event.event.clone() {
             EventData::Message(message) => {
                 if message.seq != event.seq {
@@ -1985,7 +2015,62 @@ impl Client {
             EventData::Reaction(reaction) => {
                 self.directory.verify_reaction(&reaction)?;
                 self.save_reaction(&reaction)?;
-                return Ok(None);
+                if reaction.data.person_id == self.profile.person_id
+                    || !matches!(
+                        (reaction.data.kind, reaction.data.remove),
+                        (ReactionKind::Ack, false) | (ReactionKind::Claim, _)
+                    )
+                {
+                    return Ok(None);
+                }
+                let target = match self.cached_message(reaction.data.message_id)? {
+                    Some(message) => message,
+                    None => {
+                        self.http
+                            .get(&format!("/messages/{}", reaction.data.message_id))
+                            .await?
+                    }
+                };
+                if target.id != reaction.data.message_id {
+                    return Err(user("reaction target lookup changed message"));
+                }
+                self.directory.verify_message(&target)?;
+                let thread = target.envelope.thread_id.unwrap_or(target.id);
+                let history = self.load_thread(thread).await?;
+                let participating = history.iter().any(|message| {
+                    message.verification_error.is_none()
+                        && message.message.seq < event.seq
+                        && (message.message.author_person == self.profile.person_id
+                            || message
+                                .message
+                                .envelope
+                                .mentions
+                                .iter()
+                                .any(|mention| mention.person_id == self.profile.person_id))
+                });
+                if !participating {
+                    return Ok(None);
+                }
+                let message = history
+                    .iter()
+                    .find(|message| {
+                        message.message.id == target.id && message.verification_error.is_none()
+                    })
+                    .ok_or_else(|| user("reaction target is unavailable or unverifiable"))?;
+                let title = history
+                    .first()
+                    .and_then(|message| message.content.title.clone())
+                    .ok_or_else(|| user("reaction thread title unavailable"))?;
+                WaitEntry::Reaction(ReactionNotice {
+                    author: format!(
+                        "{}/{}",
+                        self.person_name(reaction.data.person_id),
+                        reaction.data.handle
+                    ),
+                    reference: message.reference(),
+                    title,
+                    reaction,
+                })
             }
             EventData::Settings(change) => {
                 self.settings = self.cache.accept_settings(&self.directory, &change)?;
@@ -2287,7 +2372,16 @@ impl Client {
                     _ => return Err(user("summary_mode must be required or off")),
                 }
             }
-            _ => return Err(user("setting must be retention_days or summary_mode")),
+            "summary_every" => {
+                settings.summary_every = value
+                    .parse()
+                    .map_err(|_| user("summary_every must be a positive integer"))?;
+            }
+            _ => {
+                return Err(user(
+                    "setting must be retention_days, summary_mode or summary_every",
+                ));
+            }
         }
         let change = sign_settings(
             SettingsChangeData {

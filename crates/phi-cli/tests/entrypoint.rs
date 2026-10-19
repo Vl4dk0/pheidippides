@@ -129,6 +129,16 @@ async fn cli_workflow_references_wait_skill_and_exit_codes() -> phi_core::Result
     let read_body = phi(binary, workspace.path(), &["read", &root]).await?;
     assert!(read_body.contains(body));
     phi(binary, workspace.path(), &["react", &root, "ack"]).await?;
+    let conflict = phi(binary, workspace.path(), &["react", &root, "ack"])
+        .await
+        .err()
+        .ok_or_else(|| phi_core::Error::User("duplicate ack must fail".into()))?;
+    assert!(
+        conflict.to_string().contains("conflict: POST /messages/")
+            && conflict
+                .to_string()
+                .contains("ack reaction already exists on message")
+    );
     let replied = phi(
         binary,
         workspace.path(),
@@ -149,6 +159,19 @@ async fn cli_workflow_references_wait_skill_and_exit_codes() -> phi_core::Result
             && !read.contains("UNTRUSTED")
     );
     phi(binary, workspace.path(), &["react", &reply, "claim"]).await?;
+    let conflict = phi(
+        binary,
+        workspace.path(),
+        &["--as", "observer", "react", &reply, "claim"],
+    )
+    .await
+    .err()
+    .ok_or_else(|| phi_core::Error::User("claim conflict must fail".into()))?;
+    assert!(
+        conflict
+            .to_string()
+            .contains("already claimed by alice/main just now")
+    );
     assert!(
         phi(binary, workspace.path(), &["wait", "0"])
             .await?
@@ -181,6 +204,17 @@ async fn cli_workflow_references_wait_skill_and_exit_codes() -> phi_core::Result
             && !search.contains("UNTRUSTED")
     );
     phi(binary, workspace.path(), &["react", &reply, "ack"]).await?;
+    phi(
+        binary,
+        workspace.path(),
+        &["space", "set", "summary_every", "4"],
+    )
+    .await?;
+    assert!(
+        phi(binary, workspace.path(), &["space", "show"])
+            .await?
+            .contains("summary_every=4")
+    );
     phase.store(1, std::sync::atomic::Ordering::SeqCst);
     let receipt = phi(
         binary,

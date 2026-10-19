@@ -182,15 +182,35 @@ pub struct DownloadBlobResponse {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "error", rename_all = "snake_case")]
 pub enum ErrorBody {
-    Invalid { message: String },
-    Unauthorized { message: String },
-    Forbidden { message: String },
-    NotFound { message: String },
-    Conflict { message: String },
-    TooLarge { message: String },
-    RateLimited { retry_after: u64 },
-    Upgrade { required_major: u16 },
-    Internal { message: String },
+    Invalid {
+        message: String,
+    },
+    Unauthorized {
+        message: String,
+    },
+    Forbidden {
+        message: String,
+    },
+    NotFound {
+        message: String,
+    },
+    Conflict {
+        message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        claim: Option<Box<Reaction>>,
+    },
+    TooLarge {
+        message: String,
+    },
+    RateLimited {
+        retry_after: u64,
+    },
+    Upgrade {
+        required_major: u16,
+    },
+    Internal {
+        message: String,
+    },
 }
 impl ErrorBody {
     pub fn status_code(&self) -> u16 {

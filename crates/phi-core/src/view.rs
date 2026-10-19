@@ -63,9 +63,31 @@ pub struct InboxEntry {
 #[derive(Clone, Debug)]
 pub enum WaitEntry {
     Message(InboxEntry),
+    Reaction(ReactionNotice),
     Settings(SettingsChange),
     Revocation(Revocation),
     VerificationFailure { seq: Seq, description: String },
+}
+
+#[derive(Clone, Debug)]
+pub struct ReactionNotice {
+    pub reaction: Reaction,
+    pub reference: MessageReference,
+    pub title: String,
+    pub author: String,
+}
+impl ReactionNotice {
+    pub fn text(&self) -> String {
+        let kind = match (self.reaction.data.kind, self.reaction.data.remove) {
+            (ReactionKind::Claim, true) => "unclaim",
+            (ReactionKind::Claim, false) => "claim",
+            (ReactionKind::Ack, _) => "ack",
+            (ReactionKind::Up, _) => "up",
+            (ReactionKind::Down, _) => "down",
+        };
+        let title = self.title.split_whitespace().collect::<Vec<_>>().join(" ");
+        format!("{} {kind} {} ({title})\n", self.author, self.reference)
+    }
 }
 
 pub(crate) fn compose_thread(

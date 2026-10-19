@@ -19,6 +19,7 @@
   let name = $state(untrack(() => snapshot.profile.display_name));
   let retention = $state(untrack(() => snapshot.retention_days));
   let summaryMode = $state(untrack(() => snapshot.summary_mode));
+  let summaryEvery = $state(untrack(() => snapshot.summary_every));
   let code = $state('');
   let codeType = $state('');
   let confirmation = $state('');
@@ -81,6 +82,7 @@
           kind: 'settings',
           retention_days: retention,
           summary_mode: summaryMode,
+          summary_every: summaryEvery,
         },
         nothing,
       );
@@ -102,6 +104,17 @@
           >Off</option
         ></select
       ></label
+    >
+    <label
+      >Summary every N messages<input
+        type="number"
+        min="1"
+        max="4294967295"
+        step="1"
+        bind:value={summaryEvery}
+        required
+        disabled={summaryMode === 'off'}
+      /></label
     >
     <p class="muted">
       Retention removes whole inactive threads. Deletion beyond the server and

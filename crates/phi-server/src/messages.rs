@@ -3,7 +3,7 @@ use crate::{
     error::{ApiError, Result},
 };
 use phi_proto::*;
-use rusqlite::{named_params, params};
+use rusqlite::{OptionalExtension, named_params, params};
 
 // Notification routing shares one predicate so counts and long-polls agree without
 // changing person-wide read cursors or restricting access to other conversations.
@@ -47,7 +47,8 @@ impl Db {
                 )?;
                 r.id
             };
-            if db.space(a.sid())?.settings.summary_mode == SummaryMode::Required
+            let settings = db.space(a.sid())?.settings;
+            if settings.summary_mode == SummaryMode::Required
                 && a.cert.data.kind == DeviceKind::Cli
                 && !r.has_summary
             {
@@ -59,9 +60,10 @@ impl Db {
                     [thread.to_string()],
                     |row| row.get(0),
                 )?;
-                if since_summary >= 3 {
+                let summary_every = settings.summary_every;
+                if since_summary >= u64::from(summary_every) {
                     return Err(ApiError::invalid(format!(
-                        "--summary is required now: {since_summary} messages since the last summary (including this message; threshold 3) and summary_mode=required"
+                        "--summary is required now: {since_summary} messages since the last summary (including this message; threshold {summary_every}) and summary_mode=required"
                     )));
                 }
             }
@@ -274,6 +276,27 @@ impl Db {
                     ));
                 }
             } else {
+                if d.kind == ReactionKind::Claim {
+                    let existing: Option<String> = db.conn.query_row(
+                        "SELECT json FROM reactions WHERE message_id=? AND kind='claim'",
+                        [mid.to_string()], |row| row.get(0),
+                    ).optional()?;
+                    if let Some(existing) = existing {
+                        return Err(ApiError(ErrorBody::Conflict {
+                            message: format!("message {mid} is already claimed"),
+                            claim: Some(Box::new(serde_json::from_str(&existing)?)),
+                        }));
+                    }
+                } else {
+                    let exists: bool = db.conn.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM reactions WHERE message_id=? AND person_id=? AND handle=? AND kind=?)",
+                        params![mid.to_string(), a.person().to_string(), d.handle.as_str(), kind],
+                        |row| row.get(0),
+                    )?;
+                    if exists {
+                        return Err(ApiError::conflict(format!("{kind} reaction already exists on message {mid} for handle {}", d.handle)));
+                    }
+                }
                 db.conn.execute(
                     "INSERT INTO reactions VALUES(?,?,?,?,?)",
                     params![

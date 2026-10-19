@@ -386,11 +386,12 @@ async fn run(cli: Cli) -> Result<()> {
                         println!("space setting updated");
                     }
                     SpaceCommand::Show => println!(
-                        "{} · {}\nretention_days={}\nsummary_mode={:?}",
+                        "{} · {}\nretention_days={}\nsummary_mode={:?}\nsummary_every={}",
                         client.profile.name,
                         client.profile.space_id,
                         client.settings.retention_days,
-                        client.settings.summary_mode
+                        client.settings.summary_mode,
+                        client.settings.summary_every
                     ),
                     SpaceCommand::Create { .. } => {
                         unreachable!("handled before profile resolution")

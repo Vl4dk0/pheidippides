@@ -888,6 +888,20 @@ fn reactions_and_settings_authenticate_identity_and_removal() -> Result<(), Cryp
         &f.keys,
     )?;
     directory.verify_settings(&settings)?;
+    let mut legacy = serde_json::to_value(&settings)?;
+    if let Some(object) = legacy["data"]["settings"].as_object_mut() {
+        object.remove("summary_every");
+    }
+    directory.verify_settings(&serde_json::from_value(legacy)?)?;
+    settings.data.settings.summary_every = 5;
+    assert!(directory.verify_settings(&settings).is_err());
+    settings = sign_settings(settings.data, &f.keys)?;
+    directory.verify_settings(&settings)?;
+    let mut changed = settings.clone();
+    changed.data.settings.summary_every = 3;
+    assert!(directory.verify_settings(&changed).is_err());
+    changed.data.settings.summary_every = 0;
+    assert!(directory.verify_settings(&changed).is_err());
     settings.data.settings.retention_days = 0;
     assert!(directory.verify_settings(&settings).is_err());
     Ok(())
@@ -1081,6 +1095,7 @@ fn wire_validation_is_strict_bounded_and_major_versioned() -> Result<(), CryptoE
     markdown.validate()?;
     let settings = SpaceSettings::default();
     assert_eq!(settings.retention_days, 14);
+    assert_eq!(settings.summary_every, 3);
     assert_eq!(settings.rate_limits.messages_per_hour, 600);
     check_protocol(PROTOCOL_MAJOR).map_err(|_| CryptoError::Trust("wrong protocol"))?;
     let upgrade = match check_protocol(PROTOCOL_MAJOR + 1) {

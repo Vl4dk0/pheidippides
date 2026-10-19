@@ -10,6 +10,10 @@ pub enum Error {
     User(String),
     #[error("server HTTP {status}: {message}")]
     Server { status: u16, message: String },
+    #[error("conflict: {0}")]
+    Conflict(String),
+    #[error("claim conflict on message {}", .0.data.message_id)]
+    ClaimConflict(Box<phi_proto::Reaction>),
     #[error("authentication failed or device revoked; enroll this device again")]
     Auth,
     #[error("phi {client_major}.x can't talk to a {0}.x server — upgrade phi", client_major = PROTOCOL_MAJOR)]
@@ -93,6 +97,7 @@ impl Http {
         path: &str,
         body: Option<&B>,
     ) -> Result<T> {
+        let operation = format!("{method} {path}");
         let mut req = self
             .client
             .request(method, format!("{}{API_PREFIX}{path}", self.base))
@@ -114,6 +119,18 @@ impl Http {
         if !status.is_success() {
             let error = serde_json::from_slice::<ErrorBody>(&bytes).ok();
             return Err(match (status.as_u16(), error) {
+                (
+                    409,
+                    Some(ErrorBody::Conflict {
+                        claim: Some(claim), ..
+                    }),
+                ) => Error::ClaimConflict(claim),
+                (409, Some(ErrorBody::Conflict { message, .. })) => {
+                    Error::Conflict(format!("{operation}: {message}"))
+                }
+                (409, _) => Error::Conflict(format!(
+                    "{operation}: server returned an invalid conflict response"
+                )),
                 (401, _) => Error::Auth,
                 (426, Some(ErrorBody::Upgrade { required_major })) => {
                     Error::Upgrade(required_major)
@@ -129,7 +146,7 @@ impl Http {
                         | ErrorBody::Unauthorized { message }
                         | ErrorBody::Forbidden { message }
                         | ErrorBody::NotFound { message }
-                        | ErrorBody::Conflict { message }
+                        | ErrorBody::Conflict { message, .. }
                         | ErrorBody::TooLarge { message }
                         | ErrorBody::Internal { message } => message,
                         _ => "unexpected response".into(),

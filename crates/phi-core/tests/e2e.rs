@@ -378,12 +378,13 @@ async fn claim_exclusivity_reactions_unread_and_person_cursor() -> Result<()> {
     ensure!(events.is_empty());
     let view = carol.read(root.id, ReadOptions::default()).await?;
     ensure!(view.text().contains("claimed by bob/cli"));
-    ensure!(
-        alice
-            .react(root.id, ReactionKind::Claim, false)
-            .await
-            .is_err()
-    );
+    let conflict = alice
+        .react(root.id, ReactionKind::Claim, false)
+        .await
+        .err()
+        .ok_or_else(|| anyhow::anyhow!("claim conflict must fail"))?;
+    ensure!(conflict.to_string() == "already claimed by bob/cli just now");
+    ensure!(alice.wait_text(0).await? == format!("bob/cli claim {}#1 (Task)\n", root.id));
     alice.react(root.id, ReactionKind::Ack, false).await?;
     let view = alice.read(root.id, ReadOptions::default()).await?;
     ensure!(view.text().contains("claimed by bob/cli") && view.text().contains("ack by alice/cli"));
@@ -430,6 +431,7 @@ async fn claim_exclusivity_reactions_unread_and_person_cursor() -> Result<()> {
     );
     carol.wait(0).await?;
     bob.react(root.id, ReactionKind::Claim, true).await?;
+    ensure!(alice.wait_text(0).await? == format!("bob/cli unclaim {}#1 (Task)\n", root.id));
     ensure!(carol.wait(0).await?.is_empty());
     ensure!(
         !carol
@@ -447,6 +449,15 @@ async fn claim_exclusivity_reactions_unread_and_person_cursor() -> Result<()> {
     let mut second = Client::open(f.store("bob"), bob.profile.clone(), Some("other")).await?;
     second.read(root.id, ReadOptions::default()).await?;
     ensure!(bob.counts().await?.unread_threads == 0);
+    carol
+        .reply(root.id, options("now participating by authoring a reply"))
+        .await?;
+    carol.wait(0).await?;
+    alice.react(reply.id, ReactionKind::Up, false).await?;
+    alice.react(reply.id, ReactionKind::Down, false).await?;
+    ensure!(carol.wait_text(0).await?.is_empty());
+    bob.react(reply.id, ReactionKind::Ack, false).await?;
+    ensure!(carol.wait_text(0).await? == format!("bob/cli ack {}#2 (Task)\n", root.id));
     Ok(())
 }
 #[tokio::test]
@@ -468,6 +479,18 @@ async fn wait_backlog_wakes_on_reply_and_keeps_per_handle_cursor() -> Result<()>
             && !output.contains("phi read")
     );
     ensure!(bob.wait(0).await?.is_empty());
+    let unread_before = bob.counts().await?.unread_threads;
+    let ack_sender = async {
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        alice.react(root.id, ReactionKind::Ack, false).await
+    };
+    let (notice, sent) = tokio::join!(bob.wait_text(3), ack_sender);
+    sent?;
+    ensure!(notice? == format!("alice/cli ack {}#1 (Task)\n", root.id));
+    ensure!(
+        bob.counts().await?.unread_threads == unread_before,
+        "reaction-only wait does not mark the thread read"
+    );
     f.faults(|faults| faults.inflate_cursor = false)?;
     bob.react(root.id, ReactionKind::Claim, false).await?;
     let own = bob.reply(root.id, options("my reply")).await?;
@@ -529,7 +552,7 @@ async fn wait_backlog_wakes_on_reply_and_keeps_per_handle_cursor() -> Result<()>
     ensure!(bob.wait(1).await?.is_empty());
     ensure!(started.elapsed() >= Duration::from_millis(900));
     let ack = alice.wait_text(0).await?;
-    ensure!(ack.is_empty());
+    ensure!(ack == format!("bob/cli ack {}#3 (Task)\n", root.id));
     let next_message = bob
         .reply(root.id, options("next message carries reaction context"))
         .await?;
@@ -718,6 +741,37 @@ async fn summaries_required_off_explicit_and_local_summarizer() -> Result<()> {
             .await
             .is_err()
     );
+    alice.set_settings("summary_every", "5").await?;
+    for _ in 0..2 {
+        alice.reply(unsummarized.id, SendOptions::default()).await?;
+    }
+    let error = alice
+        .reply(unsummarized.id, SendOptions::default())
+        .await
+        .err()
+        .ok_or_else(|| anyhow::anyhow!("fifth message requires a summary"))?;
+    ensure!(
+        error
+            .to_string()
+            .contains("5 messages since the last summary")
+            && error.to_string().contains("threshold 5")
+    );
+    ensure!(alice.set_settings("summary_every", "0").await.is_err());
+    ensure!(
+        alice
+            .set_settings("summary_every", "4294967296")
+            .await
+            .is_err()
+    );
+    alice.set_settings("summary_every", "1").await?;
+    ensure!(
+        alice
+            .send("#all", "Every message", SendOptions::default())
+            .await
+            .is_err()
+    );
+    let reopened = Client::open(f.store("alice"), alice.profile.clone(), None).await?;
+    ensure!(reopened.settings.summary_every == 1);
     alice.profile.summarizer = Some("echo local-summary".into());
     let root = alice
         .send(
@@ -1498,7 +1552,7 @@ async fn tampered_message_attachment_and_sequence_are_rejected() -> Result<()> {
     let output = bob.wait_text(0).await?;
     ensure!(output.contains("signed body") && output.contains("attachments:"));
     ensure!(bob.counts().await?.unread_threads == 0);
-    alice.react(root.id, ReactionKind::Ack, false).await?;
+    alice.react(root.id, ReactionKind::Up, false).await?;
     let connection = rusqlite::Connection::open(f.dir.path().join("server/phi.db"))?;
     let original = serde_json::to_string(&root)?;
     let mut tampered = root.clone();

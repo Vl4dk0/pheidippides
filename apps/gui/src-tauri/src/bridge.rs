@@ -98,6 +98,7 @@ struct Snapshot {
     threads: Vec<ThreadEntry>,
     retention_days: u32,
     summary_mode: SummaryMode,
+    summary_every: u32,
     members: BTreeMap<phi_proto::PersonId, String>,
     devices: Vec<DeviceView>,
 }
@@ -236,6 +237,7 @@ pub enum Request {
     Settings {
         retention_days: u32,
         summary_mode: SummaryMode,
+        summary_every: u32,
     },
     DisplayName {
         name: String,
@@ -296,6 +298,7 @@ pub async fn execute(
                     .collect(),
                 retention_days: client.settings.retention_days,
                 summary_mode: client.settings.summary_mode,
+                summary_every: client.settings.summary_every,
                 members: client.names(),
                 devices: client
                     .devices
@@ -417,10 +420,20 @@ pub async fn execute(
         Request::Settings {
             retention_days,
             summary_mode,
+            summary_every,
         } => {
+            if summary_every == 0 {
+                return Err("summary_every must be a positive integer".into());
+            }
             if client.settings.retention_days != retention_days {
                 client
                     .set_settings("retention_days", &retention_days.to_string())
+                    .await
+                    .map_err(err)?;
+            }
+            if client.settings.summary_every != summary_every {
+                client
+                    .set_settings("summary_every", &summary_every.to_string())
                     .await
                     .map_err(err)?;
             }

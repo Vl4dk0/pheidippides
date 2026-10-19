@@ -131,7 +131,8 @@ adds the authenticated device's own same/historical-epoch enrollment wrap.
 
 Messages must use the current epoch and a root thread in the same channel.
 In required mode, summaries are enforced via the plaintext flag for CLI devices
-only at three messages since the last summary, including the pending message.
+at the signed `summary_every` interval (default 3) since the last summary,
+including the pending message. Off mode disables the requirement.
 With no summary, count from the root; the summary-bearing message resets the
 count. The server checks inside the send transaction and explains the current
 count/threshold in rejection errors. GUI devices are exempt. The host cannot verify summary contents. Sending advances
@@ -240,3 +241,9 @@ notifications happen only after an event commit, not uploads/cursors/counts.
 25 MiB uploads need about 33.4 MiB base64; proxy examples allow 40 MiB and must be
 raised when changing server limits. Version 0.1.0 derives protocol major 0 directly
 from Cargo's package major; `/v1` remains the route namespace.
+
+Claim-conflict HTTP 409 responses include the existing signed reaction in `claim`
+so clients can verify and name the claimant. Duplicate nonclaim reactions identify
+the message, kind and handle. The event feed retains all channel reactions for
+cache consistency; phi-core wakes only for eligible foreign ack/claim/unclaim
+on participated/addressed threads, rendering one-line notices.

@@ -55,7 +55,7 @@ coverage follows phi-core's signed, pre-send sequence boundary; the summary's
 own message is excluded from the newer-message count.
 
 Space settings change display name (slugified with collision handling),
-retention and summary mode; invite/remove members; inspect/revoke devices;
+retention, summary mode and the positive `summary_every` interval (default 3); invite/remove members; inspect/revoke devices;
 generate single-use enrollment codes; and export a never-expiring GUI recovery
 code. Codes are held only in the current settings panel, cleared when hidden or
 closed, and should be shared only with intended recipients. Device/person revocation protects future

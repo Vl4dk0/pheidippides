@@ -1115,12 +1115,28 @@ async fn claims_are_exclusive_and_owner_can_unclaim_from_another_handle() -> Tes
     let r1 = f.reaction(&p, m.id, ReactionKind::Claim, "one", false)?;
     let r2 = f.reaction(&p, m.id, ReactionKind::Claim, "two", false)?;
     let (a, b) = tokio::join!(
-        request(&f.app, "POST", &path, Some(&p.token), r1),
-        request(&f.app, "POST", &path, Some(&p.token), r2)
+        request(&f.app, "POST", &path, Some(&p.token), &r1),
+        request(&f.app, "POST", &path, Some(&p.token), &r2)
     );
-    let mut statuses = [a?.0, b?.0];
+    let (a, b) = (a?, b?);
+    let mut statuses = [a.0, b.0];
     statuses.sort();
     assert_eq!(statuses, [StatusCode::OK, StatusCode::CONFLICT]);
+    let conflict = if a.0 == StatusCode::CONFLICT {
+        a.1
+    } else {
+        b.1
+    };
+    match serde_json::from_value::<ErrorBody>(conflict)? {
+        ErrorBody::Conflict {
+            claim: Some(existing),
+            message,
+        } => {
+            assert!(*existing == r1.reaction || *existing == r2.reaction);
+            assert!(message.contains(&m.id.to_string()));
+        }
+        _ => anyhow::bail!("claim conflict lacks its signed current claim"),
+    }
     let remove = format!("{path}/claim");
     assert_eq!(
         request(

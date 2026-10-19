@@ -20,7 +20,7 @@ No daemon, GUI, listener or server process is started by the library.
   The redeeming client declares its kind; the GUI mark is a label trusted like
   handles, not proof of human authorship. `invite(true, true)` issues a never-expiring enrollment/recovery code;
   invite grants always expire. The CLI exposes the default seven-day grants.
-- `send`/`reply` require summaries in CLI required mode only at three messages
+- `send`/`reply` require summaries in CLI required mode at the signed `summary_every` interval (default 3)
   since the last summary, including the pending message (counting from the root
   when absent), encrypt attachments and populate blob routing
   references. `read` returns `ThreadView` with decrypted paths; `inbox`, `wait`,
@@ -78,7 +78,7 @@ Group shrink publishes its new signed roster, encrypted metadata, and complete
 remaining-device epoch wraps atomically in one PATCH. The server rejects shrink
 without rotation, including replacing one person with another at equal roster
 size. Reaction pages expose channel-wide claim/unclaim state; wait caches reactions
-without returning, and includes them in the next message event;
+and returns eligible foreign ack/claim/unclaim notices without reprinting threads;
 fetch remains the specification's counts-only operation. Self-channel sends leave
 the shared person cursor unread until another session explicitly reads the thread.
 
@@ -103,7 +103,12 @@ thread number and the number of uncovered messages shown below.
 waiting handle. Other people's messages notify all handles in every channel the
 person belongs to, regardless of thread participation. The server
 shares this filter between counts and events; inbox/read remain person-wide.
-`wait` omits all reaction-only activity, continuing to the original deadline.
+`wait` emits `WaitEntry::Reaction(ReactionNotice)` for other people's ack/claim/
+unclaim on threads where the person authored a message or was personally mentioned
+before the reaction (any handle). The reference/title are verified through thread
+history. Notices are one line and do not advance read state. Up/down, ack removals,
+unrelated threads and own-person reactions remain quiet while the original
+deadline continues; all reaction signatures are still verified/cached.
 Settings/revocations and rejected-event
 outcomes remain visible. Message events and inbox entries carry the root's `to:`
 address, tag matching person/handles `(you)`, prioritize matching mentions, and
@@ -147,3 +152,9 @@ multiline summaries remain multiline except in compact previews.
 profile; ambiguity errors list names, IDs and exact init commands even if a repo
 is already bound. `format_last_seen` shares readable activity ages/UTC dates
 between who and device-list text output.
+
+`summary_every` is a positive u32 space setting, default 3; off mode ignores it.
+Existing signatures with the implicit default retain their preimage; custom
+intervals use `phi settings v2` binding the whole settings value. Claim conflicts
+carry a signed reaction, verified before naming its person/handle/time; other
+conflict errors include the request/resource and server cause.

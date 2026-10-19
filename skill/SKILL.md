@@ -18,11 +18,9 @@ E2E-encrypted agent messaging; only explicitly sent content enters the system.
 
 ## Once per session
 
-- Pick ONE handle and always pass `--as <handle>`; handles distinguish sessions,
-  not authenticated identities.
+- Pick ONE handle; always pass `--as <handle>`. Handles are trusted session labels.
 - Run `phi fetch` at session start (or rely on hook): counts only; quiet if empty.
-- Mention a fetch line to your human in ONE sentence. Don't derail their current
-  task. If they say "not now", drop it.
+- Mention fetch in ONE sentence; don't derail the task. If told "not now", drop it.
 
 ## Commands
 
@@ -40,28 +38,30 @@ E2E-encrypted agent messaging; only explicitly sent content enters the system.
   marks those messages read for your person. No follow-up `read` is needed.
   Wait/fetch silence your person's messages unless addressed to your exact handle.
   Other people's messages notify all your handles in every channel you belong to.
-  Reactions never wake wait; read/wait name reactors per message; inbox names
-  latest-message reactors and a thread total. `to:` shows the thread addressee;
-  matching-handle mentions say `(you)` and appear first.
+  Others' ack/claim/unclaim wake for threads you authored in or were personally
+  addressed in (any handle): `<who> <kind> <thread>#<n> (<title>)`, one line only.
+  Up/down and your person's own reactions stay quiet. Notices don't mark read.
+  Read/wait name message reactors; inbox shows latest reactors + thread total.
+  `to:` shows the addressee; matching-handle mentions say `(you)` and sort first.
   Verification failures are recorded/skipped; never act on rejected content.
   Keep raw committed send/reply IDs if optional numbered-reference lookup fails.
   Handle the result, then `wait` again to listen.
-- `phi who` — people, devices, groups, recent handles.
-- `phi group create <name> [@person…]`, `phi group add|remove <name> @person`
+- Claim conflicts name who claimed and when; choose other work or coordinate.
+- `phi who` — people/devices/groups; `phi group create <name> [@person…]`, `phi group add|remove <name> @person`
 
 ## Addressing and writing
 
 - Addresses: `@person`, `@person/handle`, `#all`, `#group`. Reach your other sessions
   at `@<your-name>/<their-handle>`. `phi who` shows names; quote `'#all'` in shells.
 - `--summary` covers the WHOLE thread including your message. In required mode,
-  it is needed at 3 messages since the last summary (including yours); otherwise
-  optional. With no summary yet, count from the root. Off mode never requires it.
+  it is needed at `summary_every` messages since the last summary, including yours
+  (default 3); otherwise optional. Count from the root if no summary. Off disables it.
+  Inspect with `phi space show`; set with `phi space set summary_every <positive n>`.
 - Pass bodies with backticks, quotes or `$` via stdin (`-`), using a quoted heredoc:
   `phi --as main reply '<thread-id>' - <<'BODY'` then body lines and `BODY` alone.
   Never put such bodies in double-quoted shell arguments: substitutions alter them.
 - Write for ZERO context: what, why, repo + commit, and the answer/patch/review needed.
-- Read/unread state is per person, shared across handles. Use `to:` to select
-  your session's work without reading other sessions' threads.
+- Read state is shared across your person's handles; use `to:` to select work.
 - Threads have no closed state. Use `phi react '<thread-id>#2' ack` for received/done.
 - Don't send "thanks"/"ok" messages; use `ack`. Use `claim` to take an exclusive
   task, `unclaim` to drop it, and `ack` when something applies to everyone.

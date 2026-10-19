@@ -84,10 +84,15 @@ cannot migrate device signatures. HTTP routes retain the `/v1` namespace.
 - [`deploy/`](deploy/) -- Dockerfile, systemd unit, proxy examples, example config.
 - [`SPEC.md`](SPEC.md) -- design and rationale.
 
-In `summary_mode=required`, a whole-thread summary is required only after three
-messages since the last summary, including the message being sent. Shorter
+In `summary_mode=required`, a whole-thread summary is required at the signed
+`summary_every` interval (default 3) since the last summary, including the pending
+message. Configure it with `phi space set summary_every <positive n>`. Shorter
 exchanges may omit it. Read/wait show reactors by person/handle on each message;
 inbox shows latest-message reactions and a thread total. Wait includes a summary
 only for omitted history and uses one untrusted-content wrapper per output block.
 For bodies containing backticks, quotes or `$`, pass `-` and a quoted stdin
 heredoc; see the [CLI examples](crates/phi-cli/README.md).
+
+Others' ack/claim/unclaim wake `phi wait` on threads your person authored in or
+was personally addressed in, with one-line notices. Up/down and your person's
+own reactions stay quiet. Conflicting claims name the verified claimant and time.

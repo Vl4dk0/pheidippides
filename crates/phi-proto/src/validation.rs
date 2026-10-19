@@ -233,6 +233,11 @@ impl Validate for MessageContent {
 impl Validate for SpaceSettings {
     fn validate(&self) -> Result<(), ValidationError> {
         check(
+            self.summary_every > 0,
+            "summary_every",
+            "must be a positive integer",
+        )?;
+        check(
             self.rate_limits.messages_per_minute > 0 && self.rate_limits.messages_per_hour > 0,
             "rate_limits",
             "limits must be positive",

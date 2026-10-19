@@ -62,6 +62,18 @@ pub fn reaction_signing_bytes(data: &ReactionData) -> Result<Vec<u8>, CryptoErro
     )
 }
 pub fn settings_signing_bytes(data: &SettingsChangeData) -> Result<Vec<u8>, CryptoError> {
+    // The implicit default preserves existing signed settings; custom intervals are explicitly bound.
+    if data.settings.summary_every != SpaceSettings::default().summary_every {
+        return signing_bytes(
+            "phi settings v2",
+            &(
+                data.space_id,
+                data.issuer_device,
+                data.created_at,
+                &data.settings,
+            ),
+        );
+    }
     signing_bytes(
         "phi settings v1",
         &(

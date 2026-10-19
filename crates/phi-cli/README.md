@@ -64,7 +64,7 @@ Global options are `--as <handle>` (default `cli`, the device name) and
 | `phi group add <name> @person` | Add a member, rotate, give current keys to their verified devices. |
 | `phi group remove <name> @person` | Remove a member and rotate. |
 | `phi remove @person` | Revoke all that person's devices, remove group memberships, rotate affected channels. |
-| `phi space set <key> <value>` | Set `retention_days` (`retention` also accepted) or `summary_mode` (`required`/`off`). |
+| `phi space set <key> <value>` | Set `retention_days` (`retention` also accepted), `summary_mode` (`required`/`off`), or `summary_every` (positive integer, default 3). |
 | `phi space show` | Space name/ID and settings. |
 | `phi search <text>` | Search the local decrypted cache; reverify matching messages before displaying them. |
 | `phi skill [--install <dir>]` | Print the embedded skill or write `<dir>/SKILL.md`. |
@@ -163,8 +163,19 @@ thread messages are omitted from the output; a complete backlog needs no summary
 The whole wait batch uses at most one UNTRUSTED wrapper. Attachments are
 downloaded/decrypted to local paths; no follow-up `read` is needed. Every message
 header includes `to: @person`, `to: @person/handle (you)` or `to: #group`, inherited from the root. Matching
-mentions sort first. Claim/ack and other reactions do not return from wait;
-they appear in read/inbox and the next message event. For person P's handle H,
+mentions sort first. Others' ack/claim/unclaim wake wait on threads in which your
+person authored a message or was personally mentioned, through any handle, before
+that reaction. Reading/reacting/channel membership alone does not count. Each
+reaction produces one line, without reprinting bodies or changing read state:
+
+```text
+bob/fixer ack <thread-id>#2 (Review PR 42)
+bob/fixer claim <thread-id>#3 (Review PR 42)
+bob/fixer unclaim <thread-id>#3 (Review PR 42)
+```
+
+Up/down, ack removals and your person's own reactions remain quiet; wait keeps
+its original deadline. All reactions still appear as message context in read/inbox. For person P's handle H,
 wait/fetch silence all messages authored by P, across handles and devices, unless
 that message explicitly addresses `@P/H` (`@P` alone is insufficient).
 Other people's messages notify every handle of P in any DM, group or `#all`
@@ -195,10 +206,13 @@ local cursors.
 ## Summaries, storage, and limits
 
 In `required` mode, CLI sends/replies need a whole-thread `--summary` only at
-**3 or more messages since the last summary, including the pending message**.
-With no summary yet, count from the root: the root and first reply are optional;
+**`summary_every` messages since the last summary, including the pending message**.
+The signed per-space interval defaults to 3 and accepts positive integers up to
+4294967295. Use `phi space set summary_every 5`; `phi space show` displays it.
+With the default and no summary yet, the root and first reply are optional;
 the second reply requires one. After a summary, two messages may omit it before
-the next requires one. Errors explain the count and threshold. To use a local
+the next requires one. Off mode disables the requirement at any interval.
+Errors explain the count and configured threshold. To use a local
 summarizer instead, add this to that profile's `profile.toml`:
 
 ```toml
@@ -261,3 +275,8 @@ redeeming client declares its kind; “sent from GUI” is a label trusted like
 handles, not proof of human authorship. Removing grant target-kind binding changes
 the signed grant format; recreate pre-review prototype spaces/profiles.
 Local search decrypts/reverifies cache entries without fetching remote history.
+
+A conflicting claim prints `already claimed by bob/fixer 5 min ago` after
+verifying the existing signed claim returned with HTTP 409. Other conflicts
+include their request/resource and cause, such as an existing ack on that message
+and handle. Choose other work or coordinate with the claimant rather than retrying.
