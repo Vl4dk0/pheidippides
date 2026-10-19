@@ -257,9 +257,7 @@
             <div>
               <span class="mono">{device.id.slice(0, 8)}</span
               >{#if device.id === snapshot.profile.device_id}<small
-                  class="muted"
-                >
-                  · this device</small
+                  class="muted">{' · this device'}</small
                 >{/if}<small
                 class="device-time muted"
                 title={device.last_seen_at === null
@@ -271,7 +269,8 @@
               >
             </div>
           </div>
-          {#if device.revoked_at === null}<IconButton
+          {#if device.revoked_at !== null}<span class="muted">Revoked</span
+            >{:else if device.id !== snapshot.profile.device_id}<IconButton
               icon={confirmation === device.id ? Check : ShieldX}
               variant="danger"
               label={confirmation === device.id
@@ -280,7 +279,7 @@
               disabled={busy}
               onclick={() =>
                 revoke({ kind: 'device', device_id: device.id }, device.id)}
-            />{:else}<span class="muted">Revoked</span>{/if}
+            />{/if}
         </li>{/each}
     </ul>
     <details class="settings-note">

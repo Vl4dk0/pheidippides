@@ -135,28 +135,52 @@ try {
       await page
         .getByRole('region', { name: 'Thread summary', exact: true })
         .waitFor();
+      const reactionGap = await page
+        .locator('.reaction-bar')
+        .first()
+        .evaluate((row) => {
+          const buttons = Array.from(row.querySelectorAll('button')).filter(
+            (button) => button.getClientRects().length,
+          );
+          const first = buttons[0].getBoundingClientRect();
+          const second = buttons[1].getBoundingClientRect();
+          return (
+            second.x - first.right - parseFloat(getComputedStyle(row).columnGap)
+          );
+        });
+      if (Math.abs(reactionGap) > 1)
+        throw new Error('Active reactions have a ghost gap');
       await capture('main');
       const quietReaction = page
         .locator('.message')
         .nth(1)
-        .getByRole('button', { name: 'Like', exact: true });
+        .getByRole('button', {
+          name: 'Like',
+          exact: true,
+          includeHidden: true,
+        });
       if (
-        (await quietReaction.evaluate((el) => getComputedStyle(el).opacity)) !==
-        '0'
+        (await quietReaction.evaluate((el) => getComputedStyle(el).display)) !==
+        'none'
       )
         throw new Error('Empty reaction is visible at rest');
       await page.locator('.message').nth(1).hover();
       if (
-        (await quietReaction.evaluate((el) => getComputedStyle(el).opacity)) !==
-        '1'
+        !(await quietReaction.evaluate((el) => el.getClientRects().length > 0))
       )
         throw new Error('Hover did not reveal reactions');
       await capture('main-hover');
       await page.mouse.move(0, 0);
-      await quietReaction.focus();
+      await page
+        .getByRole('toolbar', { name: 'Reactions to message 2', exact: true })
+        .focus();
+      await page.keyboard.press('Tab');
       if (
-        (await quietReaction.evaluate((el) => getComputedStyle(el).opacity)) !==
-        '1'
+        !(await quietReaction.evaluate((el) => el === document.activeElement))
+      )
+        throw new Error('Keyboard could not reach an empty reaction');
+      if (
+        !(await quietReaction.evaluate((el) => el.getClientRects().length > 0))
       )
         throw new Error('Keyboard focus did not reveal reactions');
       await page
@@ -288,6 +312,43 @@ try {
       );
       for (const section of ['Members', 'Devices', 'Recovery', 'View']) {
         await page.getByRole('button', { name: section, exact: true }).click();
+        if (section === 'Devices') {
+          const selfRow = page
+            .locator('.plain-list > li')
+            .filter({ hasText: 'this device' });
+          if (
+            (await selfRow.getByRole('button').count()) ||
+            !/\s· this device/.test(await selfRow.textContent())
+          )
+            throw new Error(
+              'Current device has a revoke action or a missing separator space',
+            );
+          if (
+            (await page
+              .getByRole('button', { name: 'Revoke device', exact: true })
+              .count()) !== 1
+          )
+            throw new Error('Other own devices lost their revoke action');
+        }
+        if (section === 'View') {
+          const columns = await page
+            .locator('.view-options')
+            .evaluate((options) => {
+              const labels = options.querySelectorAll('label');
+              const first = labels[0].getBoundingClientRect();
+              const second = labels[1].getBoundingClientRect();
+              return (
+                labels.length === 8 &&
+                !options.querySelector('svg') &&
+                first.y === second.y &&
+                first.x !== second.x
+              );
+            });
+          if (!columns)
+            throw new Error(
+              'View options are not a consistent two-column grid',
+            );
+        }
         await capture(`settings-${section.toLowerCase()}`);
       }
       await page.getByRole('button', { name: 'General', exact: true }).click();
@@ -338,6 +399,24 @@ try {
         .boundingBox();
       if (body.y - heading.y > 250 || draft.width > 640)
         throw new Error('New-thread fields are detached from their heading');
+      const textAlignment = await page
+        .locator('.thread-draft')
+        .evaluate((form) => {
+          function contentLeft(field) {
+            const style = getComputedStyle(field);
+            return (
+              field.getBoundingClientRect().left +
+              parseFloat(style.paddingLeft) +
+              parseFloat(style.borderLeftWidth)
+            );
+          }
+          return (
+            contentLeft(form.querySelector('textarea')) -
+            contentLeft(form.querySelector('input'))
+          );
+        });
+      if (Math.abs(textAlignment) > 1)
+        throw new Error('Draft body text is indented relative to its inputs');
       await capture('compose');
       await context.close();
     }

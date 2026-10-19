@@ -446,7 +446,7 @@
         type="checkbox"
         checked={prefs.notifications}
         onchange={(event) => toggleNotifications(event.currentTarget.checked)}
-      /><Bell size={14} />Notifications</label
+      />Notifications</label
     >
   </div>
 {/snippet}

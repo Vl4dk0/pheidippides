@@ -560,6 +560,7 @@ time {
   gap: 6px;
   align-items: center;
   margin-top: 12px;
+  min-height: 27px;
 }
 .reaction-bar .icon-button {
   width: auto;
@@ -969,6 +970,7 @@ code {
 
 .view-options {
   display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 16px;
   padding: 4px 0;
 }
@@ -988,24 +990,33 @@ code {
   margin-bottom: 0;
 }
 .thread-draft .composer-line {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) 33px;
   background: var(--bg);
 }
+.thread-draft .composer-line > .avatar {
+  grid-column: 1;
+  grid-row: 2;
+}
+.thread-draft .composer-line > .icon-button {
+  grid-column: 3;
+  grid-row: 2;
+}
 .thread-draft textarea {
+  grid-column: 1 / -1;
+  grid-row: 1;
   min-height: 160px;
 }
 .reaction-bar .reaction-empty {
-  opacity: 0;
-  pointer-events: none;
+  display: none;
 }
 .message:hover .reaction-empty,
 .message:focus-within .reaction-empty {
-  opacity: 1;
-  pointer-events: auto;
+  display: inline-flex;
 }
 @media (hover: none) {
   .reaction-bar .reaction-empty {
-    opacity: 1;
-    pointer-events: auto;
+    display: inline-flex;
   }
 }
 @media (prefers-color-scheme: dark) {

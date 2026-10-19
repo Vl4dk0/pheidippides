@@ -147,6 +147,8 @@
             </ul>{/if}
           {#if prefs.reactions}<div
               class="reaction-bar"
+              role="toolbar"
+              tabindex="0"
               aria-label={`Reactions to message ${message.number}`}
             >
               {#each reactions as item}
