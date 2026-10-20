@@ -1,0 +1,348 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["tiktoken==0.12.0"]
+# ///
+"""Measure real CLI text, not provider billing. Build phi/phi-server separately."""
+
+import hashlib
+import importlib.metadata
+import json
+import os
+import re
+import shlex
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+import tiktoken
+
+ROOT = Path(__file__).resolve().parent.parent
+BODIES = [
+    """Please review the retry change in the Atlas payments service, repository
+atlas/payments at commit 8f31c2a, before we merge pull request 42. Customers
+occasionally receive duplicate receipts when the provider times out after accepting
+a charge. The patch introduces an idempotency key derived from the checkout ID
+and reuses it across retries. I attached the sanitized retry trace as retry.txt;
+it contains synthetic identifiers only. Focus on whether concurrent workers can
+submit different keys for the same checkout, whether expired keys permit duplicate
+charges, and whether the new timeout handling preserves the original error.
+Please return concrete findings with file locations, severity, and the smallest
+recommended correction. Do not deploy anything. If the design looks sound, say
+which failure cases you checked and what remains uncertain.
+""",
+    """I reviewed atlas/payments at commit 8f31c2a and the attached synthetic retry
+trace for pull request 42. There is one blocking issue in src/checkout.rs around
+the retry loop: the key is allocated inside each worker rather than persisted
+with the checkout, so two workers can race and create different keys. Move key
+creation into the checkout transaction and enforce a unique checkout ID in the
+key table. The timeout branch preserves the original provider error correctly.
+The provider expires keys after twenty four hours, so retries beyond that window
+need reconciliation rather than another charge attempt. I checked the timeout
+after acceptance, a successful retry, and two simultaneous workers against the
+trace. I have not exercised a real provider sandbox or a database migration.
+Please make the transaction change and add the reconciliation guard, then send
+the new commit and the relevant existing test results. No deployment is needed
+for this review; keep the change limited to checkout persistence.
+""",
+    """The requested corrections are ready in atlas/payments at commit c4d92e1,
+still on pull request 42. Checkout creation now persists the idempotency key in
+the same transaction as the checkout row, with a unique constraint on checkout
+ID. Workers read that stored key before contacting the provider. Retries older
+than twenty four hours enter reconciliation and do not create another charge.
+The existing concurrency and timeout suites pass, including the simultaneous
+worker case. Please review the transaction boundary and confirm that a rollback
+cannot leave a worker using an uncommitted key. The migration has not been
+deployed, and no live provider requests were made.
+""",
+    """I checked atlas/payments at commit c4d92e1 and approve the transaction
+boundary in pull request 42. The key is returned only after commit succeeds;
+the rollback path returns the database error before any provider call. Both
+workers therefore converge on the stored key. The reconciliation guard also
+prevents a fresh charge once the provider retention window has elapsed. One
+remaining operational detail is the migration order: install the unique index
+before starting workers that depend on it. Please include that order and the
+rollback procedure in the release note. This is documentation follow up rather
+than another code blocker. Production deployment still needs the normal human
+release decision.
+""",
+    """I added the release note in atlas/payments at commit d61be70 on pull
+request 42. It now requires pausing checkout workers, applying and validating
+the unique index, upgrading the service, then resuming workers. If validation
+fails, workers remain paused while the migration is rolled back. A service
+rollback preserves persisted keys and routes expired attempts to reconciliation.
+The existing test results are unchanged because this commit only updates the
+release note. Please confirm that the documented order addresses your final
+concern and identify any remaining merge blocker. Deployment remains pending
+the release owner's approval; this message does not request production access.
+""",
+    """I reviewed the release note in atlas/payments at commit d61be70. The
+documented sequence addresses my migration concern: workers are paused before
+index validation, and neither a failed migration nor a service rollback loses
+the persisted keys. I have no remaining merge blocker for pull request 42.
+The review covers concurrent workers, acceptance followed by timeout, expired
+provider keys, transaction rollback, and migration order. The provider sandbox
+and production deployment were deliberately outside this exchange. Please keep
+those limits in the pull request and let the release owner choose when to merge
+and deploy. No further code changes are requested from this review.
+""",
+]
+SUMMARIES = [
+    "Review requested for Atlas payments PR 42 at 8f31c2a: prevent duplicate charges after timeouts. Synthetic retry trace attached. Check worker races, key expiry and error preservation; return findings without deployment.",
+    "Atlas payments PR 42 at 8f31c2a has a blocking worker race: persist one idempotency key per checkout transaction. Expired provider keys require reconciliation. Timeout errors are preserved. Author will correct persistence and expiry handling; no deployment or sandbox verification.",
+    "Atlas payments PR 42 now at c4d92e1 persists checkout keys atomically with a unique constraint and reconciles expired retries. Existing concurrency/timeout tests pass. Reviewer must verify rollback safety. Prior worker-race blocker is addressed pending review; no deployment or sandbox verification.",
+    "Atlas payments PR 42 at c4d92e1 passes rollback and concurrency review. Persisted keys and expired-key reconciliation address the code blocker. Reviewer requests release-note migration/rollback order before final signoff. No provider sandbox or production deployment performed.",
+    "Atlas payments PR 42 at d61be70 fixes worker key races and expired retries; concurrency/timeout tests pass. Rollback safety approved. Release note now pauses workers, validates the unique index, upgrades, resumes, and preserves keys on rollback. Final documentation signoff pending; deployment awaits release owner.",
+    "Atlas payments PR 42 at d61be70 approved with no merge blockers: atomic persisted keys, expiry reconciliation, rollback safety and migration order reviewed. Existing concurrency/timeout tests pass. Provider sandbox and production deployment remain unverified and require the normal release decision.",
+]
+ATTACHMENT = "checkout=synthetic-42\nattempt=1 accepted=true response=timeout\nattempt=2 idempotency_key=checkout-42\n"
+ENCODINGS = {
+    name: tiktoken.get_encoding(name) for name in ("o200k_base", "cl100k_base")
+}
+
+
+def tokens(text):
+    return {
+        name: len(enc.encode(text, disallowed_special=()))
+        for name, enc in ENCODINGS.items()
+    }
+
+
+def clean_env():
+    # A developer's relay overrides must never point this experiment at live data.
+    return {k: v for k, v in os.environ.items() if not k.startswith("PHI_")}
+
+
+def measure(interval, phi, server):
+    records = []
+    with tempfile.TemporaryDirectory(prefix="phi-tokens-") as temporary:
+        work = Path(temporary)
+        envs = {}
+        for side, name in (("A", "alice"), ("B", "bob")):
+            home = work / side
+            home.mkdir()
+            envs[side] = clean_env() | {
+                "HOME": str(home),
+                "USER": name,
+                "LOGNAME": name,
+                "XDG_CONFIG_HOME": str(home / ".config"),
+                "XDG_CACHE_HOME": str(home / ".cache"),
+            }
+        (work / "retry.txt").write_text(ATTACHMENT)
+
+        def run(side, category, *args, body=None):
+            argv = [str(phi), "--as", "main", *args]
+            command = shlex.join(["phi", "--as", "main", *args])
+            if body is not None:
+                command += " <<'BODY'\n" + body + "BODY"
+            command += "\n"
+            result = subprocess.run(
+                argv,
+                input=body,
+                capture_output=True,
+                text=True,
+                cwd=work,
+                env=envs[side],
+                timeout=30,
+                check=False,
+            )
+            if result.returncode:
+                raise RuntimeError(f"{side}: {command}\n{result.stderr}")
+            records.append(
+                {
+                    "side": side,
+                    "category": category,
+                    "argv": argv,
+                    "stdin": body,
+                    "written": command,
+                    "stdout": result.stdout,
+                    "stderr": result.stderr,
+                    "input_tokens": tokens(result.stdout + result.stderr),
+                    "output_tokens": tokens(command),
+                }
+            )
+            return result.stdout
+
+        with socket.socket() as reservation:
+            reservation.bind(("127.0.0.1", 0))
+            port = reservation.getsockname()[1]
+        config = work / "server.toml"
+        config.write_text(
+            f'data_dir = "data"\nlisten = "127.0.0.1:{port}"\n'
+            'allow_space_creation = "anyone"\n[tls]\nmode = "off"\n'
+        )
+        url = f"http://127.0.0.1:{port}"
+        with (work / "server.log").open("w+") as log:
+            process = subprocess.Popen(
+                [str(server), "--config", str(config)],
+                cwd=work,
+                env=clean_env(),
+                stdout=log,
+                stderr=log,
+            )
+            try:
+                deadline = time.monotonic() + 15
+                while True:
+                    if process.poll() is not None:
+                        log.seek(0)
+                        raise RuntimeError(f"relay exited: {log.read()}")
+                    try:
+                        with urllib.request.urlopen(
+                            url + "/healthz", timeout=0.5
+                        ) as response:
+                            if response.status == 200:
+                                break
+                    except (urllib.error.URLError, TimeoutError):
+                        pass
+                    if time.monotonic() >= deadline:
+                        raise RuntimeError("throwaway relay did not become ready")
+                    time.sleep(0.05)
+
+                run("A", "setup", "space", "create", "atlas", "--server", url)
+                link = run("A", "setup", "invite").strip()
+                run("B", "setup", "join", link, "--name", "bob")
+                settings = run("A", "setup", "space", "show")
+                if not re.search(r"summary_every\D+3\b", settings):
+                    raise RuntimeError(f"expected default summary_every=3: {settings}")
+                if interval != 3:
+                    run("A", "setup", "space", "set", "summary_every", str(interval))
+                # Settings notifications belong to setup, not message transport overhead.
+                for side in ("A", "B"):
+                    run(side, "setup", "wait", "1")
+                empty = run("A", "fetch", "fetch")
+                if empty:
+                    raise RuntimeError("fresh space fetch should be silent")
+                thread = None
+                last_summary = 0
+                summary_positions = []
+                for index, body in enumerate(BODIES, 1):
+                    sender, receiver = ("A", "B") if index % 2 else ("B", "A")
+                    args = (
+                        ["send", "@bob/main", "Review payment retry PR 42", "-"]
+                        if index == 1
+                        else ["reply", thread, "-"]
+                    )
+                    if index <= 2 or index - last_summary >= interval:
+                        args += ["--summary", SUMMARIES[index - 1]]
+                        last_summary = index
+                        summary_positions.append(index)
+                    if index == 1:
+                        args += ["--file", "retry.txt"]
+                    receipt = run(sender, "send", *args, body=body)
+                    if index == 1:
+                        thread = re.search(r"^thread (\S+)", receipt).group(1)
+                        nonempty = run("B", "fetch", "fetch")
+                        if not nonempty:
+                            raise RuntimeError(
+                                "recipient fetch should report the request"
+                            )
+                    waited = run(receiver, "wait", "wait", "1")
+                    if body.strip() not in waited:
+                        raise RuntimeError(f"wait did not deliver message {index}")
+                    read = run(receiver, "read", "read", thread, "--last", "1")
+                    if body.strip() not in read:
+                        raise RuntimeError(f"read did not deliver message {index}")
+                    if index == 1:
+                        paths = list((work / "B").rglob("retry.txt"))
+                        if not paths or any(p.read_text() != ATTACHMENT for p in paths):
+                            raise RuntimeError(
+                                "attachment was not downloaded intact into B's HOME"
+                            )
+                        run("B", "react", "react", f"{thread}#1", "claim")
+                    if receiver == "A":
+                        run("A", "react", "react", f"{thread}#{index}", "ack")
+                return {
+                    "summary_every": interval,
+                    "summary_positions": summary_positions,
+                    "hook_empty_stdout": empty,
+                    "hook_nonempty_stdout": nonempty,
+                    "records": records,
+                }
+            finally:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+
+
+def metrics(scenario):
+    result = {}
+    for encoding in ENCODINGS:
+        result[encoding] = {}
+        for side in ("A", "B"):
+            rows = [
+                r
+                for r in scenario["records"]
+                if r["side"] == side and r["category"] != "setup"
+            ]
+            incoming = sum(r["input_tokens"][encoding] for r in rows)
+            outgoing = sum(r["output_tokens"][encoding] for r in rows)
+            sent_parity = 0 if side == "A" else 1
+            baseline_out = sum(tokens(b)[encoding] for b in BODIES[sent_parity::2])
+            baseline_in = sum(tokens(b)[encoding] for b in BODIES[1 - sent_parity :: 2])
+            groups = {}
+            for category in ("fetch", "send", "wait", "read", "react"):
+                selected = [r for r in rows if r["category"] == category]
+                groups[category] = {
+                    "commands": len(selected),
+                    "input": sum(r["input_tokens"][encoding] for r in selected),
+                    "output": sum(r["output_tokens"][encoding] for r in selected),
+                }
+            result[encoding][side] = {
+                "input": incoming,
+                "output": outgoing,
+                "total": incoming + outgoing,
+                "baseline_input": baseline_in,
+                "baseline_output": baseline_out,
+                "overhead_input": incoming - baseline_in,
+                "overhead_output": outgoing - baseline_out,
+                "without_redundant_read_input": incoming - groups["read"]["input"],
+                "without_redundant_read_output": outgoing - groups["read"]["output"],
+                "by_category": groups,
+            }
+    return result
+
+
+def main():
+    binaries = [ROOT / "target/debug" / name for name in ("phi", "phi-server")]
+    if not all(path.is_file() and os.access(path, os.X_OK) for path in binaries):
+        sys.exit(
+            'Build first in this checkout: CARGO_TARGET_DIR="$PWD/target" cargo build -p phi-cli -p phi-server'
+        )
+    scenarios = [measure(interval, *binaries) for interval in (3, 1)]
+    for scenario in scenarios:
+        scenario["metrics"] = metrics(scenario)
+    report = {
+        "measured_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "revision": subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
+        ).strip(),
+        "tiktoken_version": importlib.metadata.version("tiktoken"),
+        "binary_sha256": {
+            p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in binaries
+        },
+        "counting": "Input = exact stdout + stderr; output = shell command including heredoc body and inline summary. Sum per command; exclude setup, skill, attachment contents, provider framing/replay/reasoning.",
+        "skill": {
+            str(p): tokens((ROOT / p).read_text())
+            for p in (Path("skill/SKILL.md"), Path("skill/AGENTS-snippet.md"))
+        },
+        "body_word_counts": [len(body.split()) for body in BODIES],
+        "attachment": {
+            "name": "retry.txt",
+            "text": ATTACHMENT,
+            "tokens_if_opened": tokens(ATTACHMENT),
+        },
+        "scenarios": scenarios,
+    }
+    print(json.dumps(report, indent=2, ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    main()

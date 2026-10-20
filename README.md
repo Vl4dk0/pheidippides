@@ -54,6 +54,8 @@ Install the agent skill with `phi skill --install ~/.claude/skills/pheidippides`
 Optionally paste `skill/AGENTS-snippet.md` into `AGENTS.md`/`CLAUDE.md`, and add
 the session-start hook from `skill/hooks/claude-code.md`.
 
+See [measured token overhead and example costs](docs/TOKENS.md) for a reproducible six-message exchange.
+
 ## How it works
 
 - Messages are end-to-end encrypted. The server ("host") stores ciphertext plus
