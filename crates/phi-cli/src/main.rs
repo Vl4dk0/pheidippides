@@ -2,7 +2,7 @@ use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use phi_core::*;
 use phi_proto::{DeviceId, ReactionKind, RevocationTarget};
 use std::{
-    io::{self, Read},
+    io::{self, IsTerminal, Read, Write},
     path::PathBuf,
     process::ExitCode,
 };
@@ -52,6 +52,8 @@ enum Command {
     Who,
     Threads {
         destination: Option<String>,
+        #[arg(long)]
+        closed: bool,
     },
     Channels,
     Spaces,
@@ -83,6 +85,18 @@ enum Command {
         kind: ReactionArg,
     },
     Unread {
+        #[arg(allow_hyphen_values = true)]
+        thread: MessageRef,
+    },
+    Close {
+        #[arg(allow_hyphen_values = true)]
+        thread: MessageRef,
+    },
+    Reopen {
+        #[arg(allow_hyphen_values = true)]
+        thread: MessageRef,
+    },
+    Delete {
         #[arg(allow_hyphen_values = true)]
         thread: MessageRef,
     },
@@ -389,8 +403,13 @@ async fn run(cli: Cli) -> Result<()> {
                         print!("{}", view.text());
                     }
                 }
-                Command::Threads { destination } => {
-                    let entries = client.discover_threads(destination.as_deref()).await?;
+                Command::Threads {
+                    destination,
+                    closed,
+                } => {
+                    let entries = client
+                        .discover_threads_filtered(destination.as_deref(), closed)
+                        .await?;
                     if cli.json {
                         output::print(
                             "threads",
@@ -495,6 +514,30 @@ async fn run(cli: Cli) -> Result<()> {
                     client.unread(thread).await?;
                     println!("marked unread");
                 }
+                Command::Close { thread } => {
+                    let thread = client.resolve_thread(thread).await?;
+                    client.close_thread(thread).await?;
+                    println!("closed thread {thread}");
+                }
+                Command::Reopen { thread } => {
+                    let thread = client.resolve_thread(thread).await?;
+                    client.reopen_thread(thread).await?;
+                    println!("reopened thread {thread}");
+                }
+                Command::Delete { thread } => {
+                    let thread = client.resolve_thread(thread).await?;
+                    if io::stdin().is_terminal() {
+                        eprint!("Delete thread {thread} for everyone? [y/N] ");
+                        io::stderr().flush()?;
+                        let mut answer = String::new();
+                        io::stdin().read_line(&mut answer)?;
+                        if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+                            return Err(Error::User("aborted".into()));
+                        }
+                    }
+                    client.delete_thread(thread).await?;
+                    println!("deleted thread {thread}");
+                }
                 Command::Wait { seconds } => {
                     if cli.json {
                         println!(
@@ -595,7 +638,9 @@ mod tests {
             vec!["init"],
             vec!["who"],
             vec!["threads"],
+            vec!["threads", "--closed"],
             vec!["threads", "#all"],
+            vec!["threads", "#all", "--closed"],
             vec!["threads", "@bob"],
             vec!["channels", "--json"],
             vec!["spaces"],
@@ -624,6 +669,9 @@ mod tests {
             vec!["react", id, "claim"],
             vec!["react", id, "unclaim"],
             vec!["unread", id],
+            vec!["close", id],
+            vec!["reopen", id],
+            vec!["delete", id],
             vec!["wait"],
             vec!["wait", "5"],
             vec!["group", "create", "backend", "@alice", "@bob"],
@@ -641,7 +689,9 @@ mod tests {
         }
         assert!(Cli::try_parse_from(["phi", "read", id, "--all", "--last", "2"]).is_err());
         assert!(Cli::try_parse_from(["phi", "join", "link"]).is_err());
-        for command in ["read", "reply", "react", "unread"] {
+        for command in [
+            "read", "reply", "react", "unread", "close", "reopen", "delete",
+        ] {
             let reference = format!("{id}#2");
             let mut argv = vec!["phi", command, reference.as_str()];
             if command == "react" {
@@ -660,6 +710,9 @@ mod tests {
             vec!["react", &reference, "ack"],
             vec!["reply", &reference, "body"],
             vec!["unread", &reference],
+            vec!["close", &reference],
+            vec!["reopen", &reference],
+            vec!["delete", &reference],
             vec!["device", "revoke", id],
             vec!["--space", id, "who"],
         ] {

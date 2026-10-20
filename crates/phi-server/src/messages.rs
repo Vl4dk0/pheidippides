@@ -37,7 +37,7 @@ impl Db {
                 tid
             } else {
                 db.conn.execute(
-                    "INSERT INTO threads VALUES(?,?,?,?)",
+                    "INSERT INTO threads(id,space_id,channel_id,activity) VALUES(?,?,?,?)",
                     params![
                         r.id.to_string(),
                         a.sid().to_string(),
@@ -139,7 +139,7 @@ impl Db {
                 )?;
             }
             db.conn.execute(
-                "UPDATE threads SET activity=? WHERE id=?",
+                "UPDATE threads SET activity=?,closed_by=NULL,closed_at=NULL,close_json=NULL WHERE id=?",
                 params![now(), thread.to_string()],
             )?;
             // Self-channel recipients are other sessions of the same person; sending must leave their inbox unread.
@@ -168,10 +168,43 @@ impl Db {
     ) -> Result<ListMessagesResponse> {
         q.validate()?;
         self.channel(a, cid)?;
+        let deleted: Vec<ThreadDeletion> = if q.after.unwrap_or(0) == 0 {
+            let events: Vec<Event> = self.list(
+                "SELECT json FROM events WHERE space_id=? AND channel_id=? AND thread_id IS NULL ORDER BY seq",
+                params![a.sid().to_string(), cid.to_string()],
+            )?;
+            events
+                .into_iter()
+                .filter_map(|e| match e.event {
+                    EventData::ThreadDeleted(d)
+                        if q.thread.is_none_or(|t| t == d.data.thread_id) =>
+                    {
+                        Some(d)
+                    }
+                    _ => None,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         if let Some(t) = q.thread {
-            let m = self.message(a, t)?;
-            if m.envelope.channel_id != cid || m.envelope.thread_id.is_some() {
-                return Err(ApiError::invalid("invalid thread"));
+            match self.message(a, t) {
+                Ok(m) => {
+                    if m.envelope.channel_id != cid || m.envelope.thread_id.is_some() {
+                        return Err(ApiError::invalid("invalid thread"));
+                    }
+                }
+                Err(_) if !deleted.is_empty() => {
+                    return Ok(ListMessagesResponse {
+                        messages: Vec::new(),
+                        reactions: Vec::new(),
+                        cursors: Vec::new(),
+                        activities: Vec::new(),
+                        deleted,
+                        next_after: None,
+                    });
+                }
+                Err(error) => return Err(error),
             }
         }
         let messages: Vec<Message> = self.list(
@@ -199,14 +232,24 @@ impl Db {
             )?);
             let thread = message.envelope.thread_id.unwrap_or(message.id);
             if threads.insert(thread) {
-                let (last_activity, last_activity_seq) = self.conn.query_row(
-                    "SELECT activity,COALESCE((SELECT MAX(seq) FROM events WHERE thread_id=?1),0) FROM threads WHERE id=?1",
-                    [thread.to_string()], |row| Ok((row.get(0)?, row.get(1)?)),
+                let (last_activity, last_activity_seq, closed_by, closed_at, close_json): (
+                    u64,
+                    u64,
+                    Option<String>,
+                    Option<u64>,
+                    Option<String>,
+                ) = self.conn.query_row(
+                    "SELECT activity,COALESCE((SELECT MAX(seq) FROM events WHERE thread_id=?1),0),closed_by,closed_at,close_json FROM threads WHERE id=?1",
+                    [thread.to_string()],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
                 )?;
                 activities.push(ThreadActivity {
                     thread_id: thread,
                     last_activity,
                     last_activity_seq,
+                    closed_by: closed_by.map(|s| s.parse()).transpose()?,
+                    closed_at,
+                    state: close_json.map(|s| serde_json::from_str(&s)).transpose()?,
                 });
                 let seq: u64 = self.conn.query_row(
                     "SELECT COALESCE((SELECT seq FROM cursors WHERE person_id=? AND thread_id=?),0)",
@@ -224,6 +267,7 @@ impl Db {
             reactions,
             cursors,
             activities,
+            deleted,
             next_after,
         })
     }
@@ -361,6 +405,141 @@ impl Db {
             last_read_seq: r.last_read_seq,
         })
     }
+    pub fn thread_state(
+        &mut self,
+        a: &Auth,
+        tid: MessageId,
+        r: ThreadStateRequest,
+    ) -> Result<ThreadState> {
+        r.validate()?;
+        let state = r.state;
+        let d = &state.data;
+        let root = self.message(a, tid)?;
+        if root.envelope.thread_id.is_some() {
+            return Err(ApiError::invalid("thread state requires a thread root"));
+        }
+        if d.space_id != a.sid()
+            || d.thread_id != tid
+            || d.person_id != a.person()
+            || d.device_id != a.device()
+            || d.created_at > now()
+            || d.created_at < a.cert.data.created_at
+        {
+            return Err(ApiError::invalid("thread state identity/time mismatch"));
+        }
+        self.verify(
+            a,
+            &phi_crypto::thread_state_signing_bytes(d)?,
+            &state.signature,
+        )?;
+        self.transaction(|db| {
+            if d.closed {
+                db.conn.execute(
+                    "UPDATE threads SET closed_by=?,closed_at=?,close_json=? WHERE id=?",
+                    params![
+                        d.person_id.to_string(),
+                        d.created_at,
+                        json(&state)?,
+                        tid.to_string()
+                    ],
+                )?;
+            } else {
+                db.conn.execute(
+                    "UPDATE threads SET closed_by=NULL,closed_at=NULL,close_json=NULL WHERE id=?",
+                    [tid.to_string()],
+                )?;
+            }
+            let seq = db.seq(a.sid())?;
+            db.event(
+                a.sid(),
+                seq,
+                EventData::ThreadState(state.clone()),
+                Some(root.envelope.channel_id),
+                None,
+                Some(tid),
+            )?;
+            Ok(state.clone())
+        })
+    }
+    pub fn delete_thread(
+        &mut self,
+        a: &Auth,
+        tid: MessageId,
+        r: DeleteThreadRequest,
+    ) -> Result<ThreadDeletion> {
+        r.validate()?;
+        let deletion = r.deletion;
+        let d = &deletion.data;
+        let root = self.message(a, tid)?;
+        if root.envelope.thread_id.is_some() {
+            return Err(ApiError::invalid("thread deletion requires a thread root"));
+        }
+        if root.author_person != a.person() {
+            return Err(ApiError::forbidden());
+        }
+        if d.space_id != a.sid()
+            || d.thread_id != tid
+            || d.person_id != a.person()
+            || d.device_id != a.device()
+            || d.created_at > now()
+            || d.created_at < a.cert.data.created_at
+        {
+            return Err(ApiError::invalid("thread deletion identity/time mismatch"));
+        }
+        self.verify(
+            a,
+            &phi_crypto::thread_deletion_signing_bytes(d)?,
+            &deletion.signature,
+        )?;
+        let garbage = self.transaction(|db| {
+            let blob_ids: Vec<String> = {
+                let mut stmt = db
+                    .conn
+                    .prepare("SELECT blob_id FROM blob_refs WHERE thread_id=?")?;
+                stmt.query_map([tid.to_string()], |row| row.get(0))?
+                    .collect::<std::result::Result<_, _>>()?
+            };
+            db.conn
+                .execute("DELETE FROM threads WHERE id=?", [tid.to_string()])?;
+            let mut garbage = Vec::new();
+            for id in blob_ids {
+                let referenced: bool = db.conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM blob_refs WHERE blob_id=?)",
+                    [&id],
+                    |row| row.get(0),
+                )?;
+                if !referenced {
+                    db.conn
+                        .execute("INSERT OR IGNORE INTO blob_gc VALUES(?)", [&id])?;
+                    db.conn.execute("DELETE FROM blobs WHERE id=?", [&id])?;
+                    garbage.push(id);
+                }
+            }
+            let seq = db.seq(a.sid())?;
+            db.event(
+                a.sid(),
+                seq,
+                EventData::ThreadDeleted(deletion.clone()),
+                Some(root.envelope.channel_id),
+                None,
+                None,
+            )?;
+            Ok(garbage)
+        })?;
+        let dir = self.config.data_dir.join("blobs");
+        for id in garbage {
+            match std::fs::remove_file(dir.join(&id)) {
+                Ok(()) => {
+                    let _ = self.conn.execute("DELETE FROM blob_gc WHERE id=?", [&id]);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    let _ = self.conn.execute("DELETE FROM blob_gc WHERE id=?", [&id]);
+                }
+                Err(_) => {}
+            }
+        }
+        Ok(deletion)
+    }
     pub fn counts(&self, a: &Auth, q: CountsQuery) -> Result<Counts> {
         q.validate()?;
         let mut counts = Counts {
@@ -371,10 +550,11 @@ impl Db {
             "
             SELECT m.channel_id,COUNT(DISTINCT m.thread_id),COALESCE(SUM((SELECT
             COUNT(*) FROM message_mentions mm WHERE mm.message_id=m.id
-            AND mm.person_id=:person AND (:handle IS NULL OR mm.handle='' OR mm.handle=:handle))),0) FROM messages m JOIN members
-            cm ON cm.channel_id=m.channel_id LEFT JOIN cursors c ON
+            AND mm.person_id=:person AND (:handle IS NULL OR mm.handle='' OR mm.handle=:handle))),0) FROM messages m
+            JOIN threads t ON t.id=m.thread_id
+            JOIN members cm ON cm.channel_id=m.channel_id LEFT JOIN cursors c ON
             c.thread_id=m.thread_id AND c.person_id=cm.person_id WHERE
-            cm.person_id=:person AND m.space_id=:space AND m.seq>COALESCE(c.seq,0)
+            cm.person_id=:person AND m.space_id=:space AND t.closed_at IS NULL AND m.seq>COALESCE(c.seq,0)
             AND {NOTIFICATION_MESSAGE} GROUP BY
             m.channel_id
         ",
@@ -406,8 +586,9 @@ impl Db {
         counts.claimed_by_you = self.conn.query_row(
             "
             SELECT COUNT(*) FROM reactions r JOIN messages m ON m.id=r.message_id
+            JOIN threads t ON t.id=m.thread_id
             JOIN members cm ON cm.channel_id=m.channel_id WHERE cm.person_id=? AND
-            m.space_id=? AND r.person_id=? AND r.kind='claim'
+            m.space_id=? AND r.person_id=? AND r.kind='claim' AND t.closed_at IS NULL
         ",
             params![
                 a.person().to_string(),
@@ -425,9 +606,11 @@ impl Db {
                 "
             SELECT e.json FROM events e LEFT JOIN messages m
             ON m.space_id=e.space_id AND m.seq=e.seq
+            LEFT JOIN threads t ON t.id=e.thread_id
             WHERE e.space_id=:space AND e.seq>:after AND
             ((e.channel_id IS NULL) OR EXISTS(SELECT 1 FROM members m WHERE
             m.channel_id=e.channel_id AND m.person_id=:person))
+            AND (t.id IS NULL OR t.closed_at IS NULL)
             AND (m.id IS NULL OR {NOTIFICATION_MESSAGE}) ORDER BY e.seq LIMIT 1000
         "
             ),

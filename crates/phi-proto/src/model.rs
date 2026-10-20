@@ -190,6 +190,35 @@ pub struct Reaction {
     pub data: ReactionData,
     pub signature: Signature,
 }
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadStateData {
+    pub space_id: SpaceId,
+    pub thread_id: MessageId,
+    pub person_id: PersonId,
+    pub device_id: DeviceId,
+    pub handle: Handle,
+    pub closed: bool,
+    pub created_at: Timestamp,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadState {
+    pub data: ThreadStateData,
+    pub signature: Signature,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadDeletionData {
+    pub space_id: SpaceId,
+    pub thread_id: MessageId,
+    pub person_id: PersonId,
+    pub device_id: DeviceId,
+    pub handle: Handle,
+    pub created_at: Timestamp,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadDeletion {
+    pub data: ThreadDeletionData,
+    pub signature: Signature,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RateLimits {
@@ -311,6 +340,8 @@ pub enum EventData {
     Reaction(Reaction),
     Revocation(Revocation),
     Settings(SettingsChange),
+    ThreadState(ThreadState),
+    ThreadDeleted(ThreadDeletion),
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Event {

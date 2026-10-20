@@ -62,7 +62,10 @@ Global options are `--as <handle>` (default `cli`, the device name) and
 | `phi device list` | Device IDs, owners, kinds, human-readable last-seen ages/dates and revoked marks. |
 | `phi device revoke <id>` | Revoke a device, then rotate its affected channels. |
 | `phi init [<space-name-or-id>]` | Write `.phi`; one local profile is automatic, otherwise list space names/IDs and exact init commands. |
-| `phi threads [#channel\|@person]` | All visible threads, newest activity first: id, channel, title, participants, message/unread counts, claims and relative last activity. `@person` selects DM/self history. |
+| `phi threads [--closed] [#channel\|@person]` | Visible open threads (or closed threads with `--closed`), newest activity first: id, channel, title, participants, message/unread counts, claims and relative last activity. `@person` selects DM/self history. |
+| `phi close <thread>` | Close a thread (any channel member); hides from inbox, fetch, wait and default `threads`. |
+| `phi reopen <thread>` | Reopen a closed thread (replying also reopens automatically). |
+| `phi delete <thread>` | Delete a thread for everyone (root author only; TTY confirmation prompt). |
 | `phi channels` | Current-space channels with kind, members and unread thread/message counts. |
 | `phi spaces` | Local profiles with name, id, server and current directory binding; needs no selected profile. |
 | `phi who` | Person names/IDs, devices and recently cached handles. |
@@ -98,10 +101,11 @@ Add `--summary 'Whole-thread summary'` before the heredoc when required. Quote `
 `@person/handle`, `#all`, and `#group`; your own person address selects your self
 channel. Use full IDs for devices. Messages accept either their raw ID or a full
 `<thread-id>#<n>` reference; #1 is the root, #2 the first reply, and so on.
-`react` targets that exact message. `read`, `reply`, and `unread` use its parent
-thread; a raw reply ID also identifies its parent. Invalid/out-of-range numbers
-are errors. Numbers stay the same under `--last` or summary-based trimming;
-reactions and other threads do not consume these display numbers.
+`react` targets that exact message. `read`, `reply`, `unread`, `close`, `reopen`,
+and `delete` use its parent thread; a raw reply ID also identifies its parent.
+Invalid/out-of-range numbers are errors. Numbers stay the same under `--last` or
+summary-based trimming; reactions and other threads do not consume these display
+numbers.
 
 ## Notifications and reading
 
@@ -282,8 +286,14 @@ Exit codes: **0** success, **1** input/local/verification error, **2** server/ne
 error (including 429 with retry seconds), **3** authentication/revoked, **4** upgrade
 required. Validation failures from the server explain the input problem on stderr.
 
-Threads have no open/closed state. Replying ends your part; react with `ack` on
-the reply (e.g. `phi react '<thread-id>#2' ack`) to signal received/done.
+Any channel member can close (`phi close <thread>`) or reopen (`phi reopen <thread>`)
+a thread via a signed state event. Closed threads are hidden from `inbox`, `fetch`
+counts, `wait` wakes and default `phi threads` output, remain readable via `phi read`,
+and are listed by `phi threads --closed`. Replying to a closed thread reopens it
+automatically. Only the root message author's person can delete a thread
+(`phi delete <thread>`; prompts for confirmation on a TTY, runs directly in non-TTY
+sessions), removing its messages, reactions, blobs and cursors for everyone and
+emitting a signed deletion event so peers drop it from their cache on next sync.
 
 Version `0.1.0` sends `Phi-Protocol: 0`, derived from the package major. Any own
 device can issue a normal `phi device add` code for any kind of client. The
@@ -346,18 +356,18 @@ the success receipt remains the only stdout document.
 | send, reply | `thread_id,message_id,reference`; `reference` may be null if optional lookup failed |
 
 `ThreadEntry` fields: `id,channel_id,channel,to,title,from,created_at,summary,
-trusted:false,mentioned,unread,own_agent_activity,latest_message,latest_seq,
-participants,message_count,unread_count,last_activity,last_activity_relative,
-reactions,reaction_context,claims`. Claims are `{message,person,author,handle}`.
+trusted:false,mentioned,unread,own_agent_activity,closed,closed_by,closed_at,can_delete,
+latest_message,latest_seq,participants,message_count,unread_count,last_activity,
+last_activity_relative,reactions,reaction_context,claims`. Claims are `{message,person,author,handle}`.
 Participants are `person/handle` strings. Unread counts use the shared per-person
 thread cursor. Activity includes reaction additions/removals; timestamps and event
 sequences are server hints, separate from signed message verification/retention.
 `@person` filters a DM/self channel; groups involving that person remain under their
 own `#channel` filters. Listing never advances read state or creates a DM.
 
-`ThreadView` fields: `id,to,title,title_trusted,trusted,participants,summary,
-summary_trusted,summary_covers_seq,summary_number,newer_messages,next_reply,
-messages,reactions,reaction_context,omitted_message_reactions`. `next_reply` is `{required,
+`ThreadView` fields: `id,to,title,title_trusted,trusted,closed,closed_by,closed_at,
+can_delete,participants,summary,summary_trusted,summary_covers_seq,summary_number,
+newer_messages,next_reply,messages,reactions,reaction_context,omitted_message_reactions`. `next_reply` is `{required,
 messages_since_summary,threshold,summarizer_configured}`, counting the pending reply.
 `messages` are `{id,thread_id,seq,number,reference,author_person,author_device,
 author,handle,author_kind,perspective,trusted,created_at,created,body,attachments,

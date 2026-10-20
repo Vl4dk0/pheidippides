@@ -254,6 +254,16 @@ impl Validate for Reaction {
         Ok(())
     }
 }
+impl Validate for ThreadState {
+    fn validate(&self) -> Result<(), ValidationError> {
+        Ok(())
+    }
+}
+impl Validate for ThreadDeletion {
+    fn validate(&self) -> Result<(), ValidationError> {
+        Ok(())
+    }
+}
 impl Validate for CreateSpaceRequest {
     fn validate(&self) -> Result<(), ValidationError> {
         self.root_cert.validate()?;
@@ -443,6 +453,16 @@ impl Validate for MessagesQuery {
 impl Validate for ReactionRequest {
     fn validate(&self) -> Result<(), ValidationError> {
         self.reaction.validate()
+    }
+}
+impl Validate for ThreadStateRequest {
+    fn validate(&self) -> Result<(), ValidationError> {
+        self.state.validate()
+    }
+}
+impl Validate for DeleteThreadRequest {
+    fn validate(&self) -> Result<(), ValidationError> {
+        self.deletion.validate()
     }
 }
 impl Validate for PutCursorRequest {

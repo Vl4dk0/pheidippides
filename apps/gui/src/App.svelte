@@ -33,6 +33,8 @@
     Inbox,
     CircleDot,
     AtSign,
+    Archive,
+    Trash2,
     Flag,
     X,
     PanelLeftClose,
@@ -56,6 +58,7 @@
   let syncErrors = $state<Record<string, string>>({});
   let connecting = $state(false);
   let settings = $state(false);
+  let deleting = $state(false);
   let composing = $state(false);
   let body = $state('');
   let composerInput = $state<HTMLTextAreaElement>();
@@ -89,6 +92,7 @@
     { value: 'unread', label: 'Unread threads', icon: CircleDot },
     { value: 'agents', label: 'My agents’ activity', icon: Bot },
     { value: 'mentions', label: 'Mentions', icon: AtSign },
+    { value: 'closed', label: 'Closed threads', icon: Archive },
   ] as const;
   $effect(() => {
     body;
@@ -162,6 +166,7 @@
     selectedThread = '';
     channel = '';
     settings = false;
+    deleting = false;
     composing = false;
     body = '';
     title = '';
@@ -183,6 +188,7 @@
     body = '';
     title = '';
     settings = false;
+    deleting = false;
     error = '';
     threadRevision = threadSelection.change();
     const rev = revision,
@@ -217,7 +223,8 @@
           selectedThread &&
           !settings &&
           prefs.view &&
-          action.kind !== 'unread'
+          action.kind !== 'unread' &&
+          action.kind !== 'delete'
         ) {
           threadRevision = threadSelection.change();
           await readThread(id, selectedThread, rev, threadRevision);
@@ -231,6 +238,19 @@
       return undefined;
     } finally {
       busy = false;
+    }
+  }
+  async function deleteCurrentThread() {
+    if (!selectedThread) return;
+    const result = await request(
+      { kind: 'delete', thread: selectedThread },
+      api.nothing,
+    );
+    if (result === null) {
+      deleting = false;
+      selectedThread = '';
+      thread = null;
+      threadSelection.change();
     }
   }
   async function send() {
@@ -463,7 +483,7 @@
         />
       </div>{/if}
   {/snippet}
-  {#if !connecting && !settings}{@render errorNotice()}{/if}
+  {#if !connecting && !settings && !deleting}{@render errorNotice()}{/if}
   {#each Object.entries(syncErrors) as [profileId, syncError]}<div
       class="error banner"
       role="status"
@@ -506,6 +526,42 @@
           </div>
           {@render viewControls()}
         </section>{/if}</Modal
+    >{/if}
+  {#if deleting && thread}<Modal
+      label="Delete thread"
+      onclose={() => (deleting = false)}
+      >{@render errorNotice()}
+      <section class="settings" aria-label="Delete thread">
+        <div class="row modal-heading">
+          <div>
+            <small class="eyebrow">DELETE THREAD</small>
+            <h2 tabindex="-1" data-modal-focus>
+              {thread.title || 'Untitled thread'}
+            </h2>
+          </div>
+          <IconButton
+            icon={X}
+            label="Close"
+            onclick={() => (deleting = false)}
+          />
+        </div>
+        <p class="muted" style="line-height: 1.7; font-size: 12px;">
+          Delete this thread and all of its messages, reactions, and attachments
+          for everyone in this space? This cannot be undone.
+        </p>
+        <div class="form-footer" style="margin-top: 20px;">
+          <button type="button" onclick={() => (deleting = false)}
+            >Cancel</button
+          >
+          <button
+            type="button"
+            class="danger-action"
+            disabled={busy}
+            onclick={deleteCurrentThread}
+            ><Trash2 size={15} /><span>Delete thread</span></button
+          >
+        </div>
+      </section></Modal
     >{/if}
   <main class="workspace">
     <aside class="space-rail" aria-label="Spaces">
@@ -689,6 +745,12 @@
                 threadSelection.change();
               }
             }}
+            onclose={(closed) =>
+              request(
+                { kind: 'close', thread: selectedThread, closed },
+                api.nothing,
+              )}
+            ondelete={() => (deleting = true)}
           />
         {:else}<div class="thread-scroll">
             {#if !composing}<div class="empty">

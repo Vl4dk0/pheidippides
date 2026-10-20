@@ -7,6 +7,9 @@
   import Avatar from './Avatar.svelte';
   import {
     CircleDot,
+    Archive,
+    ArchiveRestore,
+    Trash2,
     Sparkles,
     ThumbsUp,
     ThumbsDown,
@@ -23,6 +26,8 @@
     personId,
     onreact,
     onunread,
+    onclose,
+    ondelete,
   }: {
     thread: Thread;
     prefs: Preferences;
@@ -30,6 +35,8 @@
     personId: string;
     onreact: (message: string, kind: ReactionKind, remove: boolean) => void;
     onunread: () => void;
+    onclose: (closed: boolean) => void;
+    ondelete: () => void;
   } = $props();
   const participants = $derived(
     [
@@ -122,14 +129,36 @@
       <header class="thread-heading">
         <div class="row">
           <h2>{thread.title}</h2>
-          <IconButton
-            icon={CircleDot}
-            label="Mark unread"
-            disabled={busy}
-            onclick={onunread}
-          />
+          <div class="inline-actions">
+            <IconButton
+              icon={CircleDot}
+              label="Mark unread"
+              disabled={busy}
+              onclick={onunread}
+            />
+            <IconButton
+              icon={thread.closed ? ArchiveRestore : Archive}
+              label={thread.closed ? 'Reopen thread' : 'Close thread'}
+              active={thread.closed}
+              pressed={thread.closed}
+              disabled={busy}
+              onclick={() => onclose(!thread.closed)}
+            />
+            {#if thread.can_delete}<IconButton
+                icon={Trash2}
+                label="Delete thread"
+                variant="danger"
+                disabled={busy}
+                onclick={ondelete}
+              />{/if}
+          </div>
         </div>
         {#if prefs.metadata}<p class="participants muted">
+            {#if thread.closed}<span class="closed-pill"
+                ><Archive size={13} />{thread.closed_by
+                  ? `Closed by ${thread.closed_by}`
+                  : 'Closed'}</span
+              >{/if}
             {#each participants as participant}<span
                 ><Avatar
                   personId={participant.person_id}

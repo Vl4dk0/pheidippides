@@ -61,6 +61,33 @@ pub fn reaction_signing_bytes(data: &ReactionData) -> Result<Vec<u8>, CryptoErro
         ),
     )
 }
+pub fn thread_state_signing_bytes(data: &ThreadStateData) -> Result<Vec<u8>, CryptoError> {
+    signing_bytes(
+        "phi thread state v1",
+        &(
+            data.space_id,
+            data.thread_id,
+            data.person_id,
+            data.device_id,
+            &data.handle,
+            data.closed,
+            data.created_at,
+        ),
+    )
+}
+pub fn thread_deletion_signing_bytes(data: &ThreadDeletionData) -> Result<Vec<u8>, CryptoError> {
+    signing_bytes(
+        "phi thread delete v1",
+        &(
+            data.space_id,
+            data.thread_id,
+            data.person_id,
+            data.device_id,
+            &data.handle,
+            data.created_at,
+        ),
+    )
+}
 pub fn settings_signing_bytes(data: &SettingsChangeData) -> Result<Vec<u8>, CryptoError> {
     // The implicit default preserves existing signed settings; custom intervals are explicitly bound.
     if data.settings.summary_every != SpaceSettings::default().summary_every {
@@ -142,6 +169,24 @@ pub fn sign_revocation(
 pub fn sign_reaction(data: ReactionData, issuer: &DeviceKeys) -> Result<Reaction, CryptoError> {
     Ok(Reaction {
         signature: issuer.sign(&reaction_signing_bytes(&data)?),
+        data,
+    })
+}
+pub fn sign_thread_state(
+    data: ThreadStateData,
+    issuer: &DeviceKeys,
+) -> Result<ThreadState, CryptoError> {
+    Ok(ThreadState {
+        signature: issuer.sign(&thread_state_signing_bytes(&data)?),
+        data,
+    })
+}
+pub fn sign_thread_deletion(
+    data: ThreadDeletionData,
+    issuer: &DeviceKeys,
+) -> Result<ThreadDeletion, CryptoError> {
+    Ok(ThreadDeletion {
+        signature: issuer.sign(&thread_deletion_signing_bytes(&data)?),
         data,
     })
 }
@@ -275,6 +320,32 @@ impl VerifiedDirectory {
             &author.certificate.data.sign_pub,
             &reaction_signing_bytes(&reaction.data)?,
             &reaction.signature,
+        )
+    }
+    pub fn verify_thread_state(&self, state: &ThreadState) -> Result<(), CryptoError> {
+        let author = self.device(state.data.device_id)?;
+        if state.data.space_id != self.space_id
+            || state.data.person_id != author.certificate.data.person_id
+        {
+            return Err(CryptoError::Trust("thread state identity mismatch"));
+        }
+        verify_signature(
+            &author.certificate.data.sign_pub,
+            &thread_state_signing_bytes(&state.data)?,
+            &state.signature,
+        )
+    }
+    pub fn verify_thread_deletion(&self, deletion: &ThreadDeletion) -> Result<(), CryptoError> {
+        let author = self.device(deletion.data.device_id)?;
+        if deletion.data.space_id != self.space_id
+            || deletion.data.person_id != author.certificate.data.person_id
+        {
+            return Err(CryptoError::Trust("thread deletion identity mismatch"));
+        }
+        verify_signature(
+            &author.certificate.data.sign_pub,
+            &thread_deletion_signing_bytes(&deletion.data)?,
+            &deletion.signature,
         )
     }
     pub fn verify_settings(&self, change: &SettingsChange) -> Result<(), CryptoError> {

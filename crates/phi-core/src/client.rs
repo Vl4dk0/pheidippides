@@ -934,6 +934,9 @@ impl Client {
             .await?;
         self.directory.verify_message(&message)?;
         self.cache.message(&message, &content)?;
+        if let Some(tid) = message.envelope.thread_id {
+            self.clear_thread_closed(tid)?;
+        }
         if message.envelope.thread_id.is_none()
             || history
                 .last()
@@ -1053,12 +1056,21 @@ impl Client {
                 }
                 self.cache.db.execute("INSERT INTO cursors VALUES(?,?) ON CONFLICT(thread) DO UPDATE SET seq=excluded.seq", params![cursor.thread_id.to_string(), cursor.last_read_seq])?;
             }
+            for deletion in page.deleted {
+                if let Some(expected_thread) = thread {
+                    if deletion.data.thread_id != expected_thread {
+                        return Err(user("thread deletion crossed thread scope"));
+                    }
+                }
+                self.verify_and_apply_deletion(&deletion)?;
+            }
             for activity in page.activities {
                 if !decoded.iter().rev().take(count).any(|m| {
                     m.message.envelope.thread_id.unwrap_or(m.message.id) == activity.thread_id
                 }) {
                     return Err(user("thread activity crossed page boundary"));
                 }
+                self.verify_thread_activity(&activity)?;
                 self.cache
                     .set(&format!("discovery/{}", activity.thread_id), &activity)?;
             }
@@ -1382,6 +1394,13 @@ impl Client {
             to,
         )?;
         view.next_reply = next_reply;
+        let (closed, closed_by, closed_at) = self.thread_closed_meta(entry.id)?;
+        view.closed = closed;
+        view.closed_by = closed_by;
+        view.closed_at = closed_at;
+        view.can_delete = self
+            .cached_message(entry.id)?
+            .is_some_and(|m| m.author_person == self.profile.person_id);
         let foreign_content = view.has_foreign_content();
         let hidden_messages = view
             .messages
@@ -1426,6 +1445,9 @@ impl Client {
         self.begin_operation().await?;
         let messages = self.load_thread(thread).await?;
         let latest = messages.last().map_or(0, |m| m.message.seq);
+        let can_delete = messages
+            .first()
+            .is_some_and(|m| m.message.author_person == self.profile.person_id);
         let to = messages
             .first()
             .map(|m| self.addressed_to(&m.message))
@@ -1433,6 +1455,11 @@ impl Client {
         let next_reply = self.next_reply(&messages);
         let mut view = compose_thread(thread, messages, options, &self.names(), to)?;
         view.next_reply = next_reply;
+        let (closed, closed_by, closed_at) = self.thread_closed_meta(thread)?;
+        view.closed = closed;
+        view.closed_by = closed_by;
+        view.closed_at = closed_at;
+        view.can_delete = can_delete;
         for message in &mut view.messages {
             for attachment in &message.content.attachments {
                 message.attachments.push(self.download(attachment).await?);
@@ -1556,6 +1583,14 @@ impl Client {
     }
     /// The desktop keeps read threads visible without advancing their read cursors.
     pub async fn threads(&mut self) -> Result<Vec<InboxEntry>> {
+        Ok(self
+            .all_threads()
+            .await?
+            .into_iter()
+            .filter(|entry| !entry.closed)
+            .collect())
+    }
+    pub async fn all_threads(&mut self) -> Result<Vec<InboxEntry>> {
         self.begin_operation().await?;
         let messages = self.sync_all().await?;
         let mut threads: BTreeMap<MessageId, Vec<DecodedMessage>> = BTreeMap::new();
@@ -1597,6 +1632,12 @@ impl Client {
             let activity = self
                 .cache
                 .get::<ThreadActivity>(&format!("discovery/{id}"))?;
+            let closed = activity.as_ref().is_some_and(|a| a.closed_at.is_some());
+            let closed_by = activity
+                .as_ref()
+                .and_then(|a| a.closed_by)
+                .map(|p| self.person_name(p));
+            let closed_at = activity.as_ref().and_then(|a| a.closed_at);
             result.push(InboxEntry {
                 id,
                 channel: self.channel_name(root.message.envelope.channel_id),
@@ -1650,6 +1691,10 @@ impl Client {
                 last_activity_seq: activity
                     .as_ref()
                     .map_or(latest.message.seq, |a| a.last_activity_seq),
+                closed,
+                closed_by,
+                closed_at,
+                can_delete: root.message.author_person == self.profile.person_id,
             });
         }
         result.sort_by_key(|e| {
@@ -1976,6 +2021,12 @@ impl Client {
                     EventData::Reaction(reaction) => {
                         self.directory.certificate(reaction.data.device_id).is_err()
                     }
+                    EventData::ThreadState(state) => {
+                        self.directory.certificate(state.data.device_id).is_err()
+                    }
+                    EventData::ThreadDeleted(deletion) => {
+                        self.directory.certificate(deletion.data.device_id).is_err()
+                    }
                     EventData::Settings(change) => self
                         .directory
                         .certificate(change.data.issuer_device)
@@ -2026,6 +2077,20 @@ impl Client {
                     }
                 }
             }
+            entries.retain(|e| match e {
+                WaitEntry::Message(entry) => {
+                    self.has_cached_thread(entry.id).unwrap_or(false)
+                        && !self.thread_closed_meta(entry.id).is_ok_and(|m| m.0)
+                }
+                WaitEntry::Reaction(notice) => {
+                    self.has_cached_thread(notice.reference.thread)
+                        .unwrap_or(false)
+                        && !self
+                            .thread_closed_meta(notice.reference.thread)
+                            .is_ok_and(|m| m.0)
+                }
+                _ => true,
+            });
             // The cursor names only outcomes recorded locally, never an unsigned high-water mark.
             if !entries.is_empty() {
                 for entry in &mut entries {
@@ -2061,6 +2126,7 @@ impl Client {
                         if let Some(root) = self.cached_message(entry.id)? {
                             entry.to = self.addressed_to(&root);
                             entry.mentioned = self.addressed_to_me(&root.envelope.mentions);
+                            entry.can_delete = root.author_person == self.profile.person_id;
                         }
                         entry.reactions = self.thread_reactions(entry.id)?;
                     }
@@ -2098,6 +2164,9 @@ impl Client {
                     &message.signature,
                 )?;
                 self.cache.message(&message, &content)?;
+                if let Some(tid) = message.envelope.thread_id {
+                    self.clear_thread_closed(tid)?;
+                }
                 let thread = message.envelope.thread_id.unwrap_or(message.id);
                 let already_read = self
                     .cache
@@ -2118,6 +2187,7 @@ impl Client {
                     self.cache.number(&message, 1)?;
                 }
                 let root = self.thread_root(&message)?;
+                let (closed, closed_by, closed_at) = self.thread_closed_meta(root.id)?;
                 WaitEntry::Message(InboxEntry {
                     id: message.envelope.thread_id.unwrap_or(message.id),
                     channel: self.channel_name(message.envelope.channel_id),
@@ -2154,6 +2224,10 @@ impl Client {
                     unread_count: 1,
                     last_activity: message.created_at,
                     last_activity_seq: message.seq,
+                    closed,
+                    closed_by,
+                    closed_at,
+                    can_delete: root.author_person == self.profile.person_id,
                 })
             }
             EventData::Reaction(reaction) => {
@@ -2204,6 +2278,15 @@ impl Client {
                     title,
                     reaction,
                 })
+            }
+            EventData::ThreadState(state) => {
+                self.directory.verify_thread_state(&state)?;
+                self.apply_thread_state(&state)?;
+                return Ok(None);
+            }
+            EventData::ThreadDeleted(deletion) => {
+                self.verify_and_apply_deletion(&deletion)?;
+                return Ok(None);
             }
             EventData::Settings(change) => {
                 self.settings = self.cache.accept_settings(&self.directory, &change)?;
@@ -2618,7 +2701,19 @@ impl Client {
         Ok(self.who_view().await?.text())
     }
     pub async fn discover_threads(&mut self, destination: Option<&str>) -> Result<Vec<InboxEntry>> {
-        let mut threads = self.threads().await?;
+        self.discover_threads_filtered(destination, false).await
+    }
+    pub async fn discover_threads_filtered(
+        &mut self,
+        destination: Option<&str>,
+        closed: bool,
+    ) -> Result<Vec<InboxEntry>> {
+        let mut threads: Vec<_> = self
+            .all_threads()
+            .await?
+            .into_iter()
+            .filter(|t| t.closed == closed)
+            .collect();
         let channel_id = if let Some(to) = destination {
             if let Some(name) = to.strip_prefix('#') {
                 Some(
@@ -2654,6 +2749,168 @@ impl Client {
         }
         threads.sort_by_key(|t| std::cmp::Reverse((t.last_activity_seq, t.latest_seq)));
         Ok(threads)
+    }
+    pub async fn close_thread(&mut self, thread: MessageId) -> Result<ThreadState> {
+        self.set_thread_closed(thread, true).await
+    }
+    pub async fn reopen_thread(&mut self, thread: MessageId) -> Result<ThreadState> {
+        self.set_thread_closed(thread, false).await
+    }
+    pub async fn set_thread_closed(
+        &mut self,
+        thread: MessageId,
+        closed: bool,
+    ) -> Result<ThreadState> {
+        self.begin_operation().await?;
+        let state = sign_thread_state(
+            ThreadStateData {
+                space_id: self.profile.space_id,
+                thread_id: thread,
+                person_id: self.profile.person_id,
+                device_id: self.profile.device_id,
+                handle: self.handle.clone(),
+                closed,
+                created_at: now(),
+            },
+            &self.identity.keys(),
+        )?;
+        let response: ThreadStateResponse = self
+            .http
+            .send(
+                Method::PUT,
+                &format!("/threads/{thread}/state"),
+                &ThreadStateRequest {
+                    state: state.clone(),
+                },
+            )
+            .await?;
+        self.directory.verify_thread_state(&response)?;
+        if response != state {
+            return Err(user("server changed thread state event"));
+        }
+        self.apply_thread_state(&response)?;
+        Ok(response)
+    }
+    pub async fn delete_thread(&mut self, thread: MessageId) -> Result<ThreadDeletion> {
+        self.begin_operation().await?;
+        let deletion = sign_thread_deletion(
+            ThreadDeletionData {
+                space_id: self.profile.space_id,
+                thread_id: thread,
+                person_id: self.profile.person_id,
+                device_id: self.profile.device_id,
+                handle: self.handle.clone(),
+                created_at: now(),
+            },
+            &self.identity.keys(),
+        )?;
+        let response: DeleteThreadResponse = self
+            .http
+            .send(
+                Method::DELETE,
+                &format!("/threads/{thread}"),
+                &DeleteThreadRequest {
+                    deletion: deletion.clone(),
+                },
+            )
+            .await?;
+        self.directory.verify_thread_deletion(&response)?;
+        if response != deletion {
+            return Err(user("server changed thread deletion event"));
+        }
+        self.cache
+            .delete_thread(thread, &self.store.cache_dir(&self.profile))?;
+        Ok(response)
+    }
+    fn has_cached_thread(&self, thread: MessageId) -> Result<bool> {
+        Ok(self
+            .cache
+            .db
+            .query_row(
+                "SELECT 1 FROM messages WHERE thread=? LIMIT 1",
+                [thread.to_string()],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+    fn thread_closed_meta(&self, thread: MessageId) -> Result<(bool, Option<String>, Option<u64>)> {
+        Ok(
+            match self
+                .cache
+                .get::<ThreadActivity>(&format!("discovery/{thread}"))?
+            {
+                Some(activity) => (
+                    activity.closed_at.is_some(),
+                    activity.closed_by.map(|p| self.person_name(p)),
+                    activity.closed_at,
+                ),
+                None => (false, None, None),
+            },
+        )
+    }
+    fn verify_thread_activity(&self, activity: &ThreadActivity) -> Result<()> {
+        if activity.closed_by.is_some() || activity.closed_at.is_some() || activity.state.is_some()
+        {
+            let Some(state) = &activity.state else {
+                return Err(user("closed thread activity missing signed state"));
+            };
+            self.directory.verify_thread_state(state)?;
+            if state.data.thread_id != activity.thread_id
+                || !state.data.closed
+                || activity.closed_by != Some(state.data.person_id)
+                || activity.closed_at != Some(state.data.created_at)
+            {
+                return Err(user("thread close metadata does not match signed state"));
+            }
+        }
+        Ok(())
+    }
+    fn apply_thread_state(&mut self, state: &ThreadState) -> Result<()> {
+        let key = format!("discovery/{}", state.data.thread_id);
+        let mut activity = self
+            .cache
+            .get::<ThreadActivity>(&key)?
+            .unwrap_or(ThreadActivity {
+                thread_id: state.data.thread_id,
+                last_activity: state.data.created_at,
+                last_activity_seq: 0,
+                closed_by: None,
+                closed_at: None,
+                state: None,
+            });
+        if state.data.closed {
+            activity.closed_by = Some(state.data.person_id);
+            activity.closed_at = Some(state.data.created_at);
+            activity.state = Some(state.clone());
+        } else {
+            activity.closed_by = None;
+            activity.closed_at = None;
+            activity.state = None;
+        }
+        self.cache.set(&key, &activity)
+    }
+    fn clear_thread_closed(&mut self, thread: MessageId) -> Result<()> {
+        let key = format!("discovery/{thread}");
+        if let Some(mut activity) = self.cache.get::<ThreadActivity>(&key)? {
+            activity.closed_by = None;
+            activity.closed_at = None;
+            activity.state = None;
+            self.cache.set(&key, &activity)?;
+        }
+        Ok(())
+    }
+    fn verify_and_apply_deletion(&mut self, deletion: &ThreadDeletion) -> Result<()> {
+        self.directory.verify_thread_deletion(deletion)?;
+        if let Some(root) = self.cached_message(deletion.data.thread_id)? {
+            if root.author_person != deletion.data.person_id {
+                return Err(user("thread deletion not signed by root author"));
+            }
+        }
+        self.cache.delete_thread(
+            deletion.data.thread_id,
+            &self.store.cache_dir(&self.profile),
+        )
     }
     pub async fn channel_views(&mut self) -> Result<Vec<ChannelView>> {
         let threads = self.threads().await?;

@@ -79,6 +79,20 @@ pub(super) fn router(server: Server) -> Router {
         .route("/messages/{mid}", get(message))
         .route("/messages/{mid}/reactions", post(react))
         .route("/messages/{mid}/reactions/{kind}", delete(unreact))
+        .route(
+            "/threads/{tid}/state",
+            put(thread_state).route_layer(middleware::from_fn_with_state(
+                server.clone(),
+                admit_message,
+            )),
+        )
+        .route(
+            "/threads/{tid}",
+            delete(delete_thread).route_layer(middleware::from_fn_with_state(
+                server.clone(),
+                admit_message,
+            )),
+        )
         .route("/threads/{tid}/cursor", put(cursor))
         .route("/blobs", post(upload))
         .route("/blobs/{bid}", get(download))
@@ -404,6 +418,26 @@ async fn cursor(
 ) -> Result<Json<ReadCursor>> {
     server
         .authorized(token, move |db, auth| db.cursor(auth, id, input))
+        .await
+}
+async fn thread_state(
+    State(server): State<Server>,
+    Extension(token): Extension<Bearer>,
+    Id(id): Id<MessageId>,
+    Input(input): Input<ThreadStateRequest>,
+) -> Result<Json<ThreadState>> {
+    server
+        .authorized(token, move |db, auth| db.thread_state(auth, id, input))
+        .await
+}
+async fn delete_thread(
+    State(server): State<Server>,
+    Extension(token): Extension<Bearer>,
+    Id(id): Id<MessageId>,
+    Input(input): Input<DeleteThreadRequest>,
+) -> Result<Json<ThreadDeletion>> {
+    server
+        .authorized(token, move |db, auth| db.delete_thread(auth, id, input))
         .await
 }
 async fn counts(

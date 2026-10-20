@@ -101,6 +101,10 @@ struct ThreadEntry {
     latest_seq: u64,
     reactions: Vec<ReactionView>,
     reaction_summary: ReactionSummary,
+    closed: bool,
+    closed_by: Option<String>,
+    closed_at: Option<u64>,
+    can_delete: bool,
 }
 #[derive(Serialize)]
 struct Snapshot {
@@ -145,6 +149,10 @@ struct ThreadView {
     summary_number: Option<usize>,
     newer_messages: usize,
     messages: Vec<MessageView>,
+    closed: bool,
+    closed_by: Option<String>,
+    closed_at: Option<u64>,
+    can_delete: bool,
 }
 
 #[derive(Deserialize)]
@@ -240,6 +248,13 @@ pub enum Request {
     Unread {
         thread: MessageId,
     },
+    Close {
+        thread: MessageId,
+        closed: bool,
+    },
+    Delete {
+        thread: MessageId,
+    },
     Settings {
         retention_days: u32,
         summary_mode: SummaryMode,
@@ -266,7 +281,7 @@ pub async fn execute(
     match request {
         Request::Snapshot => {
             let threads = client
-                .threads()
+                .all_threads()
                 .await
                 .map_err(err)?
                 .into_iter()
@@ -288,6 +303,10 @@ pub async fn execute(
                     latest_seq: t.latest_seq,
                     reactions: reactions(&client, &t.reactions),
                     reaction_summary: reaction_summary(&t.reactions, &client.names()),
+                    closed: t.closed,
+                    closed_by: t.closed_by,
+                    closed_at: t.closed_at,
+                    can_delete: t.can_delete,
                 })
                 .collect();
             serde_json::to_value(Snapshot {
@@ -387,6 +406,10 @@ pub async fn execute(
                 summary_number: view.summary_number,
                 newer_messages: view.newer_messages,
                 messages,
+                closed: view.closed,
+                closed_by: view.closed_by,
+                closed_at: view.closed_at,
+                can_delete: view.can_delete,
             })
             .map_err(err)
         }
@@ -421,6 +444,17 @@ pub async fn execute(
         }
         Request::Unread { thread } => {
             client.unread(thread).await.map_err(err)?;
+            Ok(serde_json::Value::Null)
+        }
+        Request::Close { thread, closed } => {
+            client
+                .set_thread_closed(thread, closed)
+                .await
+                .map_err(err)?;
+            Ok(serde_json::Value::Null)
+        }
+        Request::Delete { thread } => {
+            client.delete_thread(thread).await.map_err(err)?;
             Ok(serde_json::Value::Null)
         }
         Request::Settings {

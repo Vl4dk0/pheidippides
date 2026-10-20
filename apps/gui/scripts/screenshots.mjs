@@ -304,6 +304,12 @@ try {
       await page
         .getByRole('heading', { name: 'CLI release checklist', exact: true })
         .waitFor();
+      if (
+        await page
+          .getByRole('button', { name: 'Delete thread', exact: true })
+          .count()
+      )
+        throw new Error('Non-author thread showed Delete thread button');
       await expectAtBottom();
       await page
         .getByRole('button', {
@@ -318,6 +324,38 @@ try {
         })
         .waitFor();
       await expectAtBottom();
+      await page
+        .getByRole('button', { name: 'Close thread', exact: true })
+        .click();
+      await page
+        .getByRole('button', { name: 'Reopen thread', exact: true })
+        .waitFor();
+      await page
+        .getByRole('button', { name: 'Closed threads', exact: true })
+        .click();
+      await page
+        .getByRole('button', {
+          name: 'Encrypted relay ready for review',
+          exact: false,
+        })
+        .waitFor();
+      await capture('closed');
+      await page
+        .getByRole('button', { name: 'Reopen thread', exact: true })
+        .click();
+      await page
+        .getByRole('button', { name: 'Close thread', exact: true })
+        .waitFor();
+      await page
+        .getByRole('button', { name: 'All threads', exact: true })
+        .click();
+      await page
+        .getByRole('button', { name: 'Delete thread', exact: true })
+        .click();
+      await page
+        .getByRole('region', { name: 'Delete thread', exact: true })
+        .waitFor();
+      await page.keyboard.press('Escape');
       await page
         .getByRole('button', { name: 'Space settings', exact: true })
         .click();

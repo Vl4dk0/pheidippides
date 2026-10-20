@@ -45,6 +45,10 @@ pub struct ThreadView {
     pub messages: Vec<DecodedMessage>,
     pub reactions: Vec<Reaction>,
     pub names: BTreeMap<PersonId, String>,
+    pub closed: bool,
+    pub closed_by: Option<String>,
+    pub closed_at: Option<u64>,
+    pub can_delete: bool,
 }
 #[derive(Clone, Debug)]
 pub struct InboxEntry {
@@ -68,6 +72,10 @@ pub struct InboxEntry {
     pub unread_count: usize,
     pub last_activity: u64,
     pub last_activity_seq: Seq,
+    pub closed: bool,
+    pub closed_by: Option<String>,
+    pub closed_at: Option<u64>,
+    pub can_delete: bool,
 }
 #[derive(Clone, Debug)]
 pub enum WaitEntry {
@@ -170,6 +178,10 @@ pub(crate) fn compose_thread(
         messages,
         reactions,
         names: names.clone(),
+        closed: false,
+        closed_by: None,
+        closed_at: None,
+        can_delete: false,
     })
 }
 pub(crate) fn summary_input(history: &[DecodedMessage]) -> String {
@@ -305,6 +317,15 @@ impl ThreadView {
             self.to,
             self.participants.join(", ")
         );
+        if self.closed {
+            output.push_str(&format!(
+                "status: closed{}\n",
+                self.closed_by
+                    .as_ref()
+                    .map(|by| format!(" by {by}"))
+                    .unwrap_or_default()
+            ));
+        }
         output.push_str(&self.next_reply.text());
         if let Some(summary) = &self.summary {
             let status = if self.newer_messages == 0 {
@@ -598,6 +619,7 @@ impl ThreadView {
             "summary_trusted": self.summary_perspective.map(|p| p != MessagePerspective::Other),
             "summary_covers_seq": self.summary_covers_seq, "summary_number": self.summary_number,
             "newer_messages": self.newer_messages, "next_reply": self.next_reply,
+            "closed": self.closed, "closed_by": self.closed_by, "closed_at": self.closed_at, "can_delete": self.can_delete,
             "messages": self.messages.iter().map(|m| m.json(&self.names)).collect::<Vec<_>>(),
             "reactions": self.reactions, "reaction_context": format_reactions(&self.reactions, &self.names), "omitted_message_reactions":self.reaction_context})
     }
@@ -623,6 +645,7 @@ impl InboxEntry {
         serde_json::json!({"id":self.id, "channel_id":self.channel_id, "channel":self.channel, "to":self.to,
             "title":self.title, "from":self.from,"created_at":self.created_at,"summary":self.summary,"trusted":false,
             "mentioned":self.mentioned,"unread":self.unread,"own_agent_activity":self.own_agent_activity,
+            "closed":self.closed,"closed_by":self.closed_by,"closed_at":self.closed_at,"can_delete":self.can_delete,
             "latest_message":self.latest_message,"latest_seq":self.latest_seq,
             "participants":self.participants,"message_count":self.message_count,"unread_count":self.unread_count,
             "last_activity":self.last_activity,"last_activity_relative":format_last_seen(self.last_activity),
@@ -631,7 +654,7 @@ impl InboxEntry {
     }
     pub fn discovery_text(&self, names: &BTreeMap<PersonId, String>) -> String {
         format!(
-            "{} · {} · {} · participants: {} · {} messages · {} unread · {} · {}\n",
+            "{} · {} · {} · participants: {} · {} messages · {} unread · {} · {}{}\n",
             self.id,
             self.channel,
             self.title.split_whitespace().collect::<Vec<_>>().join(" "),
@@ -653,7 +676,8 @@ impl InboxEntry {
                     )
                 }
             },
-            format_last_seen(self.last_activity)
+            format_last_seen(self.last_activity),
+            if self.closed { " · closed" } else { "" }
         )
     }
 }

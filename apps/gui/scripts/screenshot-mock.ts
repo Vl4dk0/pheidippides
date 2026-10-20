@@ -228,6 +228,10 @@ const threads: Thread[] = conversations.map((c, index) => {
     summary_number: 3,
     newer_messages: c.count - 3,
     messages,
+    closed: false,
+    closed_by: null,
+    closed_at: null,
+    can_delete: index % 2 === 0,
   });
 });
 
@@ -255,6 +259,10 @@ const snapshots = profiles.map((profile, i) =>
             latest_seq: 100 - n,
             reactions: t.messages[0].reactions,
             reaction_summary: t.messages[0].reaction_summary,
+            closed: t.closed,
+            closed_by: t.closed_by,
+            closed_at: t.closed_at,
+            can_delete: t.can_delete,
           }))
         : [],
     retention_days: 14,
@@ -353,6 +361,32 @@ mockIPC((command, payload) => {
         t.id === thread.id ? { ...t, unread: false, mentioned: false } : t,
       );
       return thread;
+    }
+    if (request.kind === 'close') {
+      const { thread: tid, closed } = z
+        .object({ thread: z.string(), closed: z.boolean() })
+        .parse(request);
+      const thread = threads.find((t) => t.id === tid);
+      if (!thread) throw new Error('Unknown screenshot thread');
+      thread.closed = closed;
+      thread.closed_by = closed ? 'vladko' : null;
+      thread.closed_at = closed ? now : null;
+      snapshot.threads = snapshot.threads.map((t) =>
+        t.id === tid
+          ? {
+              ...t,
+              closed: thread.closed,
+              closed_by: thread.closed_by,
+              closed_at: thread.closed_at,
+            }
+          : t,
+      );
+      return null;
+    }
+    if (request.kind === 'delete') {
+      const { thread: tid } = z.object({ thread: z.string() }).parse(request);
+      snapshot.threads = snapshot.threads.filter((t) => t.id !== tid);
+      return null;
     }
   }
   throw new Error(

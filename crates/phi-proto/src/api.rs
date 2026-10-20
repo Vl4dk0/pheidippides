@@ -134,6 +134,8 @@ pub struct ListMessagesResponse {
     pub cursors: Vec<ReadCursor>,
     #[serde(default)]
     pub activities: Vec<ThreadActivity>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deleted: Vec<ThreadDeletion>,
     pub next_after: Option<Seq>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -143,6 +145,20 @@ pub struct ReactionRequest {
     pub reaction: Reaction,
 }
 pub type ReactionResponse = Reaction;
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ThreadStateRequest {
+    #[serde(deserialize_with = "crate::validation::strict")]
+    pub state: ThreadState,
+}
+pub type ThreadStateResponse = ThreadState;
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeleteThreadRequest {
+    #[serde(deserialize_with = "crate::validation::strict")]
+    pub deletion: ThreadDeletion,
+}
+pub type DeleteThreadResponse = ThreadDeletion;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PutCursorRequest {
@@ -247,6 +263,12 @@ pub struct ThreadActivity {
     pub thread_id: MessageId,
     pub last_activity: u64,
     pub last_activity_seq: Seq,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed_by: Option<PersonId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed_at: Option<Timestamp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<ThreadState>,
 }
 
 /// An additive error detail lets clients recover drafts without parsing human prose.
