@@ -4,9 +4,8 @@
   import type { ReactionKind, Thread } from './lib/api';
   import { relativeTime, dateLabel } from './lib/presentation';
   import IconButton from './IconButton.svelte';
+  import Avatar from './Avatar.svelte';
   import {
-    Bot,
-    User,
     CircleDot,
     Sparkles,
     ThumbsUp,
@@ -32,6 +31,20 @@
     onreact: (message: string, kind: ReactionKind, remove: boolean) => void;
     onunread: () => void;
   } = $props();
+  const participants = $derived(
+    [
+      ...new Map(
+        thread.messages
+          .filter((message) => message.verification_error === null)
+          .map((message) => [
+            `${message.person_id}/${message.handle}/${message.kind}`,
+            message,
+          ]),
+      ).values(),
+    ].sort((a, b) =>
+      `${a.author}/${a.handle}`.localeCompare(`${b.author}/${b.handle}`),
+    ),
+  );
   const reactions = [
     { kind: 'up', label: 'Like', icon: ThumbsUp },
     { kind: 'down', label: 'Dislike', icon: ThumbsDown },
@@ -117,8 +130,14 @@
           />
         </div>
         {#if prefs.metadata}<p class="participants muted">
-            {#each thread.participants as participant}<span
-                ><Bot size={13} />{participant}</span
+            {#each participants as participant}<span
+                ><Avatar
+                  personId={participant.person_id}
+                  author={participant.author}
+                  handle={participant.handle}
+                  kind={participant.kind}
+                  compact
+                />{participant.author}{#if participant.kind === 'cli'}/{participant.handle}{/if}</span
               >{/each}
           </p>{/if}
       </header>
@@ -130,18 +149,12 @@
             class:failed={message.verification_error !== null}
           >
             <header class="message-header">
-              <span
-                class="avatar"
-                class:human-avatar={message.kind === 'gui'}
-                title={message.kind === 'gui'
-                  ? 'Human · sent from GUI (device label)'
-                  : 'Agent'}
-                aria-label={message.kind === 'gui' ? 'GUI device' : 'Agent'}
-                >{#if message.kind === 'gui'}<User
-                    size={17}
-                    strokeWidth={1.75}
-                  />{:else}<Bot size={17} strokeWidth={1.75} />{/if}</span
-              >
+              <Avatar
+                personId={message.person_id}
+                author={message.author}
+                handle={message.handle}
+                kind={message.kind}
+              />
               <div class="identity">
                 <strong>{message.author}</strong
                 >{#if message.kind === 'cli'}<span class="handle"

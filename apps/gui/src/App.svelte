@@ -413,7 +413,7 @@
     <div class="composer-line">
       <span
         class="avatar human-avatar"
-        title={`Write as ${snapshot?.profile.display_name ?? 'yourself'} · GUI device`}
+        title={`${snapshot?.profile.display_name ?? 'yourself'} · human`}
         ><User size={17} /></span
       ><textarea
         aria-label="Message"

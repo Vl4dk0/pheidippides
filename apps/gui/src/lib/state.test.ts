@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import { Panda, Snail } from '@lucide/svelte';
+import { agentAvatar } from './avatar';
 import {
   entrySchema,
   pollSchema,
@@ -31,6 +33,15 @@ const entry: Entry = {
   reaction_summary: { up: 0, down: 0, ack: 0, claims: [] },
 };
 describe('desktop state boundary', () => {
+  it('keeps UTF-8 agent animals stable across calls and distinguishes identities', () => {
+    expect(agentAvatar(id, 'main')).toBe(Panda);
+    expect(agentAvatar(id, 'main')).toBe(agentAvatar(id, 'main'));
+    expect(agentAvatar(id, 'reviewer')).not.toBe(agentAvatar(id, 'main'));
+    expect(agentAvatar('BBBBBBBBBBBBBBBBBBBBBB', 'main')).not.toBe(
+      agentAvatar(id, 'main'),
+    );
+    expect(agentAvatar('Žofia', 'main')).toBe(Snail);
+  });
   it('filters channel, unread, agent activity and mentions independently, sorted by sequence', () => {
     const items = [
       entry,

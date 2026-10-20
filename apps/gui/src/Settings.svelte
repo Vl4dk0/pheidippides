@@ -7,6 +7,7 @@
     SlidersHorizontal,
     Users,
     Monitor,
+    Terminal,
     KeyRound,
     UserPlus,
     Plus,
@@ -214,7 +215,8 @@
           class="row"
         >
           <span class="member-identity"
-            ><span class="avatar human-avatar"><User size={16} /></span
+            ><span class="avatar human-avatar" title={`${displayName} · human`}
+              ><User size={16} /></span
             >{displayName}{#if person === snapshot.profile.person_id}<small
                 class="muted">you</small
               >{/if}</span
@@ -249,8 +251,10 @@
           class="row"
         >
           <div class="device-identity">
-            <span class="avatar"
-              >{#if device.kind === 'gui'}<Monitor size={16} />{:else}<Bot
+            <span
+              class="avatar"
+              title={`${snapshot.profile.display_name} · ${device.kind === 'gui' ? 'GUI' : 'CLI'} device`}
+              >{#if device.kind === 'gui'}<Monitor size={16} />{:else}<Terminal
                   size={16}
                 />{/if}</span
             >
