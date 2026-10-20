@@ -7,15 +7,14 @@ No daemon, GUI, listener or server process is started by the library.
 - `Store::platform()` uses platform config/cache directories; `Store::new` accepts
   explicit roots for embedding/tests. Profile resolution and `.phi` binding live
   here so all frontends share the same isolation policy.
-- `Client::{create,join,open}` provision CLI identities with `FileKeyStore`.
-  `create_for_device`/`join_for_device` take `DeviceOptions`; GUI callers supply
-  `kind=Gui` and a `KeyStoreFactory` which uses the generated profile's IDs to
-  namespace keychain accounts. Use separate GUI config/cache roots via `Store::new`
-  so CLI and GUI retain distinct credentials for the same server/space. `open_with_keystore` reopens that identity. GUI
-  provisioning requires a supplied store and never creates a file key store.
-  `KeyStore` receives secret bytes; callers must protect them and atomically reject
-  conflicting writes to an existing account (identical writes are idempotent). GUI keychain
-  implementation belongs to M5. The client can move into a Send async task.
+- `Client::{create,join,open}` and `create_for_device`/`join_for_device` all use
+  the same `FileKeyStore`. `DeviceOptions` selects the device kind/name; GUI
+  callers use `kind=Gui` and separate config/cache roots via `Store::new`, keeping
+  distinct credentials for the same server/space. No OS credential service is used.
+  Earlier GUI profiles without a local `keys` file are ignored; re-enroll them
+  instead of migrating keychain entries. The client can move into a Send async task.
+  `KeyStore` accounts atomically reject conflicting writes (identical writes are
+  idempotent).
 - `invite` issues a code redeemable by any kind of client from any own device.
   The redeeming client declares its kind; the GUI mark is a label trusted like
   handles, not proof of human authorship. `invite(true, true)` issues a never-expiring enrollment/recovery code;
@@ -37,7 +36,8 @@ No daemon, GUI, listener or server process is started by the library.
 - `keys` is a private SQLite account store separate from the plaintext cache.
   Account `identity` stores device secrets/token/certificate; channel accounts
   store epoch keys. JSON secret buffers use `Zeroizing`; rusqlite/HTTP internals
-  are not guaranteed to erase every transient copy. Lost keys lose history.
+  are not guaranteed to erase every transient copy. The file is mode 0600 on Unix;
+  the same OS user (including local agents) can read it. Lost keys lose history.
 - Wait cursors are durable per profile/handle. Each delivered sequence gets a
   durable `wait_outcomes` record before advancement: verified/cacheable, ignored
   own-session activity, or an explicit verification failure. Failed events are
@@ -136,8 +136,8 @@ Protocol major 0 signs a domain-separated key commitment in every channel roster
 Refresh and join stage unwrapped keys, require their epoch/hash in the accepted
 membership history, and validate encrypted metadata/peer context before writing
 immutable key accounts. Roster pins and epoch commitments commit in one SQLite
-transaction; keys follow only after that acceptance. SQLite and an OS keychain
-cannot share a transaction, so self-wrap recovery completes interrupted writes
+transaction; keys follow only after that acceptance. The cache and key store use
+separate SQLite databases, so self-wrap recovery completes interrupted writes
 without putting channel secrets in the plaintext trust-state journal.
 Earlier prototype peers/stores are incompatible; recreate development spaces with all
 components upgraded. There is no legacy unsigned acceptance path.

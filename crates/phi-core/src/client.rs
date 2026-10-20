@@ -32,37 +32,22 @@ pub struct SendOptions {
     pub summary: Option<String>,
     pub files: Vec<PathBuf>,
 }
-pub type KeyStoreFactory = Box<dyn FnOnce(&Profile) -> Result<Box<dyn KeyStore>> + Send>;
-
 pub struct DeviceOptions {
     pub kind: DeviceKind,
     pub name: String,
-    pub keystore: Option<KeyStoreFactory>,
 }
 impl Default for DeviceOptions {
     fn default() -> Self {
         Self {
             kind: DeviceKind::Cli,
             name: "cli".into(),
-            keystore: None,
         }
     }
 }
 impl DeviceOptions {
     fn validate(&self) -> Result<()> {
         let _: Handle = self.name.parse()?;
-        if self.kind == DeviceKind::Gui && self.keystore.is_none() {
-            return Err(user("GUI devices require a keychain KeyStore"));
-        }
         Ok(())
-    }
-    fn storage(self, store: &Store, profile: &Profile) -> Result<Box<dyn KeyStore>> {
-        match self.keystore {
-            Some(factory) => factory(profile),
-            None => Ok(Box::new(FileKeyStore::open(
-                &store.profile_dir(profile).join("keys"),
-            )?)),
-        }
     }
 }
 
@@ -189,7 +174,9 @@ impl Client {
             token: response.device_token,
             certificate: cert,
         };
-        let key_store = device.storage(&store, &profile)?;
+        let key_store: Box<dyn KeyStore> = Box::new(FileKeyStore::open(
+            &store.profile_dir(&profile).join("keys"),
+        )?);
         store_json(key_store.as_ref(), "identity", &identity)?;
         save_channel_key(key_store.as_ref(), &all_key)?;
         save_channel_key(key_store.as_ref(), &own_key)?;
@@ -283,7 +270,9 @@ impl Client {
                 "a profile for this space already exists on this machine",
             ));
         }
-        let key_store = device.storage(&store, &profile)?;
+        let key_store: Box<dyn KeyStore> = Box::new(FileKeyStore::open(
+            &store.profile_dir(&profile).join("keys"),
+        )?);
         let identity = Identity {
             sign: KeyBytes::from_bytes(*sign),
             kex: KeyBytes::from_bytes(*kex),
@@ -373,15 +362,10 @@ impl Client {
         Ok(client)
     }
     pub async fn open(store: Store, profile: Profile, handle: Option<&str>) -> Result<Self> {
-        if profile.kind == DeviceKind::Gui {
-            return Err(user(
-                "this profile uses the GUI keychain; open it through the desktop app",
-            ));
-        }
         let keys = FileKeyStore::open(&store.profile_dir(&profile).join("keys"))?;
         Self::open_with_keystore(store, profile, handle, Box::new(keys)).await
     }
-    pub async fn open_with_keystore(
+    async fn open_with_keystore(
         store: Store,
         profile: Profile,
         handle: Option<&str>,

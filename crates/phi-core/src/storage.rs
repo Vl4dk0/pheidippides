@@ -68,7 +68,14 @@ impl Store {
         for entry in fs::read_dir(path)? {
             let file = entry?.path().join("profile.toml");
             if file.is_file() {
-                result.push(toml::from_str(&fs::read_to_string(file)?)?);
+                let profile: Profile = toml::from_str(&fs::read_to_string(file)?)?;
+                // Earlier GUI prototypes kept keys outside the profile; they cannot be reopened.
+                if profile.kind == DeviceKind::Gui
+                    && !self.profile_dir(&profile).join("keys").is_file()
+                {
+                    continue;
+                }
+                result.push(profile);
             }
         }
         result.sort_by(|a, b| a.name.cmp(&b.name));
@@ -151,7 +158,6 @@ fn profile_selection_error(profiles: &[Profile]) -> crate::Error {
     ))
 }
 
-// GUI implementations can put these accounts in the OS keychain; plaintext cache stays separate.
 /// Accounts are immutable: identical writes may succeed; conflicting writes must fail atomically.
 pub trait KeyStore: Send {
     fn get(&self, account: &str) -> Result<Option<Zeroizing<Vec<u8>>>>;

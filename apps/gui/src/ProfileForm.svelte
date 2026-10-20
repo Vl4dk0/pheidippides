@@ -109,7 +109,7 @@
     {/if}
     <div class="form-footer">
       <small class="muted"
-        ><ShieldCheck size={15} />Keys stay in your OS keychain.</small
+        ><ShieldCheck size={15} />Keys stay in a private file on this device.</small
       ><IconButton
         icon={ArrowRight}
         label={mode === 'join' ? 'Join space' : 'Create space'}

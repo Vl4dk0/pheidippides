@@ -2,9 +2,8 @@
 
 Tauri 2, Svelte 5, TypeScript and plain CSS. Requires Rust stable **1.90+**,
 Node 22+, pnpm, and the [Tauri platform prerequisites](https://v2.tauri.app/start/prerequisites/).
-Linux also needs a running Secret Service keychain (for example GNOME Keyring)
-and the D-Bus development package. macOS uses Keychain; Windows uses Credential
-Manager. There is no plaintext private-key fallback.
+Private keys use phi-core's file-backed storage on every platform; no OS
+credential service is required.
 
 ## Build and verify without opening a window
 
@@ -50,7 +49,7 @@ Edit `scripts/screenshot-mock.ts` to change the two-space fixture: six threads,
 agent/human messages, claims/acks, mentions, summaries, and raster/file attachments.
 The `apps` space is intentionally empty. Tauri's `mockIPC` and `mockWindows`
 feed the normal Zod-validated command boundary. Unsupported IPC fails the run;
-background polls stay pending, with notifications off. No real server, Keychain,
+background polls stay pending, with notifications off. No real server, credentials,
 or external network is used. This checks frontend rendering only.
 
 `vite.config.ts` substitutes the mock entrypoint only when serving in the
@@ -108,17 +107,18 @@ and their decrypted cache path. The prototype composer sends text only.
   raster preview URLs are checked. Cryptography, directory verification,
   encrypted transport, cache, rotation, summaries and read/wait cursors stay in
   phi-core. Verification errors are displayed beside the affected message.
-- `src-tauri/src/key_store.rs` implements phi-core's `KeyStore` using keyring 3.
-  All private identity material, bearer tokens and channel epoch keys live in
-  the OS credential store under service `sk.pheidippides.desktop`, with hashed
-  accounts scoped by server/space/device/account. Owned secret read buffers are zeroized; backend libraries may retain transient copies.
-  `fs2` supplies a cross-process lock around keyring's read/compare/write because
-  its portable API has no atomic create-if-absent operation. Identical writes
-  are idempotent; conflicting writes fail. The lock file contains no secrets.
+- GUI and CLI use phi-core's same `FileKeyStore` and create/join/open paths.
+  Private identity material, bearer tokens and channel epoch keys live in each
+  profile's `keys` SQLite file (0600 on Unix), separate from its plaintext cache.
+  Identical account writes are idempotent; conflicting writes fail atomically.
+  Owned secret read buffers are zeroized; backend libraries may retain transient copies.
 - GUI config/cache roots are `Store::platform()`'s roots plus `/gui`, separate
   from CLI credentials. Each GUI profile's `profile.toml` is ordinary metadata;
-  decrypted message/attachment caches remain plaintext as in phi-core. Keychain
-  protection does not encrypt those caches or defend against a compromised OS.
+  decrypted message/attachment caches remain plaintext as in phi-core. Keys are
+  readable by the same OS user, including local agents; “sent from GUI” is a
+  trusted label, not a security boundary. Old keychain-backed GUI profiles without
+  a `keys` file are ignored; create a new enrollment code from another own device.
+  There is no migration and existing keychain entries are left untouched.
 - While open, one background frontend loop per profile invokes the core's
   durable `wait` cursor using a separate client. Only the first successful poll
   is quiet; the next poll can notify even if the first returned backlog. Later
@@ -130,16 +130,17 @@ and their decrypted cache path. The prototype composer sends text only.
 - The [Tauri notification plugin](https://v2.tauri.app/plugin/notification/)
   handles OS permissions. Notifications default off, cover incoming DMs
   and mentions, and contain only the space name. Windows notifications require
-  an installed app; OS permission/Keychain behavior needs human runtime testing.
+  an installed app; OS notification permissions need human runtime testing.
 - CSP allows local code, IPC and raster data URLs only. No remote content,
   shell, arbitrary filesystem, or asset-protocol plugin is enabled. Private
   keys, attachment keys and device bearer tokens never cross into JavaScript.
 
 Six headless Vitest cases cover filters/order, boundary rejection, notification
 eligibility, preference recovery, claims/reaction labels and selection races.
-The existing core GUI integration case also covers all/read thread listings,
-own-agent activity and encrypted display-name changes without touching the OS
-keychain. Native GUI runtime, OS dialogs and non-macOS builds are not exercised here.
+The existing core GUI integration case also covers file-backed create/join/reopen,
+private key-file permissions, ignored legacy profiles, all/read thread listings,
+own-agent activity and encrypted display-name changes. Native GUI runtime, OS
+dialogs and non-macOS builds are not exercised here.
 
 Core supplies thread-relative message numbers, summary positions and structured
 reaction counts plus every claimant; Svelte renders them without recalculating

@@ -1,4 +1,3 @@
-use crate::key_store::{OsKeyStore, profile_id};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use phi_core::{
     Client, DeviceOptions, Profile, ReactionSummary, ReadOptions, SendOptions, Store, WaitEntry,
@@ -10,6 +9,18 @@ use phi_proto::{
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use tauri::State;
+
+fn profile_id(profile: &Profile) -> String {
+    blake3::hash(
+        format!(
+            "{}/{}/{}",
+            profile.server, profile.space_id, profile.device_id
+        )
+        .as_bytes(),
+    )
+    .to_hex()
+    .to_string()
+}
 
 pub struct AppState(pub Store);
 fn err(error: impl std::fmt::Display) -> String {
@@ -150,14 +161,10 @@ pub enum Provision {
         admin_token: Option<String>,
     },
 }
-fn device(store: &Store) -> DeviceOptions {
-    let store = store.clone();
+fn device() -> DeviceOptions {
     DeviceOptions {
         kind: DeviceKind::Gui,
         name: "gui".into(),
-        keystore: Some(Box::new(move |profile| {
-            Ok(Box::new(OsKeyStore::open(&store, profile)?))
-        })),
     }
 }
 #[tauri::command]
@@ -179,7 +186,7 @@ pub async fn provision(
     let store = state.0.clone();
     let client = match request {
         Provision::Join { link, display_name } => {
-            Client::join_for_device(store.clone(), &link, &display_name, device(&store)).await
+            Client::join_for_device(store.clone(), &link, &display_name, device()).await
         }
         Provision::Create {
             server,
@@ -193,7 +200,7 @@ pub async fn provision(
                 &name,
                 &display_name,
                 admin_token,
-                device(&store),
+                device(),
             )
             .await
         }
@@ -208,8 +215,7 @@ async fn open(store: &Store, id: &str) -> Result<Client, String> {
         .into_iter()
         .find(|p| p.kind == DeviceKind::Gui && profile_id(p) == id)
         .ok_or("unknown GUI profile")?;
-    let keys = OsKeyStore::open(store, &profile).map_err(err)?;
-    Client::open_with_keystore(store.clone(), profile, Some("gui"), Box::new(keys))
+    Client::open(store.clone(), profile, Some("gui"))
         .await
         .map_err(err)
 }

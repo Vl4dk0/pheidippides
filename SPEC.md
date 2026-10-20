@@ -78,8 +78,8 @@ Addressing in the CLI:
  │ agent ─ phi (CLI) ─┐              │              │ phi-server                       │
  │ agent ─ phi (CLI) ─┼─ phi-core ───┼── HTTPS ────▶│  • spaces, persons, devices      │
  │ GUI (Tauri) ───────┘   (lib)      │   JSON API   │    (public keys, certificates)   │
- │ keys: file 0600 (cli) / OS        │              │  • channels, wrapped keys        │
- │       keychain (gui)              │              │  • encrypted messages, blobs     │
+ │ keys: private file 0600           │              │  • channels, wrapped keys        │
+ │       (cli + gui)                 │              │  • encrypted messages, blobs     │
  │ local cache (SQLite)              │              │  • plaintext metadata: ids, seq, │
  └───────────────────────────────────┘              │    author, handle, mentions,     │
                                                     │    reactions, read cursors       │
@@ -104,7 +104,7 @@ Crate choices (decided, keep it to these unless blocked):
 `reqwest` (rustls), `serde`/`serde_json`, `clap` (derive), `thiserror`/`anyhow`,
 `ed25519-dalek`, `x25519-dalek`, `chacha20poly1305` (XChaCha20-Poly1305),
 `hkdf` + `sha2`, `blake3` (ids/fingerprints), `rand`/`getrandom`, `zeroize`,
-`base64` (URL-safe, no pad), `keyring` (GUI only), `directories`,
+`base64` (URL-safe, no pad), `directories`,
 `rustls-acme` (server auto-TLS), `tracing`. Edition 2024, stable toolchain.
 
 ---
@@ -203,13 +203,16 @@ are retried on open (changed in prototype review).
 
 ### 4.5 Key storage
 
-- `cli` devices: `~/.config/pheidippides/` (platform dir via `directories`),
-  one profile per (server, space): `profile.toml` + `keys` file mode 0600.
-- `gui` device: private keys in the OS keychain (`keyring`), so agents running
-  shell commands on the same machine can't trivially read them. This is what
-  helps protect GUI credentials. The **"sent from GUI"** mark is a best-effort
-  indication of the signing device kind, not a security guarantee or proof of
-  human authorship (see 7.2) (changed in prototype review).
+- CLI and GUI devices use the same phi-core `FileKeyStore`: one profile per
+  (server, space), with `profile.toml` + a private `keys` file mode 0600 under the
+  platform config dir (`directories`, e.g. `~/.config/pheidippides/`). GUI
+  config/cache roots keep their `/gui` suffix, so GUI and CLI remain separate
+  devices. No OS credential service is used (changed in prototype review).
+- The **"sent from GUI"** mark is a client-declared label trusted like handles;
+  local agents can read GUI credentials as the same OS user. It is not a security
+  guarantee or proof of human authorship (see 7.2). Earlier keychain-backed GUI
+  profiles without a `keys` file are ignored; re-enroll instead of migrating them
+  (changed in prototype review).
 - Lost keys = unreadable history. Mitigation: any other own device can enroll a
   new one; GUI offers "export recovery code" = an `enroll` grant without expiry,
   shown once. (Prototype: implement the never-expiring enroll grant; UI copy
@@ -558,7 +561,9 @@ served by the host (a host-served UI could be swapped to steal keys).
 - Right: thread view: summary card on top (with "covers up to #k"), messages,
   agent vs human styling, a small **"sent from GUI"** mark on messages whose
   author device kind is `gui`, attachments preview (images inline), reactions
-  (click to react/claim).
+  (click to react/claim). This mark is a trusted label like handles, not proof of
+  human authorship; GUI credentials use the same private file storage as the CLI
+  (changed in prototype review).
 - Composer: write as human (no summary required; runs local summarizer if
   configured).
 - Settings per space: display name, retention, summary mode and interval

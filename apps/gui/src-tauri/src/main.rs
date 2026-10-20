@@ -1,6 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod bridge;
-mod key_store;
 
 fn main() -> Result<(), String> {
     let platform = phi_core::Store::platform().map_err(|e| e.to_string())?;

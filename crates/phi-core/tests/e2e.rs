@@ -1628,54 +1628,48 @@ async fn tampered_message_attachment_and_sequence_are_rejected() -> Result<()> {
     Ok(())
 }
 
-#[derive(Clone, Default)]
-struct MemoryKeys(Arc<Mutex<std::collections::BTreeMap<String, Vec<u8>>>>);
-impl KeyStore for MemoryKeys {
-    fn get(&self, account: &str) -> phi_core::Result<Option<zeroize::Zeroizing<Vec<u8>>>> {
-        let map = self
-            .0
-            .lock()
-            .map_err(|_| Error::User("keychain mock poisoned".into()))?;
-        Ok(map.get(account).cloned().map(zeroize::Zeroizing::new))
-    }
-    fn put(&self, account: &str, bytes: &[u8]) -> phi_core::Result<()> {
-        self.0
-            .lock()
-            .map_err(|_| Error::User("keychain mock poisoned".into()))?
-            .insert(account.into(), bytes.to_vec());
-        Ok(())
-    }
-}
-fn gui_device(keys: MemoryKeys) -> DeviceOptions {
+fn gui_device() -> DeviceOptions {
     DeviceOptions {
         kind: DeviceKind::Gui,
         name: "desktop".into(),
-        keystore: Some(Box::new(move |_| Ok(Box::new(keys)))),
     }
 }
 #[tokio::test]
-async fn gui_keystore_boundary_and_self_declared_device_kind() -> Result<()> {
+async fn gui_file_storage_and_self_declared_device_kind() -> Result<()> {
     let f = Fixture::new().await?;
-    let keys = MemoryKeys::default();
-    let mut origin = Client::create(f.store("origin"), &f.url, "gui-space", "alice", None).await?;
-    let first = origin.invite(true, false).await?;
-    let competing = origin.invite(true, false).await?;
-    let mut gui =
-        Client::join_for_device(f.store("gui"), &first, "alice", gui_device(keys.clone())).await?;
-    let competing_gui = Client::join_for_device(
-        f.store("competing-gui"),
-        &competing,
+    let mut origin = Client::create_for_device(
+        f.store("origin"),
+        &f.url,
+        "gui-space",
         "alice",
-        gui_device(MemoryKeys::default()),
+        None,
+        gui_device(),
     )
     .await?;
+    let first = origin.invite(true, false).await?;
+    let competing = origin.invite(true, false).await?;
+    let mut gui = Client::join_for_device(f.store("gui"), &first, "alice", gui_device()).await?;
+    // A profile left by the external-key prototype must not block re-enrollment.
+    let legacy_store = f.store("competing-gui");
+    legacy_store.save_profile(&gui.profile)?;
+    ensure!(legacy_store.profiles()?.is_empty());
+    let competing_gui =
+        Client::join_for_device(legacy_store.clone(), &competing, "alice", gui_device()).await?;
+    ensure!(legacy_store.profiles()?.len() == 1);
     ensure!(competing_gui.profile.kind == DeviceKind::Gui);
+    let keys_path = f.store("gui").profile_dir(&gui.profile).join("keys");
+    ensure!(keys_path.is_file());
     ensure!(
-        !f.store("gui")
-            .profile_dir(&gui.profile)
+        f.store("origin")
+            .profile_dir(&origin.profile)
             .join("keys")
-            .exists()
+            .is_file()
     );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        ensure!(std::fs::metadata(&keys_path)?.permissions().mode() & 0o777 == 0o600);
+    }
     let link = gui.invite(true, false).await?;
     let mut cli = Client::join(f.store("cli"), &link, "alice").await?;
     let root = gui
@@ -1720,7 +1714,7 @@ async fn gui_keystore_boundary_and_self_declared_device_kind() -> Result<()> {
         f.store("cli-enrolled-gui"),
         &cli_gui_enroll,
         "alice",
-        gui_device(MemoryKeys::default()),
+        gui_device(),
     )
     .await?;
     ensure!(cli_enrolled_gui.profile.kind == DeviceKind::Gui);
@@ -1728,19 +1722,18 @@ async fn gui_keystore_boundary_and_self_declared_device_kind() -> Result<()> {
     let recovered_cli = Client::join(f.store("recovered-cli"), &gui_code, "alice").await?;
     ensure!(recovered_cli.profile.kind == DeviceKind::Cli);
     let gui_code = cli.invite(true, false).await?;
-    let gui2 = Client::join_for_device(
-        f.store("gui2"),
-        &gui_code,
-        "alice",
-        gui_device(MemoryKeys::default()),
-    )
-    .await?;
+    let gui2 = Client::join_for_device(f.store("gui2"), &gui_code, "alice", gui_device()).await?;
     ensure!(
         gui2.profile.kind == DeviceKind::Gui && gui2.profile.person_id == gui.profile.person_id
     );
-    let reopened =
-        Client::open_with_keystore(f.store("gui"), gui.profile.clone(), None, Box::new(keys))
-            .await?;
+    let mut reopened = Client::open(f.store("gui"), gui.profile.clone(), None).await?;
+    ensure!(
+        reopened
+            .read(root.id, ReadOptions::default())
+            .await?
+            .text()
+            .contains("from desktop")
+    );
     // The shared core can be moved into a GUI async task without a local executor.
     tokio::spawn(async move {
         let mut client = reopened;
