@@ -1959,31 +1959,30 @@ async fn wait_survives_transient_gateway_errors() -> Result<()> {
 }
 
 #[tokio::test]
-async fn revoking_the_space_root_is_refused() -> Result<()> {
+async fn revoking_the_space_root_does_not_strand_others() -> Result<()> {
     let f = Fixture::new().await?;
     let (mut alice, mut bob) = f.pair().await?;
     let link = alice.invite(false, false).await?;
     let mut carol = Client::join(f.store("carol"), &link, "carol").await?;
-    for target in [
-        RevocationTarget::Person {
-            person_id: alice.profile.person_id,
-        },
-        RevocationTarget::Device {
-            device_id: alice.profile.device_id,
-        },
-    ] {
-        let error = bob.revoke(target).await.err().map(|e| e.to_string());
-        ensure!(
-            error.as_deref().is_some_and(|e| e.contains("root")),
-            "root revocation accepted: {error:?}"
-        );
-    }
-    carol.refresh().await?;
-    bob.fetch().await?;
-    alice
-        .send("#all", "Still here", options("root keeps working"))
+    let welcome = alice.send("#all", "Welcome", options("hello team")).await?;
+    carol.wait_text(0).await?;
+    bob.react(welcome.id, ReactionKind::Ack, false).await?;
+    bob.revoke(RevocationTarget::Person {
+        person_id: alice.profile.person_id,
+    })
+    .await?;
+    carol.fetch().await?;
+    let view = carol.read(welcome.id, ReadOptions::default()).await?;
+    ensure!(view.text().contains("hello team"));
+    let invite = carol.invite(false, false).await?;
+    let mut dave = Client::join(f.store("dave"), &invite, "dave").await?;
+    let enrollment = carol.invite(true, false).await?;
+    Client::join(f.store("carol-laptop"), &enrollment, "carol").await?;
+    let sent = dave
+        .send("#all", "After", options("new person works"))
         .await?;
-    ensure!(carol.wait_text(0).await?.contains("root keeps working"));
+    ensure!(carol.wait_text(0).await?.contains("new person works"));
+    ensure!(carol.read(sent.id, ReadOptions::default()).await.is_ok());
     Ok(())
 }
 

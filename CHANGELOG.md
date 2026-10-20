@@ -2,16 +2,16 @@
 
 ## Unreleased
 
-- Revoking a member no longer strands the space. Channel rosters a later roster
-  signed by an active device chains back to stay verifiable, the revoker re-signs
-  space settings the revoked member had issued, messages already cached stay
-  readable, and a device enrolling after the revocation accepts certificates
-  issued before it. Before, every client failed to open or enroll with
-  `invalid trust chain: revoked device` once a person who had created the space,
-  changed settings or issued a roster was revoked. Records a revoked device
-  signs afterwards are still rejected.
-- The space root cannot be revoked (client and server refuse with a clear
-  message): every certificate chains to it.
+- Revoking a member no longer strands the space. Before, after the person who
+  created the space (or who had invited others, changed settings or created a
+  group) was revoked, nobody could read the threads they had posted and nobody
+  new could join or add a device (`invalid trust chain: revoked device`,
+  `unpinned certificate from a revoked issuer`). Now what a device signed before
+  its revocation stays usable: cached messages and reactions stay readable,
+  rosters that a later roster from an active device chains to verify, the
+  revoker re-signs settings the revoked member had issued, and a device enrolling
+  afterwards accepts certificates issued before the revocation. Anything a
+  revoked device signs afterwards is still rejected.
 - `phi wait` splits a long wait into polls of at most 45 s and retries a few
   transient 502/503/504 answers, so it survives reverse proxies whose idle
   timeout is below the 900 s long-poll limit (nginx defaults to 60 s,

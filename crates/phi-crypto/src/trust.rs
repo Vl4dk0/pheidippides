@@ -199,9 +199,6 @@ impl VerifiedDirectory {
     pub fn revocations(&self) -> &[Revocation] {
         &self.revocations
     }
-    pub fn root(&self) -> &DeviceCertificate {
-        &self.root
-    }
     /// Persist only after successful verification; reload as trusted prior state.
     pub fn pinned_state(&self) -> PinnedTrustState {
         PinnedTrustState {
@@ -292,7 +289,17 @@ impl VerifiedDirectory {
         Ok(author)
     }
     pub fn verify_reaction(&self, reaction: &Reaction) -> Result<(), CryptoError> {
-        let author = self.device(reaction.data.device_id)?;
+        self.verify_reaction_from(reaction, self.device(reaction.data.device_id)?)
+    }
+    /// A reaction cached while its author was active; see `verify_cached_message`.
+    pub fn verify_cached_reaction(&self, reaction: &Reaction) -> Result<(), CryptoError> {
+        self.verify_reaction_from(reaction, self.signer(reaction.data.device_id)?)
+    }
+    fn verify_reaction_from(
+        &self,
+        reaction: &Reaction,
+        author: VerifiedDevice,
+    ) -> Result<(), CryptoError> {
         if reaction.data.space_id != self.space_id
             || reaction.data.person_id != author.certificate.data.person_id
         {

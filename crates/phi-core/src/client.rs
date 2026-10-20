@@ -1085,8 +1085,12 @@ impl Client {
                 {
                     return Err(user("reaction outside message page"));
                 }
-                self.directory.verify_reaction(&reaction)?;
-                self.save_reaction(&reaction)?;
+                // A revoked member's reactions no longer count; they must not block the sync.
+                match self.directory.verify_reaction(&reaction) {
+                    Ok(()) => self.save_reaction(&reaction)?,
+                    Err(_) if self.directory.certificate(reaction.data.device_id).is_ok() => {}
+                    Err(error) => return Err(error.into()),
+                }
             }
             if count < 1000 {
                 break;
@@ -1686,7 +1690,7 @@ impl Client {
         raws.into_iter()
             .map(|raw| {
                 let reaction: Reaction = serde_json::from_str(&raw)?;
-                self.directory.verify_reaction(&reaction)?;
+                self.directory.verify_cached_reaction(&reaction)?;
                 Ok(reaction)
             })
             .collect()
@@ -1702,7 +1706,7 @@ impl Client {
         raws.into_iter()
             .map(|s| {
                 let reaction: Reaction = serde_json::from_str(&s)?;
-                self.directory.verify_reaction(&reaction)?;
+                self.directory.verify_cached_reaction(&reaction)?;
                 Ok(reaction)
             })
             .collect()
@@ -2492,13 +2496,17 @@ impl Client {
                 "use another device/person to revoke this device so it can finish key rotation",
             ));
         }
-        let root = &self.directory.root().data;
-        if matches!(target, RevocationTarget::Device { device_id } if device_id == root.device_id)
-            || matches!(target, RevocationTarget::Person { person_id } if person_id == root.person_id)
-        {
-            return Err(user(
-                "the space root cannot be revoked: every certificate chains to it; create a new space instead",
-            ));
+        // Settings verify against their issuer's current standing. Re-sign them under
+        // this device first, so no device ever sees settings from a revoked issuer.
+        if let Some(change) = self.cache.get::<SettingsChange>("settings")? {
+            let issuer = &self.directory.certificate(change.data.issuer_device)?.data;
+            let revoked = match target {
+                RevocationTarget::Device { device_id } => device_id == issuer.device_id,
+                RevocationTarget::Person { person_id } => person_id == issuer.person_id,
+            };
+            if revoked {
+                self.publish_settings(change.data.settings).await?;
+            }
         }
         let revocation = sign_revocation(
             RevocationData {
@@ -2513,20 +2521,7 @@ impl Client {
         self.publish_pending_revocations().await?;
         self.refresh().await?;
         self.resume_rotations().await?;
-        self.refresh().await?;
-        // Settings verify against their issuer's current standing; re-sign them so
-        // devices that have not accepted this change yet (or enroll later) can.
-        if let Some(change) = self.cache.get::<SettingsChange>("settings")? {
-            let issuer = &self.directory.certificate(change.data.issuer_device)?.data;
-            let revoked = match target {
-                RevocationTarget::Device { device_id } => device_id == issuer.device_id,
-                RevocationTarget::Person { person_id } => person_id == issuer.person_id,
-            };
-            if revoked {
-                self.publish_settings(change.data.settings).await?;
-            }
-        }
-        Ok(())
+        self.refresh().await
     }
     pub async fn set_settings(&mut self, key: &str, value: &str) -> Result<SettingsChange> {
         self.begin_operation().await?;
