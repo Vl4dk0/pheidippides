@@ -1,7 +1,6 @@
 use base64::{Engine, engine::general_purpose::STANDARD};
 use phi_core::{
-    Client, DeviceOptions, Profile, ReactionSummary, ReadOptions, SendOptions, Store, WaitEntry,
-    reaction_summary,
+    Client, DeviceOptions, Profile, ReadOptions, SendOptions, Store, WaitEntry, reaction_summary,
 };
 use phi_proto::{
     ChannelKind, DeviceKind, MessageId, ReactionKind, RevocationTarget, SpaceId, SummaryMode,
@@ -87,6 +86,44 @@ fn reactions(client: &Client, reactions: &[phi_proto::Reaction]) -> Vec<Reaction
         .collect()
 }
 #[derive(Serialize)]
+struct ClaimView {
+    message: MessageId,
+    number: usize,
+    person: phi_proto::PersonId,
+    author: String,
+    handle: String,
+}
+#[derive(Serialize)]
+struct ReactionSummaryView {
+    up: usize,
+    down: usize,
+    ack: usize,
+    claims: Vec<ClaimView>,
+}
+fn summary(client: &Client, reactions: &[phi_proto::Reaction]) -> ReactionSummaryView {
+    let summary = reaction_summary(reactions, &client.names());
+    ReactionSummaryView {
+        up: summary.up,
+        down: summary.down,
+        ack: summary.ack,
+        claims: summary
+            .claims
+            .into_iter()
+            .map(|c| ClaimView {
+                number: client
+                    .cached_reference(c.message)
+                    .ok()
+                    .flatten()
+                    .map_or(0, |r| r.number),
+                message: c.message,
+                person: c.person,
+                author: c.author,
+                handle: c.handle.to_string(),
+            })
+            .collect(),
+    }
+}
+#[derive(Serialize)]
 struct ThreadEntry {
     id: MessageId,
     channel: String,
@@ -100,7 +137,7 @@ struct ThreadEntry {
     own_agent_activity: bool,
     latest_seq: u64,
     reactions: Vec<ReactionView>,
-    reaction_summary: ReactionSummary,
+    reaction_summary: ReactionSummaryView,
 }
 #[derive(Serialize)]
 struct Snapshot {
@@ -133,7 +170,7 @@ struct MessageView {
     body: String,
     verification_error: Option<String>,
     reactions: Vec<ReactionView>,
-    reaction_summary: ReactionSummary,
+    reaction_summary: ReactionSummaryView,
     attachments: Vec<AttachmentView>,
 }
 #[derive(Serialize)]
@@ -287,7 +324,7 @@ pub async fn execute(
                     own_agent_activity: t.own_agent_activity,
                     latest_seq: t.latest_seq,
                     reactions: reactions(&client, &t.reactions),
-                    reaction_summary: reaction_summary(&t.reactions, &client.names()),
+                    reaction_summary: summary(&client, &t.reactions),
                 })
                 .collect();
             serde_json::to_value(Snapshot {
@@ -375,7 +412,7 @@ pub async fn execute(
                     body: message.content.body,
                     verification_error: message.verification_error,
                     reactions: reactions(&client, &message.reactions),
-                    reaction_summary: reaction_summary(&message.reactions, &client.names()),
+                    reaction_summary: summary(&client, &message.reactions),
                     attachments,
                 });
             }

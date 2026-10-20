@@ -25,19 +25,20 @@ export const reactionSchema = z.object({
   handle: z.string(),
   created_at: integer,
 });
+export const claimSchema = z.object({
+  message: id,
+  number: integer.optional(),
+  person: id,
+  author: z.string(),
+  handle: z.string(),
+});
 export const reactionSummarySchema = z.object({
   up: integer,
   down: integer,
   ack: integer,
-  claims: z.array(
-    z.object({
-      message: id,
-      person: id,
-      author: z.string(),
-      handle: z.string(),
-    }),
-  ),
+  claims: z.array(claimSchema),
 });
+export type Claim = z.infer<typeof claimSchema>;
 export type ReactionSummary = z.infer<typeof reactionSummarySchema>;
 export const entrySchema = z.object({
   id,

@@ -53,18 +53,21 @@ ctx.fillText('agent → phi-core → encrypted relay', 16, 26);
 ctx.fillText('verified locally · keys stay on device', 16, 46);
 const preview = canvas.toDataURL('image/png');
 
-function summarize(message: string, reactions: Reaction[]): ReactionSummary {
+function summarize(
+  reactions: Array<{ message: string; number: number; reaction: Reaction }>,
+): ReactionSummary {
   return {
-    up: reactions.filter((r) => r.kind === 'up').length,
-    down: reactions.filter((r) => r.kind === 'down').length,
-    ack: reactions.filter((r) => r.kind === 'ack').length,
+    up: reactions.filter((r) => r.reaction.kind === 'up').length,
+    down: reactions.filter((r) => r.reaction.kind === 'down').length,
+    ack: reactions.filter((r) => r.reaction.kind === 'ack').length,
     claims: reactions
-      .filter((r) => r.kind === 'claim')
+      .filter((r) => r.reaction.kind === 'claim')
       .map((r) => ({
-        message,
-        person: r.person_id,
-        author: r.author,
-        handle: r.handle,
+        message: r.message,
+        number: r.number,
+        person: r.reaction.person_id,
+        author: r.reaction.author,
+        handle: r.reaction.handle,
       })),
   };
 }
@@ -185,11 +188,29 @@ const threads: Thread[] = conversations.map((c, index) => {
               created_at: now - 360,
             },
           ]
-        : [];
+        : (index === 0 || index === 2) && position === 2
+          ? [
+              {
+                kind: 'claim',
+                person_id: index === 0 ? id(1) : id(3),
+                author: index === 0 ? 'vladko' : 'alice',
+                handle: 'luna',
+                created_at: now - 300,
+              },
+              {
+                kind: 'ack',
+                person_id: id(2),
+                author: 'bob',
+                handle: 'grok',
+                created_at: now - 240,
+              },
+            ]
+          : [];
     const messageId = id(200 + index * 10 + position);
+    const number = position + 1;
     return {
       id: messageId,
-      number: position + 1,
+      number,
       author: people[person],
       person_id: id(person + 1),
       handle: human ? 'gui' : agents[position % agents.length],
@@ -198,7 +219,9 @@ const threads: Thread[] = conversations.map((c, index) => {
       body: c.bodies[position],
       verification_error: null,
       reactions,
-      reaction_summary: summarize(messageId, reactions),
+      reaction_summary: summarize(
+        reactions.map((reaction) => ({ message: messageId, number, reaction })),
+      ),
       attachments:
         index === 0 && position === 0
           ? [
@@ -253,8 +276,16 @@ const snapshots = profiles.map((profile, i) =>
             unread: n % 2 === 0,
             own_agent_activity: n < 3,
             latest_seq: 100 - n,
-            reactions: t.messages[0].reactions,
-            reaction_summary: t.messages[0].reaction_summary,
+            reactions: t.messages.flatMap((m) => m.reactions),
+            reaction_summary: summarize(
+              t.messages.flatMap((m) =>
+                m.reactions.map((reaction) => ({
+                  message: m.id,
+                  number: m.number,
+                  reaction,
+                })),
+              ),
+            ),
           }))
         : [],
     retention_days: 14,
@@ -303,7 +334,7 @@ window.addEventListener('screenshot:incoming', () => {
     body: `Incoming review update ${number}. The encrypted relay is ready for the next check.`,
     created_at: now,
     reactions: [],
-    reaction_summary: summarize(messageId, []),
+    reaction_summary: summarize([]),
     attachments: [],
   });
   thread.newer_messages += 1;

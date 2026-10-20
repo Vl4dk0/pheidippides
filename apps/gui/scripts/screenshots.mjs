@@ -188,6 +188,54 @@ try {
         });
       if (Math.abs(reactionGap) > 1)
         throw new Error('Active reactions have a ghost gap');
+      const claimBadge = page.locator('.thread-card.active .claim-badge');
+      if (
+        (await claimBadge.textContent())?.trim() !== '2' ||
+        (await claimBadge.getAttribute('title')) !==
+          '#1 claimed by bob/flash · #3 claimed by vladko/luna'
+      )
+        throw new Error(
+          'Thread card does not show multi-claim count and #n tooltip',
+        );
+      const messageClaims = await page
+        .locator('.message .claim-pill .claim-author')
+        .allTextContents();
+      if (
+        JSON.stringify(messageClaims) !==
+        JSON.stringify(['bob/flash', 'vladko/luna'])
+      )
+        throw new Error('Messages do not show their own individual claimers');
+      const composer = page.getByRole('textbox', {
+        name: 'Message',
+        exact: true,
+      });
+      const unfocusedLine = await page.locator('.composer-line').boundingBox();
+      await composer.fill(
+        'Certificate chain and epoch checks look solid — ready once #3 lands.',
+      );
+      await composer.focus();
+      const focusedLine = await page.locator('.composer-line').boundingBox();
+      if (JSON.stringify(unfocusedLine) !== JSON.stringify(focusedLine))
+        throw new Error('Focusing composer shifted its layout');
+      const composerMetrics = await page
+        .locator('.composer-line')
+        .evaluate((line) => {
+          const input = line.querySelector('textarea');
+          const style = getComputedStyle(input);
+          const lineStyle = getComputedStyle(line);
+          return {
+            outlineStyle: style.outlineStyle,
+            leftPadding: parseFloat(lineStyle.paddingLeft),
+          };
+        });
+      if (
+        composerMetrics.outlineStyle !== 'none' ||
+        composerMetrics.leftPadding < 16
+      )
+        throw new Error(
+          'Composer focus ring is not calm or left padding is too small',
+        );
+      await expectAtBottom();
       await capture('main');
       const quietReaction = page
         .locator('.message')
@@ -556,6 +604,17 @@ try {
         });
       if (Math.abs(textAlignment) > 1)
         throw new Error('Draft body text is indented relative to its inputs');
+      await page
+        .getByLabel('Title', { exact: true })
+        .fill('Desktop release sign-off');
+      const draftMessage = page.getByRole('textbox', {
+        name: 'Message',
+        exact: true,
+      });
+      await draftMessage.fill(
+        'Please verify the bundle signatures and macOS notarization receipt.',
+      );
+      await draftMessage.focus();
       await capture('compose');
       await context.close();
     }

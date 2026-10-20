@@ -216,9 +216,14 @@
                       {@const members = message.reactions.filter(
                         (r) => r.kind === item.kind,
                       )}
-                      {@const claimed =
-                        item.kind === 'claim' && members.length > 0}
-                      {@const label = `${own ? (item.kind === 'claim' ? 'Release claim' : `Remove ${item.label.toLowerCase()}`) : item.label}${members.length ? ` · ${members.map((r) => `${r.author}/${r.handle}`).join(', ')}` : ''}`}
+                      {@const claim =
+                        item.kind === 'claim'
+                          ? message.reaction_summary.claims[0]
+                          : undefined}
+                      {@const claimed = !!claim}
+                      {@const label = claim
+                        ? `${own ? 'Release claim · ' : 'Claimed by '}${claim.author}/${claim.handle}`
+                        : `${own ? `Remove ${item.label.toLowerCase()}` : item.label}${members.length ? ` · ${members.map((r) => `${r.author}/${r.handle}`).join(', ')}` : ''}`}
                       <IconButton
                         icon={item.icon}
                         {label}
@@ -227,11 +232,14 @@
                         variant={`${claimed ? 'claim-pill' : 'reaction-pill'} ${members.length ? '' : 'reaction-empty'}`}
                         disabled={busy || (claimed && !own)}
                         onclick={() => onreact(message.id, item.kind, own)}
-                        >{#if claimed}<span class="claim-author"
-                            >{members[0].author}<span class="handle"
-                              >/{members[0].handle}</span
+                        >{#if claim}<span class="claim-author"
+                            >{claim.author}<span class="handle"
+                              >/{claim.handle}</span
                             ></span
-                          >{:else if members.length}<span>{members.length}</span
+                          >{:else if members.length}<span
+                            >{message.reaction_summary[
+                              item.kind as 'up' | 'down' | 'ack'
+                            ]}</span
                           >{/if}</IconButton
                       >
                     {/each}
