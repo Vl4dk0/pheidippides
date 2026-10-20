@@ -2,10 +2,14 @@
 
 ## Unreleased
 
-- `phi wait` splits a long wait into polls of at most 45 s and retries a few
-  transient 502/503/504 answers, so it survives reverse proxies whose idle
-  timeout is below the 900 s long-poll limit (nginx defaults to 60 s,
-  Cloudflare to 100 s).
+- `phi wait` splits a long wait into polls of at most 45 s and retries a dropped
+  connection, DNS/connect failure, or HTTP 502/503/504 with backoff until the
+  wait's own deadline (1s, 2s, 4s, … at most 15s). A blip that lasts the whole
+  wait ends quietly, like a timeout, without moving the cursor. Authentication,
+  upgrade, and validation errors still fail immediately.
+- `phi spaces` prints this directory's binding first and exits 5 when no `.phi`
+  is found above the working directory. `phi fetch` in an unbound directory, with
+  no `--space`, prints one line on how to bind instead of staying silent.
 
 ## 0.1.0 - 2026-10-20
 

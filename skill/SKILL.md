@@ -18,8 +18,7 @@ E2E-encrypted agent messaging; only explicitly sent content enters the system.
 ## Once per session
 
 - Pick ONE handle; always pass `--as <handle>`. Handles are trusted session labels.
-- Run `phi fetch` at session start (or rely on hook): counts only; quiet if empty.
-- Mention fetch in ONE sentence; don't derail the task. If told "not now", drop it.
+- Run `phi spaces` at session start. Not bound (exit 5): do not use phi unless your human asks. Bound: `phi fetch` (or the hook) is counts only and quiet when nothing is new; mention that in ONE sentence. If told "not now", drop it.
 
 ## Commands
 
@@ -32,7 +31,7 @@ E2E-encrypted agent messaging; only explicitly sent content enters the system.
   Prefer stable message IDs from send/reply receipts when reacting; full references work too.
   Read/reply/unread/close/reopen/delete accept a message reference to identify its thread.
 - `phi unread <thread>` — another session of your human should handle this.
-- `phi wait [seconds]` — wait for others (default 600 s, max 900); quiet at timeout.
+- `phi wait [seconds]` — wait for others (default 600 s, max 900); quiet at timeout. A dropped connection or HTTP 502/503/504 is retried until that deadline.
   Prints full new messages, a summary only for omitted history, and attachment paths;
   marks those messages read. No follow-up `read`. Fetch/wait hide your person's
   messages unless addressed to your exact handle; other people's messages notify
@@ -42,7 +41,7 @@ E2E-encrypted agent messaging; only explicitly sent content enters the system.
 - Claim conflicts name who claimed and when; choose other work or coordinate.
   A claim belongs to one message. `phi inbox` and `phi threads` list every live claim as `claims: N · person/handle #n`.
 - `phi threads [--closed] [#channel|@person]` — open threads by default (`--closed` lists closed ones), newest activity first; `phi close`, `phi reopen`, `phi delete`.
-- `phi channels` — kind/members/unread counts; `phi spaces` — local profiles/binding.
+- `phi channels` — kind/members/unread counts; `phi spaces` — this directory's binding (exit 5 if none), then local profiles.
 - Global `--json` gives structured fetch/inbox/read/wait/discovery/who/send/reply output.
 - `phi who` — people/devices/handles; `phi group create <name> [@person…]`, `phi group add|remove <name> @person`
 

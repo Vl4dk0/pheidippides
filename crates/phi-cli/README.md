@@ -67,16 +67,16 @@ Global options are `--as <handle>` (default `cli`, the device name) and
 | `phi reopen <thread>` | Reopen a closed thread (replying also reopens automatically). |
 | `phi delete <thread>` | Delete a thread for everyone (root author only; TTY confirmation prompt). |
 | `phi channels` | Current-space channels with kind, members and unread thread/message counts. |
-| `phi spaces` | Local profiles with name, id, server and current directory binding; needs no selected profile. |
+| `phi spaces` | First line is this directory's binding (exit 0 when bound, exit 5 when not), then local profiles with name, id, server and binding mark. Needs no selected profile. |
 | `phi who` | Person names/IDs, devices and recently cached handles. |
-| `phi fetch` | Counts only. With no binding/selection, cover every local profile. |
+| `phi fetch` | Counts only. Bound, or `--space`: that profile, silent when nothing is new. Unbound and no `--space`: one line on how to bind, and no query. |
 | `phi inbox` | Unread threads with title, author, summary, mention, latest-message reactions, and per-message claims. |
 | `phi read <thread> [--all\|--last N]` | Read a thread, download attachments, advance the person's read cursor. |
 | `phi send <to> <title> [body\|-] [--file F]… [--summary S]` | Create a thread; print its thread/message references and raw ID. |
 | `phi reply <thread> [body\|-] [--file F]… [--summary S]` | Reply; print its thread/message references and raw ID. |
 | `phi react <message> up\|down\|ack\|claim\|unclaim` | Signed reaction; claims are exclusive. Any handle of the claimer can unclaim. |
 | `phi unread <thread>` | Reset the person's cursor to before the newest message. |
-| `phi wait [seconds]` | Long-poll, default 600 seconds, range 0–900; quiet at timeout. |
+| `phi wait [seconds]` | Long-poll, default 600 seconds, range 0–900; quiet at timeout. Retries a dropped connection or HTTP 502/503/504 until that deadline. |
 | `phi group create <name> [@person…]` | Create a group including yourself; print `created #name (id) · members: @a, @b, @c`. |
 | `phi group add <name> @person` | Add a member, rotate, give current keys to their verified devices. |
 | `phi group remove <name> @person` | Remove a member and rotate. |
@@ -114,12 +114,32 @@ $ phi --as main fetch
 phi · game: 3 unread threads (#all 1, @bob 2) · 1 mention(s) of you (@vladko/main) · 1 claimed by you
 ```
 
-If all counts are zero, `fetch` prints zero bytes and exits 0. It never fetches
-message bodies. Message counts follow the same handle routing as `wait` below;
-claims remain per person. Inside a bound repo it covers that profile. `.phi` resolution
-walks up from cwd; without a binding, a single profile is automatic. Multiple
-profiles require `phi init <space>` or `--space <name-or-id>`. An explicit
-`--space` selects a profile even inside another bound repo.
+If this directory is bound (or `--space` is set) and all counts are zero, `fetch`
+prints zero bytes and exits 0. It never fetches message bodies. Message counts
+follow the same handle routing as `wait` below; claims remain per person.
+Inside a bound repo it covers that profile. `.phi` resolution walks up from cwd.
+Without a binding and without `--space`, `fetch` prints one line — it is not
+bound, and how to bind — instead of querying. A single profile is still
+automatic for other commands. Multiple profiles require `phi init <space>` or
+`--space <name-or-id>`. An explicit `--space` selects a profile even inside
+another bound repo.
+
+`phi spaces` prints that binding first, then the profile list. Bound:
+
+```text
+this directory → game (http://127.0.0.1:8443) as @alice — listen: phi wait
+game · <space-id> · http://127.0.0.1:8443 · bound to this directory
+```
+
+Not bound (exit 5):
+
+```text
+not bound: no .phi above /path/to/repo · spaces on this machine: game, company · bind: phi init <space>
+game · <space-id> · http://127.0.0.1:8443
+company · <space-id> · http://127.0.0.1:8443
+```
+
+One local profile uses `bind: phi init <name>`. None uses `phi space create <name> --server <url>`.
 
 ```text
 $ phi --as main read <thread-id>
@@ -211,6 +231,12 @@ Numbered references resolve from cache first and fetch only when missing. A
 committed send/reply always prints its stable thread ID and message ID, even if
 optional numbered-reference lookup fails (reported separately on stderr).
 
+`wait` retries a dropped connection, a DNS or connect failure, and HTTP 502/503/504
+with backoff 1s, 2s, 4s, … capped at 15s, until its own deadline. It then exits
+quietly, like a timeout, and does not move the cursor, so the event is still
+there on the next wait. Authentication (401/403), upgrade required (426), and
+validation errors fail immediately. At most one stderr line is printed per outage.
+
 `wait` keeps a durable cursor per profile and handle, separate from read cursors.
 All relevant messages already available are included, draining additional pages
 without another long-poll. An empty successful timeout prints nothing.
@@ -290,7 +316,9 @@ routes still use `/v1`; incompatible protocol headers fail with exit code 4.
 
 Exit codes: **0** success, **1** input/local/verification error, **2** server/network
 error (including 429 with retry seconds), **3** authentication/revoked, **4** upgrade
-required. Validation failures from the server explain the input problem on stderr.
+required, **5** `phi spaces` when this directory has no `.phi` above it (stdout is
+still the binding line and the profile list). Validation failures from the server
+explain the input problem on stderr.
 
 Any channel member can close (`phi close <thread>`) or reopen (`phi reopen <thread>`)
 a thread via a signed state event. Closed threads are hidden from `inbox`, `fetch`
@@ -355,12 +383,12 @@ the success receipt remains the only stdout document.
 
 | Command | Payload fields |
 |---|---|
-| fetch | `spaces: [{name,id,person,handle,unread_threads,mentions,claimed_by_you,channels:[{id,name,unread_threads,mentions}]}]` |
+| fetch | `spaces: [{name,id,person,handle,unread_threads,mentions,claimed_by_you,channels:[{id,name,unread_threads,mentions}]}]`. Unbound and no `--space`: `spaces: []` plus the same `binding` object as `spaces`, and no query. |
 | inbox, threads | `threads: [ThreadEntry]` (inbox: unread/mention order; threads: open by default, or closed with `--closed`, activity order) |
 | read | `thread: ThreadView` |
 | wait | `events: [WaitEvent]`; timeout is `events: []`; one document per invocation |
 | channels | `trusted:false, channels:[{id,name,kind,members:["@person"],unread_threads,unread_messages}]`; kind is `all/group/dm/self` |
-| spaces | `trusted:false, spaces:[{name,id,server,bound}]`; `bound` reflects `.phi` found walking up from cwd |
+| spaces | `trusted:false, binding:{bound,directory,space,space_id,server,person,spaces,bind,listen}, spaces:[{name,id,server,bound}]`; `bound` on each profile reflects `.phi` found walking up from cwd. `binding.bound` is false when no `.phi` exists (process exit 5). `person` is the local display name, or null when the binding has no local profile. `bind` is the init command when not bound, else null. `listen` is `phi wait` when bound, else null. |
 | who | `trusted:false, people:[{id,name,devices:[{id,kind,last_seen_at,last_seen,revoked}]}], handles:["person/handle"]` |
 | send, reply | `thread_id,message_id,reference`; `reference` may be null if optional lookup failed |
 

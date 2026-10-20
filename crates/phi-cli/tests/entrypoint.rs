@@ -106,6 +106,92 @@ async fn cli_workflow_references_wait_skill_and_exit_codes() -> phi_core::Result
         .ok_or_else(|| phi_core::Error::User("missing created space ID".into()))?;
     phi(binary, workspace.path(), &["init"]).await?;
     assert!(std::fs::read_to_string(workspace.path().join(".phi"))?.contains(space));
+    let spaces = phi(binary, workspace.path(), &["spaces"]).await?;
+    let bound_line = spaces
+        .lines()
+        .next()
+        .ok_or_else(|| phi_core::Error::User("spaces printed nothing".into()))?;
+    assert!(
+        bound_line.starts_with("this directory → game (")
+            && bound_line.contains(&url)
+            && bound_line.contains("as @alice — listen: phi wait"),
+        "{spaces}"
+    );
+    assert!(
+        spaces
+            .lines()
+            .nth(1)
+            .is_some_and(|line| line.contains("game ·") && line.contains("bound to this directory")),
+        "{spaces}"
+    );
+    assert!(phi(binary, workspace.path(), &["fetch"]).await?.is_empty());
+    let unbound = tempfile::tempdir()?;
+    let (status, stdout, stderr) =
+        phi_raw(binary, workspace.path(), unbound.path(), &["spaces"], None).await?;
+    assert_eq!(status, Some(5));
+    assert!(stderr.is_empty(), "{stderr}");
+    let unbound_line = stdout
+        .lines()
+        .next()
+        .ok_or_else(|| phi_core::Error::User("unbound spaces printed nothing".into()))?;
+    assert!(
+        unbound_line.starts_with("not bound: no .phi above ")
+            && unbound_line.contains(&unbound.path().display().to_string())
+            && unbound_line.contains("spaces on this machine: game")
+            && unbound_line.contains("bind: phi init game"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.lines().nth(1).is_some_and(|line| {
+            line.contains("game ·") && !line.contains("bound to this directory")
+        }),
+        "{stdout}"
+    );
+    let (status, stdout, stderr) =
+        phi_raw(binary, workspace.path(), unbound.path(), &["fetch"], None).await?;
+    assert_eq!(status, Some(0), "{stderr}");
+    assert_eq!(stdout.lines().count(), 1, "{stdout}");
+    assert!(
+        stdout.contains("not bound:") && stdout.contains("bind: phi init game"),
+        "{stdout}"
+    );
+    let (status, stdout, stderr) = phi_raw(
+        binary,
+        workspace.path(),
+        unbound.path(),
+        &["--space", "game", "fetch"],
+        None,
+    )
+    .await?;
+    assert_eq!(status, Some(0), "{stderr}");
+    assert!(stdout.is_empty(), "{stdout}");
+    let (status, stdout, stderr) = phi_raw(
+        binary,
+        workspace.path(),
+        unbound.path(),
+        &["--json", "spaces"],
+        None,
+    )
+    .await?;
+    assert_eq!(status, Some(5), "{stderr}");
+    let unbound_json: serde_json::Value = serde_json::from_str(&stdout)?;
+    assert_eq!(unbound_json["binding"]["bound"], false);
+    assert_eq!(unbound_json["binding"]["bind"], "phi init game");
+    assert_eq!(unbound_json["spaces"][0]["bound"], false);
+    phi(
+        binary,
+        workspace.path(),
+        &["space", "create", "company", "--server", &url],
+    )
+    .await?;
+    let (status, stdout, _) =
+        phi_raw(binary, workspace.path(), unbound.path(), &["spaces"], None).await?;
+    assert_eq!(status, Some(5));
+    assert!(
+        stdout.contains("spaces on this machine: company, game")
+            && stdout.contains("bind: phi init <space>"),
+        "{stdout}"
+    );
     let body = "first body: `code` and \"quotes\" and $HOME and $(false)";
     let sent = phi_with_input(
         binary,
@@ -265,7 +351,23 @@ async fn cli_workflow_references_wait_skill_and_exit_codes() -> phi_core::Result
         assert_eq!(value["schema_version"], 1);
         assert!(!value[key].is_null(), "{args:?}: {value}");
         if key == "spaces" && args.contains(&"spaces") {
-            assert_eq!(value[key][0]["bound"], true);
+            let bound: Vec<_> = value[key]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|space| space["bound"] == true)
+                .collect();
+            assert_eq!(bound.len(), 1, "{value}");
+            assert_eq!(bound[0]["name"], "game");
+            assert_eq!(value["binding"]["bound"], true);
+            assert_eq!(value["binding"]["space"], "game");
+            assert_eq!(value["binding"]["person"], "alice");
+            assert_eq!(value["binding"]["listen"], "phi wait");
+            assert!(
+                value["binding"]["server"]
+                    .as_str()
+                    .is_some_and(|server| server.starts_with("http://"))
+            );
         }
         if key == "thread" {
             assert!(value[key]["next_reply"].is_object());
@@ -430,6 +532,20 @@ async fn phi_with_input(
     args: &[&str],
     input: Option<&str>,
 ) -> phi_core::Result<String> {
+    let (status, stdout, stderr) = phi_raw(binary, root, root, args, input).await?;
+    if status != Some(0) {
+        return Err(phi_core::Error::User(format!("phi {args:?}: {stderr}")));
+    }
+    Ok(stdout)
+}
+
+async fn phi_raw(
+    binary: &str,
+    root: &std::path::Path,
+    cwd: &std::path::Path,
+    args: &[&str],
+    input: Option<&str>,
+) -> phi_core::Result<(Option<i32>, String, String)> {
     let home = root.join("home");
     std::fs::create_dir_all(&home)?;
     let mut command = tokio::process::Command::new(binary);
@@ -438,7 +554,7 @@ async fn phi_with_input(
     }
     command
         .args(args)
-        .current_dir(root)
+        .current_dir(cwd)
         .env("HOME", &home)
         .env("USER", "alice")
         .env("XDG_CONFIG_HOME", root.join("config"))
@@ -463,11 +579,9 @@ async fn phi_with_input(
         stdin.write_all(input.as_bytes()).await?;
     }
     let output = child.wait_with_output().await?;
-    if !output.status.success() {
-        return Err(phi_core::Error::User(format!(
-            "phi {args:?}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        )));
-    }
-    String::from_utf8(output.stdout).map_err(|e| phi_core::Error::User(e.to_string()))
+    let stdout =
+        String::from_utf8(output.stdout).map_err(|e| phi_core::Error::User(e.to_string()))?;
+    let stderr =
+        String::from_utf8(output.stderr).map_err(|e| phi_core::Error::User(e.to_string()))?;
+    Ok((output.status.code(), stdout, stderr))
 }

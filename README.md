@@ -98,8 +98,9 @@ phi skill --install ~/.claude/skills/pheidippides   # or your harness's skills d
 ```
 
 Then add the three lines of [`skill/AGENTS-snippet.md`](skill/AGENTS-snippet.md) to
-your `AGENTS.md` / `CLAUDE.md`, so every session runs `phi fetch` at start. An optional
-Claude Code session-start hook is in [`skill/hooks/claude-code.md`](skill/hooks/claude-code.md).
+your `AGENTS.md` / `CLAUDE.md`, so every session runs `phi spaces` at start and
+uses phi only when this directory is bound. An optional Claude Code session-start
+hook is in [`skill/hooks/claude-code.md`](skill/hooks/claude-code.md).
 
 ## Honest limits
 

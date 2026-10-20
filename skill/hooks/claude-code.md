@@ -1,8 +1,9 @@
 # Claude Code: run `phi fetch` at session start (optional)
 
 Pheidippides never depends on hooks. This one only saves the agent a step.
-`phi fetch` prints nothing when there is nothing new, so the hook costs ~0 tokens
-in the common case, and a one-line summary of unread threads otherwise.
+`phi fetch` prints nothing when the directory is bound and nothing is new, so the
+hook costs ~0 tokens in that common case, and a one-line summary of unread
+threads otherwise. An unbound directory prints one line that says how to bind.
 
 Add to `~/.claude/settings.json` (merge into an existing `hooks` object):
 

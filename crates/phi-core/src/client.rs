@@ -16,8 +16,41 @@ use zeroize::Zeroizing;
 
 /// Longest single long-poll `wait` issues; stays under common proxy idle limits.
 const LONG_POLL_CHUNK_SECS: u64 = 45;
-const GATEWAY_RETRIES: u8 = 3;
-const GATEWAY_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+/// A blip must not outlive the wait the caller asked for, and must not burn the cursor.
+const WAIT_BACKOFF_START: std::time::Duration = std::time::Duration::from_secs(1);
+const WAIT_BACKOFF_MAX: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Connection loss and gateway timeouts recover; auth, upgrade, and rejected input do not.
+fn wait_transient(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::Network(_)
+            | Error::Server {
+                status: 502..=504,
+                ..
+            }
+    )
+}
+
+/// Sleeps with capped backoff. False means the wait's own deadline is spent.
+async fn wait_retry(
+    error: &Error,
+    backoff: &mut std::time::Duration,
+    deadline: std::time::Instant,
+    announced: &mut bool,
+) -> bool {
+    if !*announced {
+        eprintln!("phi: wait: {error}; retrying until the deadline");
+        *announced = true;
+    }
+    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+    if remaining.is_zero() {
+        return false;
+    }
+    tokio::time::sleep((*backoff).min(remaining)).await;
+    *backoff = (*backoff * 2).min(WAIT_BACKOFF_MAX);
+    std::time::Instant::now() < deadline
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChannelMeta {
@@ -1942,8 +1975,15 @@ impl Client {
         let name = format!("wait/{}", self.handle);
         let deadline =
             std::time::Instant::now() + std::time::Duration::from_secs(u64::from(seconds));
-        let mut gateway_failures = 0u8;
-        loop {
+        let mut backoff = WAIT_BACKOFF_START;
+        // One stderr line for a contiguous outage; a later drop after a good poll speaks again.
+        let mut announced = false;
+        let idle = |after: u64| WaitBatch {
+            events: vec![],
+            cursor: name.clone(),
+            next_after: after,
+        };
+        'poll: loop {
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             // Reverse proxies cut idle upstream responses well under the 900 s the
             // server allows (nginx defaults to 60 s, Cloudflare to 100 s), so one wait
@@ -1961,32 +2001,39 @@ impl Client {
                 .await
             {
                 Ok(response) => response,
-                // A proxy that drops a poll (502/504) usually recovers at once; retry a
-                // few times before giving up so an idle wait survives a proxy restart.
-                Err(Error::Server {
-                    status: 502..=504, ..
-                }) if gateway_failures < GATEWAY_RETRIES
-                    && std::time::Instant::now() < deadline =>
-                {
-                    gateway_failures += 1;
-                    tokio::time::sleep(GATEWAY_RETRY_DELAY).await;
+                Err(error) if wait_transient(&error) => {
+                    if !wait_retry(&error, &mut backoff, deadline, &mut announced).await {
+                        return Ok(idle(after));
+                    }
                     continue;
                 }
                 Err(error) => return Err(error),
             };
-            gateway_failures = 0;
+            backoff = WAIT_BACKOFF_START;
+            announced = false;
             // Drain an available backlog without another long-poll or a page-sized
             // truncation of what the user is about to read.
             let mut page_len = response.events.len();
             while page_len == MAX_PAGE_SIZE as usize {
                 let after = response.events.last().map_or(after, |event| event.seq);
-                let page: EventsResponse = self
+                let page: EventsResponse = match self
                     .http
                     .get(&format!(
                         "/spaces/{}/events?after={after}&timeout=0&handle={}",
                         self.profile.space_id, self.handle
                     ))
-                    .await?;
+                    .await
+                {
+                    Ok(page) => page,
+                    // A failed page must not advance the cursor; the next poll rereads it.
+                    Err(error) if wait_transient(&error) => {
+                        if !wait_retry(&error, &mut backoff, deadline, &mut announced).await {
+                            return Ok(idle(self.cache.get::<u64>(&name)?.unwrap_or(0)));
+                        }
+                        continue 'poll;
+                    }
+                    Err(error) => return Err(error),
+                };
                 if page.next_after < after
                     || page.events.first().is_some_and(|event| event.seq <= after)
                 {
@@ -2003,11 +2050,7 @@ impl Client {
                 if std::time::Instant::now() < deadline {
                     continue;
                 }
-                return Ok(WaitBatch {
-                    events: vec![],
-                    cursor: name,
-                    next_after: after,
-                });
+                return Ok(idle(after));
             }
             let mut changed = false;
             for event in &response.events {
@@ -2041,7 +2084,15 @@ impl Client {
                 };
             }
             if changed {
-                self.refresh().await?;
+                if let Err(error) = self.refresh().await {
+                    if wait_transient(&error) {
+                        if !wait_retry(&error, &mut backoff, deadline, &mut announced).await {
+                            return Ok(idle(after));
+                        }
+                        continue 'poll;
+                    }
+                    return Err(error);
+                }
             }
             let mut entries = Vec::new();
             let mut previous = after;
@@ -2054,11 +2105,15 @@ impl Client {
                 }
                 previous = event.seq;
                 let result = match self.process_wait_event(&event).await {
-                    Err(
-                        error @ (Error::Network(_)
-                        | Error::RateLimited(_)
-                        | Error::Server { status: 500.., .. }),
-                    ) => return Err(error),
+                    Err(error) if wait_transient(&error) => {
+                        if !wait_retry(&error, &mut backoff, deadline, &mut announced).await {
+                            return Ok(idle(self.cache.get::<u64>(&name)?.unwrap_or(0)));
+                        }
+                        continue 'poll;
+                    }
+                    Err(error @ (Error::RateLimited(_) | Error::Server { status: 500.., .. })) => {
+                        return Err(error);
+                    }
                     result => result,
                 };
                 let error = result.as_ref().err().map(ToString::to_string);
@@ -2138,7 +2193,7 @@ impl Client {
                 entries.sort_by_key(|e| !matches!(e, WaitEntry::Message(entry) if entry.mentioned));
                 return Ok(WaitBatch {
                     events: entries,
-                    cursor: name,
+                    cursor: name.clone(),
                     next_after: previous,
                 });
             }
@@ -2146,7 +2201,7 @@ impl Client {
             if std::time::Instant::now() >= deadline {
                 return Ok(WaitBatch {
                     events: entries,
-                    cursor: name,
+                    cursor: name.clone(),
                     next_after: previous,
                 });
             }

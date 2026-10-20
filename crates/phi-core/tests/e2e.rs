@@ -15,7 +15,10 @@ use phi_server::{
 use rusqlite::OptionalExtension;
 use std::{
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 
@@ -33,25 +36,72 @@ struct Faults {
     lose_revocation_response: bool,
     directory_reads: usize,
     drop_event_polls: usize,
+    /// Status to return for event polls, instead of serving them. Auth and validation stay fatal.
+    event_reject: Option<u16>,
 }
-async fn hostile_host(
-    State(faults): State<Arc<Mutex<Faults>>>,
-    request: Request,
-    next: Next,
-) -> Response {
+#[derive(Clone)]
+struct Host {
+    faults: Arc<Mutex<Faults>>,
+    /// Wakes an in-flight long-poll so a restart looks like a dropped connection.
+    cut: Arc<tokio::sync::Notify>,
+    polls: Arc<AtomicUsize>,
+}
+fn event_reject(status: u16) -> Response {
+    let (code, body) = match status {
+        401 => (
+            StatusCode::UNAUTHORIZED,
+            serde_json::json!({"error":"unauthorized","message":"no"}),
+        ),
+        403 => (
+            StatusCode::FORBIDDEN,
+            serde_json::json!({"error":"forbidden","message":"no"}),
+        ),
+        400 => (
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({"error":"invalid","message":"bad"}),
+        ),
+        426 => (
+            StatusCode::UPGRADE_REQUIRED,
+            serde_json::json!({"error":"upgrade","required_major":9}),
+        ),
+        _ => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            serde_json::json!({"error":"internal","message":"no"}),
+        ),
+    };
+    (code, axum::Json(body)).into_response()
+}
+fn connection_reset() -> Response {
+    let body = Body::from_stream(futures_util::stream::once(async {
+        Err::<axum::body::Bytes, std::io::Error>(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "server restarted",
+        ))
+    }));
+    Response::builder()
+        .status(StatusCode::OK)
+        .body(body)
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+async fn hostile_host(State(host): State<Host>, request: Request, next: Next) -> Response {
     let path = request.uri().path().to_owned();
-    let Ok((faults, drop_poll)) = faults.lock().map(|mut f| {
+    let Ok((faults, drop_poll, reject)) = host.faults.lock().map(|mut f| {
         if path.ends_with("/devices") {
             f.directory_reads += 1;
         }
-        let drop_poll = path.ends_with("/events") && f.drop_event_polls > 0;
+        let events = path.ends_with("/events");
+        let drop_poll = events && f.drop_event_polls > 0;
         if drop_poll {
             f.drop_event_polls -= 1;
         }
-        (f.clone(), drop_poll)
+        let reject = events.then_some(f.event_reject).flatten();
+        (f.clone(), drop_poll, reject)
     }) else {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
+    if let Some(status) = reject {
+        return event_reject(status);
+    }
     if drop_poll {
         // What nginx returns when its proxy_read_timeout cuts an idle long-poll.
         return (StatusCode::BAD_GATEWAY, "<html>502 Bad Gateway</html>").into_response();
@@ -80,7 +130,21 @@ async fn hostile_host(
         )
             .into_response();
     }
-    let response = next.run(request).await;
+    let response = if path.ends_with("/events") {
+        host.polls.fetch_add(1, Ordering::SeqCst);
+        let response = tokio::select! {
+            biased;
+            _ = host.cut.notified() => {
+                host.polls.fetch_sub(1, Ordering::SeqCst);
+                return connection_reset();
+            }
+            response = next.run(request) => response,
+        };
+        host.polls.fetch_sub(1, Ordering::SeqCst);
+        response
+    } else {
+        next.run(request).await
+    };
     if faults.lose_revocation_response
         && path.ends_with("/revocations")
         && response.status().is_success()
@@ -172,7 +236,7 @@ struct Fixture {
     url: String,
     server: Server,
     task: tokio::task::JoinHandle<()>,
-    faults: Arc<Mutex<Faults>>,
+    host: Host,
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -194,28 +258,49 @@ impl Fixture {
         let server = Server::open(config)?;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let url = format!("http://{}", listener.local_addr()?);
-        let faults = Arc::new(Mutex::new(Faults::default()));
-        let router = server.router().layer(axum::middleware::from_fn_with_state(
-            faults.clone(),
-            hostile_host,
-        ));
-        let task = tokio::spawn(async move {
-            let _ = axum::serve(listener, router).await;
-        });
+        let host = Host {
+            faults: Arc::new(Mutex::new(Faults::default())),
+            cut: Arc::new(tokio::sync::Notify::new()),
+            polls: Arc::new(AtomicUsize::new(0)),
+        };
+        let task = spawn_server(listener, server.clone(), host.clone());
         Ok(Self {
             dir,
             url,
             server,
             task,
-            faults,
+            host,
         })
     }
     fn faults(&self, update: impl FnOnce(&mut Faults)) -> Result<()> {
         let mut faults = self
+            .host
             .faults
             .lock()
             .map_err(|_| anyhow::anyhow!("fault mutex poisoned"))?;
         update(&mut faults);
+        Ok(())
+    }
+    /// Drop the listening socket and the in-flight long-poll, then bind the same address again.
+    async fn restart(&mut self) -> Result<()> {
+        self.host.cut.notify_waiters();
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        self.task.abort();
+        let _ = (&mut self.task).await;
+        let addr = self
+            .url
+            .strip_prefix("http://")
+            .ok_or_else(|| anyhow::anyhow!("fixture url is not http"))?;
+        let mut listener = None;
+        for _ in 0..50 {
+            if let Ok(bound) = tokio::net::TcpListener::bind(addr).await {
+                listener = Some(bound);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let listener = listener.ok_or_else(|| anyhow::anyhow!("restart did not rebind {addr}"))?;
+        self.task = spawn_server(listener, self.server.clone(), self.host.clone());
         Ok(())
     }
     fn store(&self, name: &str) -> Store {
@@ -234,6 +319,18 @@ impl Fixture {
         alice.refresh().await?;
         Ok((alice, bob))
     }
+}
+fn spawn_server(
+    listener: tokio::net::TcpListener,
+    server: Server,
+    host: Host,
+) -> tokio::task::JoinHandle<()> {
+    let router = server
+        .router()
+        .layer(axum::middleware::from_fn_with_state(host, hostile_host));
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    })
 }
 fn options(body: &str) -> SendOptions {
     SendOptions {
@@ -2020,16 +2117,62 @@ async fn remaining_members_rekey_private_channels_unknown_to_removal_issuer() ->
 
 #[tokio::test]
 async fn wait_survives_transient_gateway_errors() -> Result<()> {
-    let f = Fixture::new().await?;
+    let mut f = Fixture::new().await?;
     let (mut alice, mut bob) = f.pair().await?;
     alice
         .send("@bob/cli", "Ping", options("Proxy restarted mid-wait."))
         .await?;
-    f.faults(|f| f.drop_event_polls = 2)?;
+    f.faults(|faults| faults.drop_event_polls = 2)?;
     let waited = bob.wait_text(10).await?;
     ensure!(waited.contains("Proxy restarted mid-wait."));
-    f.faults(|f| f.drop_event_polls = 4)?;
-    let error = bob.wait_text(10).await.err().map(|e| e.to_string());
-    ensure!(error.as_deref().is_some_and(|e| e.contains("HTTP 502")));
+    // Gateway errors that outlast the deadline look like a quiet timeout and leave the cursor.
+    alice
+        .send("@bob/cli", "Queued", options("Still queued."))
+        .await?;
+    f.faults(|faults| faults.drop_event_polls = 100)?;
+    let started = std::time::Instant::now();
+    let missed = bob.wait_text(3).await?;
+    ensure!(missed.is_empty());
+    ensure!(started.elapsed() >= Duration::from_millis(1500));
+    ensure!(started.elapsed() < Duration::from_secs(8));
+    f.faults(|faults| faults.drop_event_polls = 0)?;
+    ensure!(bob.wait_text(0).await?.contains("Still queued."));
+    for (status, needle) in [
+        (401, "authentication"),
+        (403, "HTTP 403"),
+        (400, "HTTP 400"),
+        (426, "upgrade"),
+        (500, "HTTP 500"),
+    ] {
+        f.faults(|faults| faults.event_reject = Some(status))?;
+        let started = std::time::Instant::now();
+        let error = bob.wait_text(30).await.err().map(|e| e.to_string());
+        ensure!(
+            started.elapsed() < Duration::from_secs(2),
+            "{status} took {:?}",
+            started.elapsed()
+        );
+        ensure!(
+            error.as_deref().is_some_and(|text| text.contains(needle)),
+            "{status} {error:?}"
+        );
+    }
+    f.faults(|faults| faults.event_reject = None)?;
+    let polls = f.host.polls.clone();
+    let waiting = tokio::spawn(async move { bob.wait_text(15).await });
+    let ready = std::time::Instant::now();
+    while polls.load(Ordering::SeqCst) == 0 {
+        ensure!(ready.elapsed() < Duration::from_secs(5));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    f.restart().await?;
+    alice
+        .send("@bob/cli", "Back", options("Server came back."))
+        .await?;
+    let waited = waiting
+        .await
+        .map_err(|error| anyhow::anyhow!("wait task: {error}"))??;
+    ensure!(waited.contains("Server came back."));
     Ok(())
 }
