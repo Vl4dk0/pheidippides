@@ -7,6 +7,8 @@ fn main() -> Result<(), String> {
     tauri::Builder::default()
         .manage(bridge::AppState(store))
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .invoke_handler(tauri::generate_handler![
             bridge::profiles,
             bridge::provision,

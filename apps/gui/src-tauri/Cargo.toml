@@ -3,6 +3,10 @@ name = "phi-gui"
 version.workspace = true
 edition.workspace = true
 rust-version = "1.90"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description.workspace = true
 
 [[bin]]
 name = "pheidippides"
@@ -12,14 +16,22 @@ path = "src/main.rs"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+# Minors track the @tauri-apps npm packages: `tauri build` refuses mismatches,
+# and the workspace MSRV would otherwise resolve older 2.x crates.
 phi-core.workspace = true
 phi-proto.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 base64.workspace = true
 blake3.workspace = true
-tauri = { version = "2", features = [] }
-tauri-plugin-notification = "2"
+tauri = { version = "2.12", features = [] }
+tauri-plugin-notification = "2.7"
+tauri-plugin-updater = "2.14"
+tauri-plugin-process = "2.4"
 
 [lints]
 workspace = true
+
+# Released by tauri-action (bundles + updater), not by dist.
+[package.metadata.dist]
+dist = false

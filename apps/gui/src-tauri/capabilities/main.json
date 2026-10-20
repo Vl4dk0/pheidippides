@@ -1,7 +1,12 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main",
-  "description": "Local desktop UI with notification permission; no filesystem or shell access.",
+  "description": "Local desktop UI with notification and self-update permissions; no filesystem or shell access.",
   "windows": ["main"],
-  "permissions": ["core:default", "notification:default"]
+  "permissions": [
+    "core:default",
+    "notification:default",
+    "updater:default",
+    "process:allow-restart"
+  ]
 }

@@ -19,6 +19,7 @@
   import ProfileForm from './ProfileForm.svelte';
   import Settings from './Settings.svelte';
   import IconButton from './IconButton.svelte';
+  import UpdateButton from './UpdateButton.svelte';
   import Modal from './Modal.svelte';
   import { relativeTime, dateLabel, monogram } from './lib/presentation';
   import {
@@ -546,6 +547,7 @@
           active={prefs.notifications}
           onclick={() => toggleNotifications(!prefs.notifications)}
         />
+        <UpdateButton />
         <IconButton
           icon={SettingsIcon}
           label="Space settings"

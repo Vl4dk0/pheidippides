@@ -67,18 +67,20 @@ It works behind nginx or with native ACME after the config edits above.
 Keep TLS off in phi-server. Run natively on localhost, or use Compose:
 
 ```sh
-# From the source checkout; tag is explicit so upgrades are deliberate.
-docker build -f deploy/Dockerfile -t phi-server:0.1.0 .
-# Copy the shipped Compose file next to the files created by init.
-cp deploy/compose.yml ./phi/compose.yml
-cd phi
+cd phi   # the directory created by init
+curl -fsSLO https://raw.githubusercontent.com/Vl4dk0/pheidippides/v0.1.0/deploy/compose.yml
+docker compose pull
 docker compose up -d
 ```
 
-If init used another directory, adjust the copy/directory paths. Compose uses
-`phi-server:0.1.0` by default. Select another image/tag with
-`PHI_IMAGE=registry.example.org/team/phi-server PHI_TAG=0.1.1 docker compose up -d`
-(or put these variables in `.env`). No public image registry is assumed.
+Compose runs the published multi-arch (amd64/arm64) image
+`ghcr.io/vl4dk0/phi-server:0.1.0` by default; the tag is explicit so upgrades
+are deliberate. Select another tag or your own build with
+`PHI_TAG=0.1.1 docker compose pull` /
+`PHI_IMAGE=registry.example.org/team/phi-server` (or put these variables in
+`.env`). To build locally instead, run
+`docker build -f deploy/Dockerfile -t phi-server:0.1.0 .` from the source
+checkout and set `PHI_IMAGE=phi-server`.
 The `PHI_SERVER_` prefix is reserved for server config overrides; image variables
 use `PHI_IMAGE`/`PHI_TAG` so they can safely share the Compose env file.
 The container runs as UID 10001, uses a named `phi-data` volume at `/data`, and
@@ -166,7 +168,8 @@ finished backup off the volume (e.g. `docker compose cp phi-server:/data/backup-
 Backups contain ciphertext and routing metadata, not members' private keys.
 Back up `.env` separately and privately if preserving the admin token is desired.
 
-Take a backup before upgrading; build/pull the chosen tag and run
-`PHI_TAG=<new-version> docker compose up -d`. Client/server **major**
+Take a backup before upgrading, then run
+`PHI_TAG=<new-version> docker compose pull` and
+`PHI_TAG=<new-version> docker compose up -d` (or set `PHI_TAG` in `.env`). Client/server **major**
 versions must match or API requests get HTTP 426; minor/patch releases are
 wire-compatible. Upgrade all clients with a major bump.

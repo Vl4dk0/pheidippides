@@ -26,9 +26,18 @@ cargo test --workspace
 cargo build -p phi-gui
 ```
 
-No Tauri CLI is needed. Vite's production output must exist before Rust compiles
-`tauri::generate_context!()`. Builds and tests do not open the app or start a dev
-server. This milestone was verified headlessly only.
+Verification needs no Tauri CLI. Vite's production output must exist before Rust
+compiles `tauri::generate_context!()`. Builds and tests do not open the app or
+start a dev server. This milestone was verified headlessly only.
+
+## Release bundles and updates
+
+Releases are bundled by CI (`.github/workflows/gui-release.yml`, using the Tauri
+CLI from `devDependencies`) and attached to the same GitHub Release as the CLI.
+Bundles and `latest.json` are signed with the updater key held in the
+`TAURI_SIGNING_PRIVATE_KEY` repository secret; the matching public key is in
+`src-tauri/tauri.conf.json`. Replacing that key strands installed apps on their
+current version, so rotate it only together with a manual reinstall notice.
 
 ## App icon
 
