@@ -21,7 +21,12 @@
   import IconButton from './IconButton.svelte';
   import UpdateButton from './UpdateButton.svelte';
   import Modal from './Modal.svelte';
-  import { relativeTime, dateLabel, monogram } from './lib/presentation';
+  import {
+    claimSummaryLabel,
+    relativeTime,
+    dateLabel,
+    monogram,
+  } from './lib/presentation';
   import {
     Plus,
     Settings as SettingsIcon,
@@ -621,6 +626,9 @@
                 prefs.reactions
                   ? `${entry.reaction_summary.up} likes · ${entry.reaction_summary.down} dislikes · ${entry.reaction_summary.ack} acknowledgements`
                   : '',
+                prefs.reactions && entry.reaction_summary.claims.length
+                  ? claimSummaryLabel(entry.reaction_summary.claims)
+                  : '',
               ]
                 .filter(Boolean)
                 .join('\n')}
@@ -641,16 +649,17 @@
               >
               <span class="card-meta"
                 ><span class="channel-name">{entry.channel}</span
-                >{#if !prefs.reactions || !entry.reaction_summary.claims.some((claim) => claim.author === entry.from.split('/')[0])}<span
+                >{#if entry.channel !== `@${entry.from.split('/')[0]}`}<span
                     class="author-name"
                     title={entry.from}>{entry.from.split('/')[0]}</span
                   >{/if}{#if prefs.reactions && entry.reaction_summary.claims.length}<span
                     class="claim-badge"
-                    title={`Claimed by ${entry.reaction_summary.claims.map((c) => `${c.author}/${c.handle}`).join(', ')}`}
-                    ><Flag
-                      size={12}
-                    />{#if entry.channel !== `@${entry.reaction_summary.claims[0].author}`}{entry
-                        .reaction_summary.claims[0].author}{/if}</span
+                    title={claimSummaryLabel(entry.reaction_summary.claims)}
+                    aria-label={claimSummaryLabel(
+                      entry.reaction_summary.claims,
+                    )}
+                    ><Flag size={12} />{entry.reaction_summary.claims
+                      .length}</span
                   >{/if}{#if prefs.metadata}<time
                     title={dateLabel(entry.created_at)}
                     >{relativeTime(entry.created_at)}</time

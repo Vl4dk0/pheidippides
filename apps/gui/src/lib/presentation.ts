@@ -1,3 +1,5 @@
+import type { Claim } from './api';
+
 // Minute precision keeps activity readable without making the workspace tick.
 export function relativeTime(timestamp: number): string {
   const minutes = Math.max(0, Math.floor((Date.now() / 1000 - timestamp) / 60));
@@ -19,4 +21,9 @@ export function monogram(name: string): string {
   )
     .slice(0, 2)
     .toUpperCase();
+}
+export function claimSummaryLabel(claims: Claim[]): string {
+  return claims
+    .map((c) => `#${c.number || '?'} claimed by ${c.author}/${c.handle}`)
+    .join(' · ');
 }

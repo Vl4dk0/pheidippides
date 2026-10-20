@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { Panda, Snail } from '@lucide/svelte';
 import { agentAvatar } from './avatar';
+import { claimSummaryLabel } from './presentation';
 import {
   entrySchema,
   pollSchema,
@@ -161,16 +162,21 @@ describe('desktop state boundary', () => {
       down: 0,
       ack: 2,
       claims: [
-        { message: id, person: id, author: 'bob', handle: 'fixer' },
+        { message: id, number: 1, person: id, author: 'bob', handle: 'fixer' },
         {
           message: 'BBBBBBBBBBBBBBBBBBBBBB',
+          number: 3,
           person: id,
-          author: 'bob',
+          author: 'vladko',
           handle: 'reviewer',
         },
       ],
     };
-    expect(reactionSummarySchema.parse(summary).claims).toHaveLength(2);
+    const parsed = reactionSummarySchema.parse(summary);
+    expect(parsed.claims).toHaveLength(2);
+    expect(claimSummaryLabel(parsed.claims)).toBe(
+      '#1 claimed by bob/fixer · #3 claimed by vladko/reviewer',
+    );
     expect(
       reactionSummarySchema.safeParse({ ...summary, ack: -1 }).success,
     ).toBe(false);
