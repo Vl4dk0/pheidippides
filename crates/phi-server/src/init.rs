@@ -5,7 +5,13 @@ use std::{
     path::Path,
 };
 
+#[path = "../../phi-core/src/private_file.rs"]
+mod private_file;
+
 pub(super) fn run(dir: &Path) -> anyhow::Result<()> {
+    if private_file::is_link(dir) {
+        anyhow::bail!("refusing symlink storage directory");
+    }
     fs::create_dir_all(dir).context("create deployment directory")?;
     let config_path = dir.join("server.toml");
     let env_path = dir.join(".env");
@@ -57,34 +63,63 @@ pub(super) fn run(dir: &Path) -> anyhow::Result<()> {
     }
 
     println!(
-        "Created {} and {} (private admin token).\n\
+        "Created {} and {} (private admin token).\n{}",
+        config_path.display(),
+        env_path.display(),
+        next_steps()
+    );
+    Ok(())
+}
+
+fn next_steps() -> &'static str {
+    #[cfg(windows)]
+    {
+        "\
+         Next steps (from the deployment directory, PowerShell):\n\
+         1. Load the token: Get-Content -LiteralPath .\\.env | ForEach-Object { if ($_ -match '^\\s*PHI_SERVER_ADMIN_TOKEN=(.*)$') { $env:PHI_SERVER_ADMIN_TOKEN = $Matches[1].Trim() } }\n\
+         2. Run: phi-server --config server.toml\n\
+         3. Create a space (in another shell with the token loaded):\n\
+            $env:PHI_ADMIN_TOKEN = $env:PHI_SERVER_ADMIN_TOKEN; phi space create game --server http://127.0.0.1:8443\n\
+         Use your public HTTPS URL when behind a reverse proxy.\n\
+         For Docker Compose and TLS setup, see deploy/README.md."
+    }
+    #[cfg(not(windows))]
+    {
+        "\
          Next steps (from the deployment directory):\n\
          1. Load the token: set -a; . ./.env; set +a\n\
          2. Run: phi-server --config server.toml\n\
          3. Create a space (in another shell with .env loaded):\n\
             PHI_ADMIN_TOKEN=\"$PHI_SERVER_ADMIN_TOKEN\" phi space create game --server http://127.0.0.1:8443\n\
          Use your public HTTPS URL when behind a reverse proxy.\n\
-         For Docker Compose and TLS setup, see deploy/README.md.",
-        config_path.display(),
-        env_path.display()
-    );
-    Ok(())
+         For Docker Compose and TLS setup, see deploy/README.md."
+    }
 }
 
 fn create(path: &Path, private: bool) -> anyhow::Result<File> {
+    if private_file::is_link(path) {
+        anyhow::bail!("refusing symlink storage file {}", path.display());
+    }
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
+        // Mode is applied at creation so the token is never briefly world-readable.
         options.mode(if private { 0o600 } else { 0o644 });
     }
-    #[cfg(not(unix))]
-    let _ = private;
-    options.open(path).with_context(|| {
+    let file = options.open(path).with_context(|| {
         format!(
             "create {} (existing files are never overwritten)",
             path.display()
         )
-    })
+    })?;
+    if private {
+        // server.toml stays on the directory ACL (0644 on Unix) so a container
+        // user can mount it. Only the token file is owner-only. On Windows
+        // that is an explicit DACL, because the operator-chosen directory may
+        // inherit a Users-read ACE that mode bits cannot express.
+        private_file::restrict_owner(path)?;
+    }
+    Ok(file)
 }

@@ -533,22 +533,18 @@ fn channel_epochs(
     Ok(epochs)
 }
 pub(crate) fn private_dir(path: &Path) -> Result<()> {
-    if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+    if crate::private_file::is_link(path) {
         return Err(user("refusing symlink storage directory"));
     }
     fs::create_dir_all(path)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
-    }
+    crate::private_file::restrict_owner(path)?;
     Ok(())
 }
 fn private_database(path: &Path) -> Result<Connection> {
     if let Some(parent) = path.parent() {
         private_dir(parent)?;
     }
-    if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+    if crate::private_file::is_link(path) {
         return Err(user("refusing symlink storage file"));
     }
     let mut options = OpenOptions::new();
@@ -559,17 +555,22 @@ fn private_database(path: &Path) -> Result<Connection> {
         options.mode(0o600);
     }
     options.open(path)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-    }
+    // Windows cannot set a DACL at create time without unsafe Win32 calls.
+    // Tighten before SQLite writes pages, -wal or -shm beside the file.
+    crate::private_file::restrict_owner(path)?;
+    // A filesystem path, not a SQLite URI, so Windows separators stay literal.
+    // WAL matches the server: the default rollback journal holds a lock that
+    // a second connection (a live client plus a reader) cannot share on Windows.
     let db = Connection::open(path)?;
     db.busy_timeout(std::time::Duration::from_secs(10))?;
+    db.execute_batch("PRAGMA journal_mode=WAL;")?;
     Ok(db)
 }
 pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
+    if crate::private_file::is_link(path) {
+        return Err(user("refusing symlink storage file"));
+    }
     let mut random = [0; 16];
     crate::entropy(&mut random)?;
     let temp = path.with_extension(format!("tmp-{}", MessageId::from_bytes(random)));
@@ -582,9 +583,13 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     }
     let result = (|| {
         let mut file = options.open(&temp)?;
+        crate::private_file::restrict_owner(&temp)?;
         file.write_all(bytes)?;
         file.sync_all()?;
         fs::rename(&temp, path)?;
+        // Rename keeps the temp file's DACL on the same volume; re-apply in
+        // case the destination was replaced from a looser parent ACL.
+        crate::private_file::restrict_owner(path)?;
         Result::Ok(())
     })();
     if result.is_err() {

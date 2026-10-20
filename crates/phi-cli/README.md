@@ -4,11 +4,17 @@ One-shot, end-to-end encrypted messaging for coding agents. Build/install with
 `cargo install --path crates/phi-cli`. The shared policy and cryptography live in
 `phi-core`; the binary parses arguments and prints plain text without ANSI colours.
 
-Plain `phi` opens the installed desktop GUI: macOS first tries
-`open -a Pheidippides`, then `phi-gui`/`Pheidippides` on PATH. Linux and Windows
-use the GUI binary on PATH (`phi-gui.exe`/`Pheidippides.exe` on Windows). If it is
-not installed, phi prints a short hint and normal help. `phi --help` always
-prints CLI help.
+Plain `phi` opens the installed desktop GUI. The bundle product name is
+`Pheidippides` and the binary name is `pheidippides`. macOS tries
+`open -a Pheidippides`, then `Pheidippides.app` in `/Applications` and
+`~/Applications`, then `pheidippides` on `PATH`. Linux tries `pheidippides` on
+`PATH`, `/usr/bin/pheidippides` (the `.deb` install), then
+`~/Applications/Pheidippides.AppImage`. Windows tries the Tauri 2.11 NSIS
+per-user default `%LOCALAPPDATA%\Pheidippides\pheidippides.exe`, then
+`%LOCALAPPDATA%\Programs\Pheidippides\pheidippides.exe`, then
+`%ProgramFiles%\Pheidippides\pheidippides.exe`, then `pheidippides.exe` on
+`PATH`. If none of those start, phi prints a short hint and normal help.
+`phi --help` always prints CLI help.
 
 ## Start
 
@@ -230,9 +236,11 @@ sends it.** In `summary_mode=off`, summaries remain optional.
 
 Profiles use the platform config directory under `pheidippides/profiles/`, one
 server/space pair per directory. Each contains `profile.toml` and `keys` (a SQLite
-key store with mode 0600 on Unix). Cache databases and decrypted attachment files
-are under the platform cache directory, also private on Unix. Profile directories
-are mode 0700; bearer tokens/private keys never enter `profile.toml`. The cache
+key store, mode 0600 on Unix and an owner-only ACL on Windows). Cache databases
+and decrypted attachment files are under the platform cache directory
+(`%LOCALAPPDATA%` on Windows), with the same protection. Profile directories
+are mode 0700 on Unix and owner-only on Windows; bearer tokens/private keys
+never enter `profile.toml`. The cache
 contains plaintext and attachment keys. History keys remain local across rotations.
 
 Attachment MIME types are guessed from extensions: `.py` uses `text/x-python`,
@@ -290,9 +298,11 @@ Read and wait include `next reply: --summary required (3 since last, including
 next reply; threshold 3)` (or `optional`). A configured local summarizer is noted.
 This is a snapshot; concurrent sends can change the threshold before commit.
 A missing-summary rejection saves the exact body to a private, randomly named
-`drafts/<id>.md` under the profile cache directory (0600 file, 0700 directory on
-Unix). The error gives its path and a shell-quoted command preserving the selected
-space, handle, destination/title and attachment arguments, for example:
+`drafts/<id>.md` under the profile cache directory (0600 file and 0700 directory
+on Unix; owner-only ACL on Windows, including junctions refused the same way as
+symlinks). The error gives its path and a shell-quoted command preserving the
+selected space, handle, destination/title and attachment arguments. Unix quotes
+are POSIX; Windows quotes are for PowerShell. For example:
 
 ```sh
 phi --space '<space-id>' --as 'main' 'reply' '<thread-id>' - --summary "…" < '<cache>/drafts/<id>.md'

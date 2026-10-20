@@ -78,8 +78,10 @@ Vitest and adds no tests.
 
 ## Run (human only)
 
-After building, a human can launch `target/debug/phi-gui` from the repository root,
-or run `cargo run -p phi-gui`. These commands open the desktop app. Packaging,
+After building, a human can launch `target/debug/pheidippides` from the repository root,
+or run `cargo run -p phi-gui`. The Tauri product name is `Pheidippides` and
+`mainBinaryName` is `pheidippides`, which is the installed executable name.
+These commands open the desktop app. Packaging,
 signing, OS URL-scheme registration and auto-updates are outside this prototype.
 
 Use **Connect → Create space** for the first GUI identity, or **Join with link**
@@ -132,7 +134,7 @@ and their decrypted cache path. The prototype composer sends text only.
   phi-core. Verification errors are displayed beside the affected message.
 - GUI and CLI use phi-core's same `FileKeyStore` and create/join/open paths.
   Private identity material, bearer tokens and channel epoch keys live in each
-  profile's `keys` SQLite file (0600 on Unix), separate from its plaintext cache.
+  profile's `keys` SQLite file (0600 on Unix, owner-only ACL on Windows), separate from its plaintext cache.
   Identical account writes are idempotent; conflicting writes fail atomically.
   Owned secret read buffers are zeroized; backend libraries may retain transient copies.
 - GUI config/cache roots are `Store::platform()`'s roots plus `/gui`, separate

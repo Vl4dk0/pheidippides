@@ -1,5 +1,6 @@
 //! Shared client policy, persistence and cryptographic verification for CLI and GUI.
 mod client;
+mod private_file;
 mod reference;
 mod storage;
 mod transport;
