@@ -113,6 +113,28 @@ def tokens(text):
     }
 
 
+SECRET_LINK = re.compile(r"(phis?://[^\s#'\"]+)#[A-Za-z0-9_-]+")
+
+
+def redactor(pairs):
+    """The raw report is committed, so it must not carry machine paths, ports or
+    grant secrets. Counts are taken before redaction from what agents really saw."""
+    pairs = sorted(pairs, key=lambda pair: -len(pair[0]))
+
+    def redact(value):
+        if isinstance(value, str):
+            for private, public in pairs:
+                value = value.replace(private, public)
+            return SECRET_LINK.sub(r"\1#<secret>", value)
+        if isinstance(value, list):
+            return [redact(item) for item in value]
+        if isinstance(value, dict):
+            return {key: redact(item) for key, item in value.items()}
+        return value
+
+    return redact
+
+
 def clean_env():
     # A developer's relay overrides must never point this experiment at live data.
     return {k: v for k, v in os.environ.items() if not k.startswith("PHI_")}
@@ -256,13 +278,28 @@ def measure(interval, phi, server):
                         run("B", "react", "react", f"{thread}#1", "claim")
                     if receiver == "A":
                         run("A", "react", "react", f"{thread}#{index}", "ack")
-                return {
-                    "summary_every": interval,
-                    "summary_positions": summary_positions,
-                    "hook_empty_stdout": empty,
-                    "hook_nonempty_stdout": nonempty,
-                    "records": records,
-                }
+                paths = [(work / side, "<home>") for side in envs] + [
+                    (work, "<tmp>"),
+                    (ROOT, "<repo>"),
+                    (Path.home(), "<home>"),
+                ]
+                redact = redactor(
+                    {
+                        (str(v), public)
+                        for path, public in paths
+                        for v in (path, path.resolve())
+                    }
+                    | {(f"127.0.0.1:{port}", "127.0.0.1:<port>")}
+                )
+                return redact(
+                    {
+                        "summary_every": interval,
+                        "summary_positions": summary_positions,
+                        "hook_empty_stdout": empty,
+                        "hook_nonempty_stdout": nonempty,
+                        "records": records,
+                    }
+                )
             finally:
                 process.terminate()
                 try:
@@ -320,7 +357,7 @@ def main():
     for scenario in scenarios:
         scenario["metrics"] = metrics(scenario)
     report = {
-        "measured_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "measured_on_utc": time.strftime("%Y-%m-%d", time.gmtime()),
         "revision": subprocess.check_output(
             ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
         ).strip(),
