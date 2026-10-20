@@ -440,6 +440,21 @@ time {
   display: flex;
   flex-direction: column;
 }
+.thread-history {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+.jump-latest {
+  position: absolute;
+  right: clamp(24px, 4vw, 70px);
+  bottom: 12px;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  background: var(--surface);
+  box-shadow: 0 3px 12px #00000014;
+}
 .thread-scroll {
   flex: 1;
   min-height: 0;
@@ -470,10 +485,13 @@ time {
   gap: 5px;
 }
 .summary-card {
+  flex-shrink: 0;
+  max-height: 30%;
+  overflow-y: auto;
   background: var(--soft);
   border-radius: 10px;
   padding: 12px 15px;
-  margin-bottom: 24px;
+  margin: 0 clamp(24px, 4vw, 70px) 14px;
 }
 .summary-card summary {
   display: flex;
@@ -958,6 +976,13 @@ code {
     padding-left: 24px;
     padding-right: 24px;
   }
+  .summary-card {
+    margin-left: 24px;
+    margin-right: 24px;
+  }
+  .jump-latest {
+    right: 24px;
+  }
   .composer {
     padding-left: 24px;
     padding-right: 24px;
@@ -985,6 +1010,12 @@ code {
   }
   .thread-heading {
     padding-right: 0;
+  }
+  .summary-card {
+    margin: 0 14px 10px;
+  }
+  .jump-latest {
+    right: 14px;
   }
   .composer {
     padding: 10px 12px;

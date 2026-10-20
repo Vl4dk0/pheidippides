@@ -669,47 +669,47 @@
         </div>
       </section>{/if}
     {#if prefs.view}<section class="thread-view" aria-label="Thread view">
-        <div class="thread-scroll">
-          {#if thread && snapshot}<ThreadPane
-              {thread}
-              {prefs}
-              {busy}
-              personId={snapshot.profile.person_id}
-              onreact={(message, reaction, remove) =>
-                request(
-                  { kind: 'react', message, reaction, remove },
-                  api.nothing,
-                )}
-              onunread={async () => {
-                const result = await request(
-                  { kind: 'unread', thread: selectedThread },
-                  api.nothing,
-                );
-                if (result === null) {
-                  selectedThread = '';
-                  thread = null;
-                  threadSelection.change();
-                }
-              }}
-            />
-          {:else if !composing}<div class="empty">
-              <div class="empty-symbol">
-                <MessageCircle size={32} strokeWidth={1.25} />
+        {#if thread && snapshot}<ThreadPane
+            {thread}
+            {prefs}
+            {busy}
+            personId={snapshot.profile.person_id}
+            onreact={(message, reaction, remove) =>
+              request(
+                { kind: 'react', message, reaction, remove },
+                api.nothing,
+              )}
+            onunread={async () => {
+              const result = await request(
+                { kind: 'unread', thread: selectedThread },
+                api.nothing,
+              );
+              if (result === null) {
+                selectedThread = '';
+                thread = null;
+                threadSelection.change();
+              }
+            }}
+          />
+        {:else}<div class="thread-scroll">
+            {#if !composing}<div class="empty">
+                <div class="empty-symbol">
+                  <MessageCircle size={32} strokeWidth={1.25} />
+                </div>
+                <h2>{loading ? 'Loading…' : 'Room to follow the work.'}</h2>
+                <p class="muted">
+                  {profiles.length
+                    ? 'Choose a thread to get started.'
+                    : 'Connect a space to get started.'}
+                </p>
+                {#if !profiles.length}<IconButton
+                    icon={Plus}
+                    label="Connect a space"
+                    onclick={() => (connecting = true)}
+                  />{/if}
               </div>
-              <h2>{loading ? 'Loading…' : 'Room to follow the work.'}</h2>
-              <p class="muted">
-                {profiles.length
-                  ? 'Choose a thread to get started.'
-                  : 'Connect a space to get started.'}
-              </p>
-              {#if !profiles.length}<IconButton
-                  icon={Plus}
-                  label="Connect a space"
-                  onclick={() => (connecting = true)}
-                />{/if}
-            </div>
-          {:else}{@render messageForm()}{/if}
-        </div>
+            {:else}{@render messageForm()}{/if}
+          </div>{/if}
         {#if selected && thread && !composing}{@render messageForm()}{/if}
       </section>{/if}
     {#if !prefs.threads && !prefs.view}<div class="empty">

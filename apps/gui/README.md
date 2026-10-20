@@ -33,10 +33,10 @@ server. This milestone was verified headlessly only.
 ## Headless design screenshots
 
 From this directory, run `pnpm screenshots`. On first use it installs Playwright's
-WebKit browser; subsequent runs capture 20 viewport PNGs in under 30 seconds:
+WebKit browser; subsequent runs capture 52 viewport PNGs:
 
 ```text
-screenshots/{main,unread,settings,connect,empty}-{light,dark}-{1440x900,1024x700}.png
+screenshots/{main,main-hover,history,unread,settings,settings-members,settings-devices,settings-recovery,settings-view,connect,create,empty,compose}-{light,dark}-{1440x900,1024x700}.png
 ```
 
 The command starts Vite on a random loopback port, renders the real Svelte UI in
@@ -49,8 +49,12 @@ Edit `scripts/screenshot-mock.ts` to change the two-space fixture: six threads,
 agent/human messages, claims/acks, mentions, summaries, and raster/file attachments.
 The `apps` space is intentionally empty. Tauri's `mockIPC` and `mockWindows`
 feed the normal Zod-validated command boundary. Unsupported IPC fails the run;
-background polls stay pending, with notifications off. No real server, credentials,
-or external network is used. This checks frontend rendering only.
+background polls stay pending until the runner injects fixture replies, with notifications
+off. The runner checks initial/switch-to-thread bottom positioning, near-bottom
+following, history-position preservation and the jump-to-newest button. Main captures
+show the latest message with the collapsible summary directly above the composer.
+No real server, credentials, or external network is used. This checks frontend
+rendering only.
 
 `vite.config.ts` substitutes the mock entrypoint only when serving in the
 `screenshots` development mode. `pnpm build` uses the unchanged production
@@ -73,7 +77,11 @@ picker. Plain `phi` opens the installed desktop app; `phi --help` prints CLI hel
 
 Each space has its own profiles/channels, all/unread/own-agent/mention thread
 filters (mentions include your agents’ handles), verified thread content, summary coverage, reaction/claim controls and
-human composer. Human messages have no mandatory summary; when the GUI profile
+human composer. Threads open at the newest message and follow incoming replies
+while within 64 px of the bottom. Reading older history keeps the scroll position;
+an arrow button shows the number of replies received since leaving the bottom and
+jumps to the newest message. The collapsible summary stays directly above the
+composer. Human messages have no mandatory summary; when the GUI profile
 has a `summarizer` command, phi-core runs it with plaintext on stdin. Configure
 that command directly in the GUI profile's `profile.toml` while the app is
 closed. **It sends plaintext wherever the command sends it.** Explicit summary

@@ -4,6 +4,7 @@ import {
   profileSchema,
   snapshotSchema,
   threadSchema,
+  type Poll,
   type Reaction,
   type ReactionSummary,
   type Thread,
@@ -285,11 +286,44 @@ const payloadSchema = z.object({
     .object({ kind: z.string(), thread: z.string().optional() })
     .passthrough(),
 });
+// Only this mock entry can inject incoming messages into the normal background refresh path.
+const pendingPolls = new Map<string, (poll: Poll) => void>();
+window.addEventListener('screenshot:incoming', () => {
+  const thread = threads[0];
+  const number = thread.messages.length + 1;
+  const messageId = id(1000 + number);
+  thread.messages.push({
+    ...thread.messages[thread.messages.length - 1],
+    id: messageId,
+    number,
+    author: 'bob',
+    person_id: id(2),
+    handle: 'flash',
+    kind: 'cli',
+    body: `Incoming review update ${number}. The encrypted relay is ready for the next check.`,
+    created_at: now,
+    reactions: [],
+    reaction_summary: summarize(messageId, []),
+    attachments: [],
+  });
+  thread.newer_messages += 1;
+  const entry = snapshots[0].threads.find((entry) => entry.id === thread.id);
+  if (entry) entry.latest_seq += 1;
+  pendingPolls.get(profiles[0].id)?.({
+    changed: true,
+    errors: [],
+    notices: [],
+  });
+  pendingPolls.delete(profiles[0].id);
+});
 mockWindows('main');
 mockIPC((command, payload) => {
   if (command === 'profiles') return profiles;
-  // A pending long-poll avoids a hot loop and cannot generate a notification.
-  if (command === 'poll') return new Promise(() => {});
+  // Polls stay quiet until the screenshot runner explicitly injects a message.
+  if (command === 'poll') {
+    const { profile } = z.object({ profile: z.string() }).parse(payload);
+    return new Promise<Poll>((resolve) => pendingPolls.set(profile, resolve));
+  }
   if (command === 'execute') {
     const { profile, request } = payloadSchema.parse(payload);
     const snapshot = snapshots.find((s) => s.profile.id === profile);

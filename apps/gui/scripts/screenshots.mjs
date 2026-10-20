@@ -135,6 +135,44 @@ try {
       await page
         .getByRole('region', { name: 'Thread summary', exact: true })
         .waitFor();
+      async function expectAtBottom() {
+        await page.waitForFunction(() => {
+          const viewport = document.querySelector(
+            '.thread-history .thread-scroll',
+          );
+          return (
+            viewport &&
+            viewport.scrollHeight -
+              viewport.clientHeight -
+              viewport.scrollTop <=
+              1
+          );
+        });
+      }
+      async function incomingMessage() {
+        const count = await page.locator('.message').count();
+        await page.evaluate(() =>
+          window.dispatchEvent(new Event('screenshot:incoming')),
+        );
+        await page.waitForFunction(
+          (count) => document.querySelectorAll('.message').length === count + 1,
+          count,
+        );
+      }
+      await expectAtBottom();
+      const summaryPlacement = await page
+        .locator('.summary-card')
+        .evaluate((summary) => {
+          const composer = document.querySelector('.composer');
+          return (
+            !summary.closest('.thread-scroll') &&
+            summary.nextElementSibling === composer &&
+            summary.getBoundingClientRect().bottom <=
+              composer.getBoundingClientRect().top
+          );
+        });
+      if (!summaryPlacement)
+        throw new Error('Summary is not directly above the composer');
       const reactionGap = await page
         .locator('.reaction-bar')
         .first()
@@ -153,7 +191,7 @@ try {
       await capture('main');
       const quietReaction = page
         .locator('.message')
-        .nth(1)
+        .last()
         .getByRole('button', {
           name: 'Like',
           exact: true,
@@ -164,7 +202,7 @@ try {
         'none'
       )
         throw new Error('Empty reaction is visible at rest');
-      const quietMessage = page.locator('.message').nth(1);
+      const quietMessage = page.locator('.message').last();
       const restingBounds = await quietMessage.boundingBox();
       const bottomSpace = await quietMessage.evaluate(
         (card) =>
@@ -186,7 +224,7 @@ try {
       await capture('main-hover');
       await page.mouse.move(0, 0);
       await page
-        .getByRole('toolbar', { name: 'Reactions to message 2', exact: true })
+        .getByRole('toolbar', { name: 'Reactions to message 5', exact: true })
         .focus();
       await page.keyboard.press('Tab');
       if (
@@ -210,6 +248,76 @@ try {
       )
         throw new Error('Summary did not collapse');
       await page.locator('.summary-card summary').click();
+      await expectAtBottom();
+      await incomingMessage();
+      await expectAtBottom();
+      // Within one message of the bottom still follows incoming replies.
+      await page
+        .locator('.thread-history .thread-scroll')
+        .evaluate((viewport) => {
+          viewport.scrollTop =
+            viewport.scrollHeight - viewport.clientHeight - 40;
+        });
+      await page.waitForFunction(() => {
+        const viewport = document.querySelector(
+          '.thread-history .thread-scroll',
+        );
+        const gap =
+          viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop;
+        return gap >= 39 && gap <= 41;
+      });
+      await incomingMessage();
+      await expectAtBottom();
+      await page
+        .locator('.thread-history .thread-scroll')
+        .evaluate((viewport) => {
+          viewport.scrollTop = 0;
+        });
+      const jump = page.getByRole('button', { name: /^Jump to newest/ });
+      await jump.waitFor();
+      const historyPosition = await page
+        .locator('.thread-history .thread-scroll')
+        .evaluate((viewport) => viewport.scrollTop);
+      await incomingMessage();
+      await page
+        .getByRole('button', {
+          name: 'Jump to newest · 1 new message',
+          exact: true,
+        })
+        .waitFor();
+      if (
+        Math.abs(
+          (await page
+            .locator('.thread-history .thread-scroll')
+            .evaluate((viewport) => viewport.scrollTop)) - historyPosition,
+        ) > 1
+      )
+        throw new Error('Incoming reply pulled the reader out of history');
+      await capture('history');
+      await jump.click();
+      await expectAtBottom();
+      if (await jump.count())
+        throw new Error('Jump button remained at the bottom');
+      await page
+        .getByRole('button', { name: 'CLI release checklist', exact: false })
+        .click();
+      await page
+        .getByRole('heading', { name: 'CLI release checklist', exact: true })
+        .waitFor();
+      await expectAtBottom();
+      await page
+        .getByRole('button', {
+          name: 'Encrypted relay ready for review',
+          exact: false,
+        })
+        .click();
+      await page
+        .getByRole('heading', {
+          name: 'Encrypted relay ready for review',
+          exact: true,
+        })
+        .waitFor();
+      await expectAtBottom();
       await page
         .getByRole('button', { name: 'Space settings', exact: true })
         .click();
