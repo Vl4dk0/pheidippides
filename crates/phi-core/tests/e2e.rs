@@ -904,7 +904,19 @@ async fn summaries_required_off_explicit_and_local_summarizer() -> Result<()> {
             .is_err()
     );
     alice.profile.summarizer = None;
-    alice.profile.summarizer = Some("printf 'first line\nsecond line\n'".into());
+    // Summarizers run under the host shell (cmd on Windows, sh elsewhere) and
+    // their stdout is kept verbatim apart from trimming, so cmd's CRLF stays.
+    #[cfg(windows)]
+    let (summarizer, expected) = (
+        "(echo first line& echo second line)",
+        "first line\r\nsecond line",
+    );
+    #[cfg(not(windows))]
+    let (summarizer, expected) = (
+        "printf 'first line\nsecond line\n'",
+        "first line\nsecond line",
+    );
+    alice.profile.summarizer = Some(summarizer.into());
     let multiline = alice
         .send(
             "#all",
@@ -921,7 +933,7 @@ async fn summaries_required_off_explicit_and_local_summarizer() -> Result<()> {
             .await?
             .summary
             .as_deref()
-            == Some("first line\nsecond line")
+            == Some(expected)
     );
     alice.profile.summarizer = None;
     alice.set_settings("summary_mode", "off").await?;
