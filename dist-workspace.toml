@@ -17,6 +17,10 @@ install-path = "CARGO_HOME"
 hosting = "github"
 # Whether to install an updater program
 install-updater = true
+# Build only the released binaries (phi, phi-server). Without it dist runs a
+# workspace build that also compiles the Tauri GUI, which needs the built
+# frontend and GTK and is released separately by gui-release.yml.
+precise-builds = true
 # Desktop bundles join the GitHub Release dist just announced
 post-announce-jobs = ["./gui-release"]
 # release.yml has two hand-edits dist 0.33 cannot generate (checksummed
