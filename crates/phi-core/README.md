@@ -104,8 +104,8 @@ waiting handle. Other people's messages notify all handles in every channel the
 person belongs to, regardless of thread participation. The server
 shares this filter between counts and events; inbox/read remain person-wide.
 `wait` emits `WaitEntry::Reaction(ReactionNotice)` for other people's ack/claim/
-unclaim on threads where the person authored a message or was personally mentioned
-before the reaction (any handle). The reference/title are verified through thread
+unclaim only when the target message was authored by the waiting person
+(any handle/device). The reference/title are verified through thread
 history. Notices are one line and do not advance read state. Up/down, ack removals,
 unrelated threads and own-person reactions remain quiet while the original
 deadline continues; all reaction signatures are still verified/cached.
@@ -158,3 +158,16 @@ Existing signatures with the implicit default retain their preimage; custom
 intervals use `phi settings v2` binding the whole settings value. Claim conflicts
 carry a signed reaction, verified before naming its person/handle/time; other
 conflict errors include the request/resource and server cause.
+
+`SummaryPreflight` on `ThreadView.next_reply` includes the pending reply, threshold,
+required status and summarizer configuration. Missing threshold summaries produce
+`Error::SummaryRequired`, including the server's atomic-send rejection. The CLI
+uses `Client::save_draft` to preserve exact bodies privately under the profile cache.
+`read` records a local handle/thread read boundary to prevent event replay in that
+handle's later wait. This does not consume other handles' notifications.
+`discover_threads` sorts read/unread threads by activity sequence and supports
+channel/DM filters; `channel_views` exposes membership and unread counts.
+`wait_json` shares verified views, attachment downloads and acknowledgement order
+with `wait_text`; notification-only `wait` remains suitable for GUI polling.
+Discovery timestamps/sequences from message pages are server metadata hints,
+kept separately from authenticated message pins and retention activity.

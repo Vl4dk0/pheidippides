@@ -457,7 +457,53 @@ async fn claim_exclusivity_reactions_unread_and_person_cursor() -> Result<()> {
     alice.react(reply.id, ReactionKind::Down, false).await?;
     ensure!(carol.wait_text(0).await?.is_empty());
     bob.react(reply.id, ReactionKind::Ack, false).await?;
-    ensure!(carol.wait_text(0).await? == format!("bob/cli ack {}#2 (Task)\n", root.id));
+    ensure!(
+        carol.wait_text(0).await?.is_empty(),
+        "authoring another message in a thread does not qualify"
+    );
+    ensure!(
+        alice
+            .wait_text(0)
+            .await?
+            .contains(&format!("bob/cli ack {}#2 (Task)", root.id))
+    );
+    let carol_reply = carol
+        .reply(root.id, options("carol owns this message"))
+        .await?;
+    bob.react(carol_reply.id, ReactionKind::Claim, false)
+        .await?;
+    ensure!(carol.wait_text(0).await? == format!("bob/cli claim {}#4 (Task)\n", root.id));
+    bob.react(carol_reply.id, ReactionKind::Claim, true).await?;
+    let notice = carol.wait_json(0).await?;
+    ensure!(notice["events"][0]["type"] == "reaction" && notice["events"][0]["kind"] == "unclaim");
+    ensure!(
+        notice["events"][0]["trusted"] == false
+            && notice["events"][0]["message_id"] == carol_reply.id.to_string()
+    );
+    let threads = alice.discover_threads(Some("#all")).await?;
+    ensure!(threads[0].id == root.id && threads[0].message_count == 4);
+    ensure!(threads[0].participants.iter().any(|p| p == "carol/cli"));
+    ensure!(alice.discover_threads(Some("@bob")).await?.is_empty());
+    let channels = carol.channel_views().await?;
+    ensure!(
+        channels
+            .iter()
+            .any(|c| c.name == "#all" && c.members.len() == 3)
+    );
+    ensure!(!alice.who().await?.contains("#all:"));
+    let later = alice
+        .send("#all", "Later thread", options("later activity"))
+        .await?;
+    ensure!(alice.discover_threads(None).await?[0].id == later.id);
+    bob.react(root.id, ReactionKind::Down, false).await?;
+    let reordered = alice.discover_threads(None).await?;
+    ensure!(
+        reordered[0].id == root.id
+            && reordered[0].last_activity_seq > reordered[1].last_activity_seq,
+        "reaction activity reorders discovery even within one second"
+    );
+    ensure!(reordered[0].unread_count == 1 && reordered[0].unread);
+
     Ok(())
 }
 #[tokio::test]
@@ -484,9 +530,12 @@ async fn wait_backlog_wakes_on_reply_and_keeps_per_handle_cursor() -> Result<()>
         tokio::time::sleep(Duration::from_millis(40)).await;
         alice.react(root.id, ReactionKind::Ack, false).await
     };
-    let (notice, sent) = tokio::join!(bob.wait_text(3), ack_sender);
+    let (notice, sent) = tokio::join!(bob.wait_text(1), ack_sender);
     sent?;
-    ensure!(notice? == format!("alice/cli ack {}#1 (Task)\n", root.id));
+    ensure!(
+        notice?.is_empty(),
+        "being addressed in a thread does not qualify for reactions to others' messages"
+    );
     ensure!(
         bob.counts().await?.unread_threads == unread_before,
         "reaction-only wait does not mark the thread read"
@@ -512,7 +561,8 @@ async fn wait_backlog_wakes_on_reply_and_keeps_per_handle_cursor() -> Result<()>
         output.push_str(&alice.format_wait_entry(event).await?);
     }
     ensure!(
-        !output.contains("claimed by bob/cli")
+        output.contains(&format!("reaction context · {}#1:", root.id))
+            && output.contains("claimed by bob/cli")
             && output.contains("summary (as of #2; up to date)")
             && output.contains("my reply")
             && output.contains(&format!("{}#2", root.id))
@@ -560,7 +610,7 @@ async fn wait_backlog_wakes_on_reply_and_keeps_per_handle_cursor() -> Result<()>
     let next = alice.wait_text(0).await?;
     ensure!(
         next.contains("up by bob/cli")
-            && !next.contains("ack by bob/cli")
+            && next.contains(&format!("reaction context · {}#3: ack by bob/cli", root.id))
             && next.contains("to: @bob")
     );
     ensure!(alice.wait_text(0).await?.is_empty());
@@ -706,6 +756,43 @@ async fn wait_backlog_wakes_on_reply_and_keeps_per_handle_cursor() -> Result<()>
                     && channel.unread_threads == 1)
         );
     }
+    let read_before_wait = alice
+        .send(
+            "@bob",
+            "Read before wait",
+            options("do not replay this body"),
+        )
+        .await?;
+    let json = reviewer
+        .read(read_before_wait.id, ReadOptions::default())
+        .await?
+        .json();
+    ensure!(json["messages"][0]["trusted"] == false && json["next_reply"]["required"] == false);
+    let mut reopened = Client::open(f.store("bob"), bob.profile.clone(), Some("reviewer")).await?;
+    ensure!(
+        reopened.wait_text(0).await?.is_empty(),
+        "read then wait must not replay the same handle's body"
+    );
+    let mut independent =
+        Client::open(f.store("bob"), bob.profile.clone(), Some("independent")).await?;
+    ensure!(
+        independent
+            .wait_text(0)
+            .await?
+            .contains("do not replay this body"),
+        "different handles retain independent notification history"
+    );
+    let fresh = alice
+        .reply(read_before_wait.id, options("fresh after read"))
+        .await?;
+    let delivered = reopened.wait_json(0).await?;
+    ensure!(delivered["events"][0]["thread"]["messages"][0]["id"] == fresh.id.to_string());
+    ensure!(delivered["events"][0]["thread"]["messages"][0]["trusted"] == false);
+    ensure!(
+        reopened.wait_json(0).await?["events"]
+            .as_array()
+            .is_some_and(|e| e.is_empty())
+    );
     Ok(())
 }
 #[tokio::test]
@@ -716,6 +803,13 @@ async fn summaries_required_off_explicit_and_local_summarizer() -> Result<()> {
         .send("#all", "No summary", SendOptions::default())
         .await?;
     alice.reply(unsummarized.id, SendOptions::default()).await?;
+    let preflight = alice.read(unsummarized.id, ReadOptions::default()).await?;
+    ensure!(preflight.next_reply.required && preflight.next_reply.messages_since_summary == 3);
+    ensure!(
+        preflight
+            .text()
+            .contains("next reply: --summary required (3 since last")
+    );
     let error = alice
         .reply(unsummarized.id, SendOptions::default())
         .await

@@ -9,6 +9,7 @@ use std::{
 
 const SKILL: &str = include_str!("../../../skill/SKILL.md");
 mod desktop;
+mod output;
 #[derive(Parser)]
 #[command(
     name = "phi",
@@ -20,6 +21,8 @@ struct Cli {
     handle: Option<String>,
     #[arg(long, global = true, allow_hyphen_values = true)]
     space: Option<String>,
+    #[arg(long, global = true)]
+    json: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -47,6 +50,11 @@ enum Command {
         space: Option<String>,
     },
     Who,
+    Threads {
+        destination: Option<String>,
+    },
+    Channels,
+    Spaces,
     Fetch,
     Inbox,
     Read {
@@ -169,6 +177,7 @@ async fn main() -> ExitCode {
         }
         return ExitCode::SUCCESS;
     }
+    let json_requested = std::env::args_os().any(|arg| arg == "--json");
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(error) => {
@@ -176,19 +185,45 @@ async fn main() -> ExitCode {
                 error.kind(),
                 clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
             );
-            let _ = error.print();
+            if json_requested && !help {
+                output::error(&error.to_string(), 1);
+            } else {
+                let _ = error.print();
+            }
             return ExitCode::from(if help { 0 } else { 1 });
         }
     };
+    let json = cli.json;
     match run(cli).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("phi: {error}");
+            if json {
+                output::error(&error.to_string(), error.exit_code());
+            } else {
+                eprintln!("phi: {error}");
+            }
             ExitCode::from(error.exit_code())
         }
     }
 }
 async fn run(cli: Cli) -> Result<()> {
+    if cli.json
+        && !matches!(
+            &cli.command,
+            Command::Fetch
+                | Command::Inbox
+                | Command::Read { .. }
+                | Command::Wait { .. }
+                | Command::Threads { .. }
+                | Command::Channels
+                | Command::Spaces
+                | Command::Who
+                | Command::Send { .. }
+                | Command::Reply { .. }
+        )
+    {
+        return Err(Error::User("--json supports fetch, inbox, read, wait, threads, channels, spaces, who, send and reply".into()));
+    }
     if let Command::Skill { install } = &cli.command {
         if let Some(dir) = install {
             std::fs::create_dir_all(dir)?;
@@ -230,6 +265,33 @@ async fn run(cli: Cli) -> Result<()> {
             let profile = store.bind(&cwd, space.as_deref().or(cli.space.as_deref()))?;
             println!("bound {} to {}", cwd.display(), profile.name);
         }
+        Command::Spaces => {
+            let binding = Store::binding(&cwd)?;
+            let spaces = store.profiles()?.into_iter().map(|p| {
+                let bound = binding.as_ref().is_some_and(|b| b.space_id == p.space_id && b.server == p.server);
+                serde_json::json!({"name":p.name,"id":p.space_id,"server":p.server,"bound":bound})
+            }).collect::<Vec<_>>();
+            if cli.json {
+                output::print(
+                    "spaces",
+                    serde_json::json!({"trusted":false,"spaces":spaces}),
+                )?;
+            } else {
+                for p in spaces {
+                    println!(
+                        "{} · {} · {}{}",
+                        p["name"].as_str().unwrap_or(""),
+                        p["id"].as_str().unwrap_or(""),
+                        p["server"].as_str().unwrap_or(""),
+                        if p["bound"] == true {
+                            " · bound to this directory"
+                        } else {
+                            ""
+                        }
+                    );
+                }
+            }
+        }
         Command::Fetch => {
             let profiles = if cli.space.is_some() || Store::binding(&cwd)?.is_some() {
                 vec![store.resolve(&cwd, cli.space.as_deref())?]
@@ -237,15 +299,25 @@ async fn run(cli: Cli) -> Result<()> {
                 store.profiles()?
             };
             let mut first_error = None;
+            let mut fetched = Vec::new();
             for profile in profiles {
                 let result = async {
                     let mut client =
                         Client::open(store.clone(), profile, cli.handle.as_deref()).await?;
-                    client.fetch().await
+                    if cli.json {
+                        let counts = client.counts().await?;
+                        let channels = counts.channels.iter().map(|c| serde_json::json!({"id":c.channel_id,"name":client.channel_name(c.channel_id),"unread_threads":c.unread_threads,"mentions":c.mentions})).collect::<Vec<_>>();
+                        Ok((String::new(), Some(serde_json::json!({"name":client.profile.name,"id":client.profile.space_id,"handle":client.handle,"person":client.profile.display_name,"unread_threads":counts.unread_threads,"mentions":counts.mentions,"claimed_by_you":counts.claimed_by_you,"channels":channels}))))
+                    } else { Ok((client.fetch().await?, None)) }
                 }
                 .await;
                 match result {
-                    Ok(output) => print!("{output}"),
+                    Ok((output, value)) => {
+                        print!("{output}");
+                        if let Some(value) = value {
+                            fetched.push(value);
+                        }
+                    }
                     Err(error) => {
                         if first_error.is_none() {
                             first_error = Some(error);
@@ -255,6 +327,12 @@ async fn run(cli: Cli) -> Result<()> {
             }
             if let Some(error) = first_error {
                 return Err(error);
+            }
+            if cli.json {
+                output::print(
+                    "fetch",
+                    serde_json::json!({"trusted":false,"spaces":fetched}),
+                )?;
             }
         }
         command => {
@@ -297,33 +375,109 @@ async fn run(cli: Cli) -> Result<()> {
                         println!("device revoked; affected channels rotated");
                     }
                 },
-                Command::Who => print!("{}", client.who().await?),
+                Command::Who => {
+                    let view = client.who_view().await?;
+                    if cli.json {
+                        output::print(
+                            "who",
+                            serde_json::json!({"trusted":false,"people":view.people,"handles":view.handles}),
+                        )?;
+                    } else {
+                        print!("{}", view.text());
+                    }
+                }
+                Command::Threads { destination } => {
+                    let entries = client.discover_threads(destination.as_deref()).await?;
+                    if cli.json {
+                        output::print(
+                            "threads",
+                            serde_json::json!({"threads":entries.iter().map(|e|e.json(&client.names())).collect::<Vec<_>>()}),
+                        )?;
+                    } else {
+                        for e in entries {
+                            print!("{}", e.discovery_text(&client.names()));
+                        }
+                    }
+                }
+                Command::Channels => {
+                    let channels = client.channel_views().await?;
+                    if cli.json {
+                        output::print(
+                            "channels",
+                            serde_json::json!({"trusted":false,"channels":channels}),
+                        )?;
+                    } else {
+                        for c in channels {
+                            print!("{}", c.text());
+                        }
+                    }
+                }
                 Command::Inbox => {
-                    for entry in client.inbox().await? {
-                        print!("{}", entry.text(&client.names()));
+                    let entries = client.inbox().await?;
+                    if cli.json {
+                        output::print(
+                            "inbox",
+                            serde_json::json!({"threads":entries.iter().map(|e|e.json(&client.names())).collect::<Vec<_>>()}),
+                        )?;
+                    } else {
+                        for entry in entries {
+                            print!("{}", entry.text(&client.names()));
+                        }
                     }
                 }
                 Command::Read { thread, all, last } => {
                     let thread = client.resolve_thread(thread).await?;
-                    print!(
-                        "{}",
-                        client.read(thread, ReadOptions { all, last }).await?.text()
-                    );
+                    let view = client.read(thread, ReadOptions { all, last }).await?;
+                    if cli.json {
+                        output::print("read", serde_json::json!({"thread":view.json()}))?;
+                    } else {
+                        print!("{}", view.text());
+                    }
                 }
                 Command::Send { to, title, message } => {
-                    let message = client.send(&to, &title, message.options()?).await?;
+                    let options = message.options()?;
+                    let message = match client.send(&to, &title, options.clone()).await {
+                        Ok(message) => message,
+                        Err(error) => {
+                            return Err(output::draft_error(
+                                &client,
+                                error,
+                                &options,
+                                &["send", &to, &title],
+                            )?);
+                        }
+                    };
                     if let Err(error) = client.message_reference(message.id).await {
                         eprintln!("message committed; numbered reference unavailable: {error}");
                     }
-                    print!("{}", client.sent_text(&message));
+                    if cli.json {
+                        output::receipt(&client, &message)?;
+                    } else {
+                        print!("{}", client.sent_text(&message));
+                    }
                 }
                 Command::Reply { thread, message } => {
                     let thread = client.resolve_thread(thread).await?;
-                    let message = client.reply(thread, message.options()?).await?;
+                    let options = message.options()?;
+                    let message = match client.reply(thread, options.clone()).await {
+                        Ok(message) => message,
+                        Err(error) => {
+                            return Err(output::draft_error(
+                                &client,
+                                error,
+                                &options,
+                                &["reply", &thread.to_string()],
+                            )?);
+                        }
+                    };
                     if let Err(error) = client.message_reference(message.id).await {
                         eprintln!("message committed; numbered reference unavailable: {error}");
                     }
-                    print!("{}", client.sent_text(&message));
+                    if cli.json {
+                        output::receipt(&client, &message)?;
+                    } else {
+                        print!("{}", client.sent_text(&message));
+                    }
                 }
                 Command::React { message, kind } => {
                     let message = client.resolve_message(message).await?;
@@ -342,7 +496,16 @@ async fn run(cli: Cli) -> Result<()> {
                     client.unread(thread).await?;
                     println!("marked unread");
                 }
-                Command::Wait { seconds } => print!("{}", client.wait_text(seconds).await?),
+                Command::Wait { seconds } => {
+                    if cli.json {
+                        println!(
+                            "{}",
+                            serde_json::to_string(&client.wait_json(seconds).await?)?
+                        );
+                    } else {
+                        print!("{}", client.wait_text(seconds).await?);
+                    }
+                }
                 Command::Group { command } => match command {
                     GroupCommand::Create { name, persons } => {
                         let id = client.group_create(&name, &persons).await?;
@@ -442,6 +605,12 @@ mod tests {
             vec!["init", "game"],
             vec!["init"],
             vec!["who"],
+            vec!["threads"],
+            vec!["threads", "#all"],
+            vec!["threads", "@bob"],
+            vec!["channels", "--json"],
+            vec!["spaces"],
+            vec!["--json", "wait", "0"],
             vec!["fetch"],
             vec!["inbox"],
             vec!["read", id],

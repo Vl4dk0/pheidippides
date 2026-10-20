@@ -132,6 +132,8 @@ pub struct ListMessagesResponse {
     pub reactions: Vec<Reaction>,
     #[serde(default)]
     pub cursors: Vec<ReadCursor>,
+    #[serde(default)]
+    pub activities: Vec<ThreadActivity>,
     pub next_after: Option<Seq>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -184,6 +186,8 @@ pub struct DownloadBlobResponse {
 pub enum ErrorBody {
     Invalid {
         message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        summary_required: Option<SummaryRequirement>,
     },
     Unauthorized {
         message: String,
@@ -235,4 +239,19 @@ pub fn check_protocol(major: u16) -> Result<(), ErrorBody> {
             required_major: PROTOCOL_MAJOR,
         })
     }
+}
+
+/// Discovery hints never participate in authenticated content or retention decisions.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ThreadActivity {
+    pub thread_id: MessageId,
+    pub last_activity: u64,
+    pub last_activity_seq: Seq,
+}
+
+/// An additive error detail lets clients recover drafts without parsing human prose.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SummaryRequirement {
+    pub messages_since_summary: u64,
+    pub threshold: u32,
 }

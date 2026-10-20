@@ -11,6 +11,18 @@ impl ApiError {
     pub fn invalid(message: impl ToString) -> Self {
         Self(ErrorBody::Invalid {
             message: message.to_string(),
+            summary_required: None,
+        })
+    }
+    pub fn summary_required(messages_since_summary: u64, threshold: u32) -> Self {
+        Self(ErrorBody::Invalid {
+            message: format!(
+                "--summary is required now: {messages_since_summary} messages since the last summary (including this message; threshold {threshold}) and summary_mode=required"
+            ),
+            summary_required: Some(phi_proto::SummaryRequirement {
+                messages_since_summary,
+                threshold,
+            }),
         })
     }
     pub fn forbidden() -> Self {

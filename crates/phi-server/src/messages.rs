@@ -62,9 +62,7 @@ impl Db {
                 )?;
                 let summary_every = settings.summary_every;
                 if since_summary >= u64::from(summary_every) {
-                    return Err(ApiError::invalid(format!(
-                        "--summary is required now: {since_summary} messages since the last summary (including this message; threshold {summary_every}) and summary_mode=required"
-                    )));
+                    return Err(ApiError::summary_required(since_summary, summary_every));
                 }
             }
             let latest: u64 = db.conn.query_row(
@@ -192,6 +190,7 @@ impl Db {
         let next_after = messages.last().map(|m| m.seq);
         let mut reactions = Vec::new();
         let mut cursors = Vec::new();
+        let mut activities = Vec::new();
         let mut threads = std::collections::BTreeSet::new();
         for message in &messages {
             reactions.extend(self.list::<Reaction>(
@@ -200,6 +199,15 @@ impl Db {
             )?);
             let thread = message.envelope.thread_id.unwrap_or(message.id);
             if threads.insert(thread) {
+                let (last_activity, last_activity_seq) = self.conn.query_row(
+                    "SELECT activity,COALESCE((SELECT MAX(seq) FROM events WHERE thread_id=?1),0) FROM threads WHERE id=?1",
+                    [thread.to_string()], |row| Ok((row.get(0)?, row.get(1)?)),
+                )?;
+                activities.push(ThreadActivity {
+                    thread_id: thread,
+                    last_activity,
+                    last_activity_seq,
+                });
                 let seq: u64 = self.conn.query_row(
                     "SELECT COALESCE((SELECT seq FROM cursors WHERE person_id=? AND thread_id=?),0)",
                     params![a.person().to_string(), thread.to_string()], |row| row.get(0),
@@ -215,6 +223,7 @@ impl Db {
             messages,
             reactions,
             cursors,
+            activities,
             next_after,
         })
     }

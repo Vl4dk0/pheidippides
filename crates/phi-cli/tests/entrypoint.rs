@@ -28,6 +28,14 @@ async fn cli_workflow_references_wait_skill_and_exit_codes() -> phi_core::Result
     assert_eq!(output.status.code(), Some(1));
     assert!(output.stdout.is_empty());
     assert!(!output.stderr.is_empty());
+    let output = Command::new(binary)
+        .args(["--json", "react", "invalid-id", "claim"])
+        .output()?;
+    assert_eq!(output.status.code(), Some(1));
+    let error: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(error["command"], "error");
+    assert!(output.stderr.is_empty());
+
     let workspace = tempfile::tempdir()?;
     let server = phi_server::Server::open(phi_server::config::Config {
         data_dir: workspace.path().join("server"),
@@ -48,6 +56,9 @@ async fn cli_workflow_references_wait_skill_and_exit_codes() -> phi_core::Result
                 let messages = request.uri().path().starts_with("/v1/channels/")
                     && request.uri().path().ends_with("/messages");
                 let sent = messages && request.method() == axum::http::Method::POST;
+                if sent && phase.load(Ordering::SeqCst) == 3 {
+                    return (axum::http::StatusCode::BAD_REQUEST, axum::Json(serde_json::json!({"error":"invalid","message":"--summary is required now: concurrent reply crossed threshold","summary_required":{"messages_since_summary":4,"threshold":4}}))).into_response();
+                }
                 if messages
                     && request.method() == axum::http::Method::GET
                     && phase.load(Ordering::SeqCst) == 2
@@ -235,6 +246,164 @@ async fn cli_workflow_references_wait_skill_and_exit_codes() -> phi_core::Result
         final_read.contains(&format!("message {thread}#3"))
             && final_read.contains("receipt survives lookup failure")
     );
+    for (args, key) in [
+        (vec!["--json", "fetch"], "spaces"),
+        (vec!["--json", "inbox"], "threads"),
+        (vec!["--json", "threads"], "threads"),
+        (vec!["threads", "@alice", "--json"], "threads"),
+        (vec!["--json", "channels"], "channels"),
+        (vec!["--json", "spaces"], "spaces"),
+        (vec!["--json", "who"], "people"),
+        (vec!["--json", "read", thread], "thread"),
+        (vec!["--json", "wait", "0"], "events"),
+    ] {
+        let value: serde_json::Value =
+            serde_json::from_str(&phi(binary, workspace.path(), &args).await?)?;
+        assert_eq!(value["schema_version"], 1);
+        assert!(!value[key].is_null(), "{args:?}: {value}");
+        if key == "spaces" && args.contains(&"spaces") {
+            assert_eq!(value[key][0]["bound"], true);
+        }
+        if key == "thread" {
+            assert!(value[key]["next_reply"].is_object());
+        }
+    }
+    phase.store(3, std::sync::atomic::Ordering::SeqCst);
+    let race = phi(
+        binary,
+        workspace.path(),
+        &["reply", thread, "concurrent rejected body"],
+    )
+    .await
+    .err()
+    .ok_or_else(|| phi_core::Error::User("server summary rejection should fail".into()))?
+    .to_string();
+    assert!(
+        race.contains("body saved to draft:")
+            && race.contains("concurrent reply crossed threshold")
+    );
+    let race_draft = race
+        .lines()
+        .find_map(|line| line.strip_prefix("body saved to draft: "))
+        .ok_or_else(|| phi_core::Error::User("missing raced draft".into()))?;
+    assert_eq!(
+        std::fs::read_to_string(race_draft)?,
+        "concurrent rejected body"
+    );
+    phase.store(0, std::sync::atomic::Ordering::SeqCst);
+    phi(
+        binary,
+        workspace.path(),
+        &["space", "set", "summary_every", "1"],
+    )
+    .await?;
+    let pending = "draft `code` \"quotes\" $HOME $(false)\nsecond line\n";
+    let attachment = workspace.path().join("draft attachment.txt");
+    std::fs::write(&attachment, "keep attachment")?;
+    let error = phi_with_input(
+        binary,
+        workspace.path(),
+        &[
+            "reply",
+            thread,
+            "-",
+            "--file",
+            &attachment.to_string_lossy(),
+        ],
+        Some(pending),
+    )
+    .await
+    .err()
+    .ok_or_else(|| phi_core::Error::User("missing summary should fail".into()))?
+    .to_string();
+    let draft = error
+        .lines()
+        .find_map(|line| line.strip_prefix("body saved to draft: "))
+        .ok_or_else(|| phi_core::Error::User("missing draft path".into()))?;
+    assert_eq!(std::fs::read_to_string(draft)?, pending);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(draft)?.permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::metadata(
+                std::path::Path::new(draft)
+                    .parent()
+                    .ok_or_else(|| phi_core::Error::User("draft parent missing".into()))?
+            )?
+            .permissions()
+            .mode()
+                & 0o777,
+            0o700
+        );
+    }
+
+    let retry = error
+        .lines()
+        .find_map(|line| line.strip_prefix("retry: "))
+        .ok_or_else(|| phi_core::Error::User("missing retry command".into()))?;
+    assert!(
+        retry.contains("--file")
+            && retry.contains("--space")
+            && retry.contains("--as")
+            && retry.contains(draft)
+    );
+    let shell_retry = retry
+        .replacen(
+            "phi ",
+            &format!("'{}' --json ", binary.replace('\'', "'\"'\"'")),
+            1,
+        )
+        .replace(
+            "--summary \"…\"",
+            "--summary 'All messages plus recovered draft'",
+        );
+    let receipt: serde_json::Value = serde_json::from_str(
+        &phi_with_input("zsh", workspace.path(), &["-c", &shell_retry, "--as"], None).await?,
+    )?;
+    assert_eq!(receipt["thread_id"], thread);
+    assert!(receipt["message_id"].is_string());
+    let restored: serde_json::Value =
+        serde_json::from_str(&phi(binary, workspace.path(), &["read", thread, "--json"]).await?)?;
+    let last = restored["thread"]["messages"]
+        .as_array()
+        .and_then(|m| m.last())
+        .ok_or_else(|| phi_core::Error::User("missing recovered reply".into()))?;
+    assert_eq!(last["body"], pending);
+    assert_eq!(last["attachments"][0]["name"], "draft attachment.txt");
+    let root_error = phi_with_input(
+        binary,
+        workspace.path(),
+        &["send", "#all", "Root 'quotes' $HOME", "-"],
+        Some(pending),
+    )
+    .await
+    .err()
+    .ok_or_else(|| phi_core::Error::User("root summary should fail".into()))?
+    .to_string();
+    assert!(
+        root_error.contains("body saved to draft:") && root_error.contains("'send' '#all' 'Root '")
+    );
+    let receipt: serde_json::Value = serde_json::from_str(
+        &phi(
+            binary,
+            workspace.path(),
+            &[
+                "send",
+                "#all",
+                "Json root",
+                "body",
+                "--summary",
+                "Json root summary",
+                "--json",
+            ],
+        )
+        .await?,
+    )?;
+    assert_eq!(receipt["command"], "send");
     Ok(())
 }
 
