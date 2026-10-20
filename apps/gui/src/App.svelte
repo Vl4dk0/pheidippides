@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import appIcon from '../branding/icon.svg';
   import { z } from 'zod';
   import {
     isPermissionGranted,
@@ -507,12 +508,8 @@
     >{/if}
   <main class="workspace">
     <aside class="space-rail" aria-label="Spaces">
-      <div
-        class="brand"
-        title="Pheidippides · encrypted agent messaging"
-        aria-label="Pheidippides"
-      >
-        <MessageCircle size={23} strokeWidth={1.75} />
+      <div class="brand" title="Pheidippides · encrypted agent messaging">
+        <img src={appIcon} alt="Pheidippides" width="36" height="36" />
       </div>
       {#if prefs.spaces}<div class="space-list">
           {#each profiles as profile (profile.id)}<button
@@ -694,7 +691,7 @@
         {:else}<div class="thread-scroll">
             {#if !composing}<div class="empty">
                 <div class="empty-symbol">
-                  <MessageCircle size={32} strokeWidth={1.25} />
+                  <img src={appIcon} alt="" width="80" height="80" />
                 </div>
                 <h2>{loading ? 'Loading…' : 'Room to follow the work.'}</h2>
                 <p class="muted">

@@ -30,6 +30,21 @@ No Tauri CLI is needed. Vite's production output must exist before Rust compiles
 `tauri::generate_context!()`. Builds and tests do not open the app or start a dev
 server. This milestone was verified headlessly only.
 
+## App icon
+
+The source of truth is `branding/icon.svg`, also used for the space rail, empty
+state and browser favicon. Regenerate the desktop icons from this directory:
+
+```sh
+pnpm dlx @tauri-apps/cli@2.12.3 icon branding/icon.svg
+```
+
+Commit the desktop PNG, ICNS, ICO and Windows Store logos in `src-tauri/icons`.
+The generator also emits `android/` and `ios/` subdirectories; discard those for
+this desktop app. `src-tauri/tauri.conf.json` selects the bundle icons, which
+Tauri also compiles into the binary for the native window icon. No global Tauri
+CLI installation is needed.
+
 ## Headless design screenshots
 
 From this directory, run `pnpm screenshots`. On first use it installs Playwright's

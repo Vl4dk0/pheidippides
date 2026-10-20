@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <linearGradient id="bg-a1" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#1f2723" />
+      <stop offset="100%" stop-color="#171c1a" />
+    </linearGradient>
+  </defs>
+
+  <!-- macOS squircle background (~9% safe margin) -->
+  <rect x="88" y="88" width="848" height="848" rx="192" fill="url(#bg-a1)" stroke="#9ac6ac" stroke-opacity="0.15" stroke-width="6" />
+
+  <!-- Optically re-centered chat-bubble bowl of φ in sage (#9ac6ac) -->
+  <path fill="#9ac6ac" fill-rule="evenodd"
+        d="M 502 318
+           C 638 318, 736 398, 736 508
+           C 736 548, 723 584, 700 614
+           L 758 744
+           C 764 757, 751 769, 738 762
+           L 596 690
+           C 567 697, 536 700, 502 700
+           C 366 700, 268 620, 268 508
+           C 268 398, 366 318, 502 318 Z
+           M 502 394
+           C 410 394, 344 442, 344 508
+           C 344 574, 410 622, 502 622
+           C 594 622, 660 574, 660 508
+           C 660 442, 594 394, 502 394 Z" />
+
+  <!-- Forward-leaning φ stem optically centered with bowl -->
+  <path d="M 531 182 L 473 834" stroke="#9ac6ac" stroke-width="76" stroke-linecap="round" fill="none" />
+</svg>

@@ -186,8 +186,7 @@ time {
   gap: 24px;
 }
 .brand {
-  color: var(--accent);
-  height: 27px;
+  height: 36px;
 }
 .space-list {
   display: flex;
@@ -754,14 +753,8 @@ time {
   font-size: 19px;
 }
 .empty-symbol {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 64px;
-  height: 64px;
-  border: 1px solid var(--line);
-  border-radius: 20px;
-  color: var(--accent);
+  width: 80px;
+  height: 80px;
   margin-bottom: 8px;
 }
 .banner {
