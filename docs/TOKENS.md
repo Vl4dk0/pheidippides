@@ -1,26 +1,26 @@
 # How many tokens does phi cost?
 
-**Measured six-message review: 3,382 tokens for agent A and 3,217 for B**
+**Measured six-message review: 3,627 tokens for agent A and 3,444 for B**
 with the default `summary_every=3` (`o200k_base`, input + output). Of those,
-**2,498 / 2,333 are extra versus manually relaying the same bodies**.
-Loading the skill and AGENTS snippet adds **1,328 input tokens per agent**.
+**2,743 / 2,560 are extra versus manually relaying the same bodies**.
+Loading the skill and AGENTS snippet adds **1,354 input tokens per agent**.
 An idle session-start hook prints **0 tokens**.
 
 These are text measurements, not an API invoice. The requested workflow reads
 each incoming message twice: `wait`, then `read --last 1`. `wait` already includes
-the full new message. Subtracting those redundant reads gives **2,018 / 2,006
+the full new message. Subtracting those redundant reads gives **2,219 / 2,182
 tokens per agent** at the default interval, before skill loading.
 
 ## Measured items
 
-Run on **2026-10-20**, macOS, binaries built from `fb7a8299a7cc`.
+Run on **2026-10-20**, macOS, binaries built from `6e9482d26138`.
 All paired counts below are **input / output**: exact CLI stdout (plus stderr,
 empty during the exchange) / agent-written shell command, body and summary.
 Per-message figures are averages across all six messages, rounded to one decimal.
 
 | One-off or session item | o200k_base | cl100k_base |
 | --- | ---: | ---: |
-| Load `skill/SKILL.md` (input only) | 1,253 | 1,256 |
+| Load `skill/SKILL.md` (input only) | 1,279 | 1,280 |
 | Load `skill/AGENTS-snippet.md` (input only) | 75 | 75 |
 | Session-start `phi --as main fetch`, empty | 0 / 6 | 0 / 6 |
 | Session-start `phi --as main fetch`, one unread mention | 32 / 6 | 32 / 6 |
@@ -36,14 +36,14 @@ phi · atlas: 1 unread threads (@alice 1) · 1 mention(s) of you (@bob/main) · 
 
 | Per-message/action average | summary_every | o200k_base, in / out | cl100k_base, in / out |
 | --- | ---: | ---: | ---: |
-| Send, including applicable summary and receipt | 3 | 57.7 / 204.2 | 60.5 / 205.5 |
-| Send, including summary and receipt | 1 | 57.7 / 232.3 | 56.0 / 232.3 |
-| Receive via `wait 1` | 3 | 373.5 / 8.0 | 378.2 / 8.0 |
-| Receive via `wait 1` | 1 | 371.8 / 8.0 | 370.7 / 8.0 |
-| Additional `read --last 1` after wait | 3 | 402.2 / 27.0 | 406.3 / 28.0 |
-| Additional `read --last 1` after wait | 1 | 366.0 / 27.0 | 365.2 / 26.0 |
+| Send, including applicable summary and receipt | 3 | 55.2 / 203.3 | 57.8 / 204.7 |
+| Send, including summary and receipt | 1 | 53.3 / 230.7 | 58.0 / 233.2 |
+| Receive via `wait 1` | 3 | 439.7 / 8.0 | 446.0 / 8.0 |
+| Receive via `wait 1` | 1 | 432.5 / 8.0 | 443.0 / 8.0 |
+| Additional `read --last 1` after wait | 3 | 419.0 / 26.0 | 423.0 / 27.0 |
+| Additional `read --last 1` after wait | 1 | 380.0 / 25.0 | 385.7 / 27.0 |
 | `claim` or `ack`, including receipt | 3 | 3.0 / 27.0 | 3.0 / 28.0 |
-| `claim` or `ack`, including receipt | 1 | 3.0 / 28.0 | 3.0 / 27.0 |
+| `claim` or `ack`, including receipt | 1 | 3.0 / 26.0 | 3.0 / 28.0 |
 
 ## Whole thread versus human copy-paste
 
@@ -60,14 +60,14 @@ copy-paste time is unpriced. The baseline is identical for both summary settings
 | --- | --- | ---: | ---: |
 | Manual copy-paste | A | 459 / 425 = **884** | 459 / 428 = **887** |
 | Manual copy-paste | B | 425 / 459 = **884** | 428 / 459 = **887** |
-| phi, summary_every=3 | A | 2,569 / 813 = **3,382** | 2,602 / 823 = **3,425** |
-| phi, summary_every=3 | B | 2,475 / 742 = **3,217** | 2,512 / 750 = **3,262** |
-| phi extra over manual, interval 3 | A | 2,110 / 388 = **2,498** | 2,143 / 395 = **2,538** |
-| phi extra over manual, interval 3 | B | 2,050 / 283 = **2,333** | 2,084 / 291 = **2,375** |
-| phi, summary_every=1 | A | 2,326 / 876 = **3,202** | 2,314 / 871 = **3,185** |
-| phi, summary_every=1 | B | 2,491 / 852 = **3,343** | 2,481 / 847 = **3,328** |
-| phi extra over manual, interval 1 | A | 1,867 / 451 = **2,318** | 1,855 / 443 = **2,298** |
-| phi extra over manual, interval 1 | B | 2,066 / 393 = **2,459** | 2,053 / 388 = **2,441** |
+| phi, summary_every=3 | A | 2,819 / 808 = **3,627** | 2,855 / 818 = **3,673** |
+| phi, summary_every=3 | B | 2,708 / 736 = **3,444** | 2,750 / 744 = **3,494** |
+| phi extra over manual, interval 3 | A | 2,360 / 383 = **2,743** | 2,396 / 390 = **2,786** |
+| phi extra over manual, interval 3 | B | 2,283 / 277 = **2,560** | 2,322 / 285 = **2,607** |
+| phi, summary_every=1 | A | 2,555 / 860 = **3,415** | 2,615 / 879 = **3,494** |
+| phi, summary_every=1 | B | 2,684 / 838 = **3,522** | 2,749 / 854 = **3,603** |
+| phi extra over manual, interval 1 | A | 2,096 / 435 = **2,531** | 2,156 / 451 = **2,607** |
+| phi extra over manual, interval 1 | B | 2,259 / 379 = **2,638** | 2,321 / 395 = **2,716** |
 
 More summaries increase generated text here, but can reduce read output:
 `read --last 1` also includes messages newer than the latest summary. Consequently
@@ -92,9 +92,9 @@ Using `o200k_base` counts, **both agents combined**:
 
 | Model | Manual bodies | phi interval 3 | phi interval 1 | Extra over manual, 3 / 1 | Load skill + snippet on both agents |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| GPT-4.1 mini | $0.001768 | $0.004506 | $0.004692 | $0.002738 / $0.002924 | $0.001062 |
-| Gemini 2.5 Flash | $0.002475 | $0.005401 | $0.005765 | $0.002926 / $0.003290 | $0.000797 |
-| Claude Sonnet 4.6 | $0.015912 | $0.038457 | $0.040371 | $0.022545 / $0.024459 | $0.007968 |
+| GPT-4.1 mini | $0.001768 | $0.004681 | $0.004812 | $0.002913 / $0.003044 | $0.001083 |
+| Gemini 2.5 Flash | $0.002475 | $0.005518 | $0.005817 | $0.003043 / $0.003342 | $0.000812 |
+| Claude Sonnet 4.6 | $0.015912 | $0.039741 | $0.041187 | $0.023829 / $0.025275 | $0.008124 |
 
 Formula: `(input_tokens × input_price + output_tokens × output_price) / 1,000,000`.
 These charge each piece of text once. Real agent sessions repeatedly submit prior
@@ -129,8 +129,10 @@ summarizer is configured. Setup/settings notifications are drained before counti
 [Raw measured report](token-measurement.json) contains exact stdout/stderr,
 actual argv, agent-written commands with quoted body heredocs and inline summaries,
 per-command counts, aggregate metrics, binary SHA-256 hashes and source revision.
-Counts use unmodified output, summed per command. IDs, timestamps and temporary
-paths vary on rerun, so expect small variation rather than byte-identical totals.
+Counts use unmodified output, summed per command; the stored text then has
+temporary/home/checkout paths, the relay port and invite secrets redacted
+(`<tmp>`, `<home>`, `<repo>`, `<port>`, `#<secret>`). IDs and temporary paths
+vary on rerun, so expect small variation rather than byte-identical totals.
 
 Attachment encryption/upload/download are local computation and network work:
 only the filename/path/metadata printed to the agent count here. Opening the

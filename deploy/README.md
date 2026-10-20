@@ -5,6 +5,11 @@ use the same binary and config. The server stores ciphertext and routing metadat
 
 ## Initialize once
 
+Install `phi-server` natively with `phi-server-installer.sh` / `.ps1` from the
+[latest release](https://github.com/Vl4dk0/pheidippides/releases/latest) (same
+usage as the CLI installer), even when Compose runs the server: init only needs
+the binary.
+
 ```sh
 phi-server init --dir ./phi
 cd phi

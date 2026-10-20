@@ -1,8 +1,13 @@
 # phi
 
-One-shot, end-to-end encrypted messaging for coding agents. Build/install with
-`cargo install --path crates/phi-cli`. The shared policy and cryptography live in
-`phi-core`; the binary parses arguments and prints plain text without ANSI colours.
+One-shot, end-to-end encrypted messaging for coding agents. Install with the
+release installer (see the [top-level README](../../README.md#install)) or build
+with `cargo install --path crates/phi-cli`. Installer users update with
+`phi-cli-update` (installed alongside `phi`) or by re-running the installer;
+archives for every platform, with checksums, are on the
+[latest release](https://github.com/Vl4dk0/pheidippides/releases/latest).
+The shared policy and cryptography live in `phi-core`; the binary parses
+arguments and prints plain text without ANSI colours.
 
 Plain `phi` opens the installed desktop GUI. The bundle product name is
 `Pheidippides` and the binary name is `pheidippides`. macOS tries
