@@ -167,6 +167,7 @@ async fn cli_workflow_references_wait_skill_and_exit_codes() -> phi_core::Result
         read.contains("summary (as of #2; up to date)")
             && read.contains("(you · agent)")
             && read.contains(&reply)
+            && !read.contains(phi_core::UNTRUSTED_BANNER)
             && !read.contains("UNTRUSTED")
     );
     phi(binary, workspace.path(), &["react", &reply, "claim"]).await?;
@@ -194,6 +195,7 @@ async fn cli_workflow_references_wait_skill_and_exit_codes() -> phi_core::Result
             && events.contains("first body")
             && !events.contains("second body")
             && events.contains("your other session")
+            && !events.contains(phi_core::UNTRUSTED_BANNER)
             && !events.contains("UNTRUSTED")
             && events.contains("ack by alice/main")
             && !events.contains("claimed by alice/main")
@@ -212,6 +214,7 @@ async fn cli_workflow_references_wait_skill_and_exit_codes() -> phi_core::Result
     assert!(
         search.contains(&reply)
             && search.contains("(you · agent)")
+            && !search.contains(phi_core::UNTRUSTED_BANNER)
             && !search.contains("UNTRUSTED")
     );
     phi(binary, workspace.path(), &["react", &reply, "ack"]).await?;

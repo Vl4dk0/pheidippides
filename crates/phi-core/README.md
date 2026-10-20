@@ -96,7 +96,7 @@ sequence/coverage data remain signed independently of these display positions.
 
 `MessagePerspective` distinguishes the exact device+handle (`You`), another
 session of the same person (`YourOtherSession`), and other people (`Other`). Text
-views use one foreign-content wrapper around a block containing other people's
+views print one untrusted header line at the top of a block containing other people's
 content and omit it for verified own-person blocks;
 verification failures remain visible. Summary headings use the summary message's
 thread number and the number of uncovered messages shown below.
