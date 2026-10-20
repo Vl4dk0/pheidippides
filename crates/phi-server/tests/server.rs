@@ -436,6 +436,38 @@ async fn admin_creation_auth_and_major_version_are_enforced() -> TestResult {
         c.admin_token = Some("admin-secret".into())
     })
     .await?;
+    for method in ["GET", "HEAD"] {
+        for major in [None, Some("99"), Some("invalid")] {
+            let mut req = Request::builder().method(method).uri("/healthz");
+            if let Some(major) = major {
+                req = req.header(PROTOCOL_HEADER, major);
+            }
+            let response = f.app.clone().oneshot(req.body(Body::empty())?).await?;
+            assert_eq!(response.status(), 200);
+            let body = to_bytes(response.into_body(), 1000).await?;
+            if method == "HEAD" {
+                assert!(body.is_empty());
+            } else {
+                assert_eq!(
+                    serde_json::from_slice::<Value>(&body)?,
+                    json!({"status": "ok", "protocol_major": PROTOCOL_MAJOR})
+                );
+            }
+        }
+    }
+    for (method, path) in [("POST", "/healthz"), ("GET", "/healthz/"), ("GET", "/")] {
+        let response = f
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(response.status(), 426);
+    }
     let (s, _, _) = request(&f.app, "GET", &f.space(""), None, json!(null)).await?;
     assert_eq!(s, 401);
     let response = f
@@ -1835,16 +1867,85 @@ async fn signed_settings_emit_events_and_forever_disables_retention() -> TestRes
 }
 #[tokio::test]
 async fn config_cli_overrides_and_backup_use_deployment_contract() -> TestResult {
-    let sample =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/server.example.toml");
-    let config = Config::load(&sample)?;
+    let init_dir = tempfile::tempdir()?;
+    let deployment = init_dir.path().join("deployment dir");
+    let init = || {
+        std::process::Command::new(env!("CARGO_BIN_EXE_phi-server"))
+            .args(["init", "--dir"])
+            .arg(&deployment)
+            .env("PHI_SERVER_CONFIG", "does-not-exist.toml")
+            .output()
+    };
+    let output = init()?;
+    assert!(output.status.success(), "{:?}", output.stderr);
+    let instructions = String::from_utf8(output.stdout)?;
+    assert!(instructions.contains("PHI_ADMIN_TOKEN="));
+    assert!(instructions.contains("phi-server --config server.toml"));
+    let sample = std::fs::read_to_string(deployment.join("server.toml"))?;
+    assert_eq!(sample, include_str!("../../../deploy/server.toml"));
+    let env = std::fs::read_to_string(deployment.join(".env"))?;
+    let admin = env
+        .lines()
+        .find_map(|line| line.strip_prefix("PHI_SERVER_ADMIN_TOKEN="))
+        .ok_or_else(|| anyhow::anyhow!("missing generated token"))?;
+    let _: Base64<32> = admin.parse()?;
+    assert!(!instructions.contains(admin));
+    let mut config: Config = toml::from_str(&sample)?;
+    config.admin_token = Some(admin.into());
+    config.validate()?;
+    assert!(config.listen.ip().is_loopback());
     assert_eq!(config.listen.port(), 8443);
+    assert!(matches!(config.allow_space_creation, Creation::Token));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(deployment.join(".env"))?
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::metadata(deployment.join("server.toml"))?
+                .permissions()
+                .mode()
+                & 0o777,
+            0o644
+        );
+    }
+    assert!(!init()?.status.success());
+    assert_eq!(std::fs::read_to_string(deployment.join(".env"))?, env);
+    assert_eq!(
+        std::fs::read_to_string(deployment.join("server.toml"))?,
+        sample
+    );
+    std::fs::remove_file(deployment.join("server.toml"))?;
+    assert!(!init()?.status.success());
+    assert!(!deployment.join("server.toml").exists());
+    assert_eq!(std::fs::read_to_string(deployment.join(".env"))?, env);
+    std::fs::remove_file(deployment.join(".env"))?;
+    std::fs::write(deployment.join("server.toml"), &sample)?;
+    assert!(!init()?.status.success());
+    assert!(!deployment.join(".env").exists());
+    assert_eq!(
+        std::fs::read_to_string(deployment.join("server.toml"))?,
+        sample
+    );
+    // No --dir means the current directory, with a fresh token each time.
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_phi-server"))
+        .arg("init")
+        .current_dir(init_dir.path())
+        .output()?;
+    assert!(output.status.success());
+    assert_ne!(std::fs::read_to_string(init_dir.path().join(".env"))?, env);
+    assert!(!init_dir.path().join("data").exists());
     let f = Fixture::new().await?;
     let config_path = f.dir.path().join("server.toml");
     std::fs::write(
         &config_path,
         format!(
-            "data_dir = {:?}\nallow_space_creation = 'anyone'\n[tls]\nmode = 'off'\n",
+            "data_dir = {:?}\nallow_space_creation = 'token'\n[tls]\nmode = 'off'\n",
             f.dir.path()
         ),
     )?;
@@ -1855,7 +1956,7 @@ async fn config_cli_overrides_and_backup_use_deployment_contract() -> TestResult
         .env("PHI_SERVER_CONFIG", &config_path)
         .env("PHI_SERVER_LISTEN", "127.0.0.1:12345")
         .env("PHI_SERVER_LIMITS__MESSAGES_PER_MIN", "10")
-        .env("PHI_SERVER_ADMIN_TOKEN", "12345")
+        .env("PHI_SERVER_ADMIN_TOKEN", admin)
         .status()?;
     assert!(status.success());
     assert!(dest.join("phi.db").is_file());

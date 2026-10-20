@@ -8,13 +8,26 @@ in-process clients/tests; it starts no listener or background task itself.
 ## Configuration and operation
 
 ```sh
+phi-server init --dir ./phi
+cd phi
+set -a; . ./.env; set +a
+phi-server --config server.toml
+# Other config paths and backups:
 phi-server --config /etc/phi/server.toml
 PHI_SERVER_CONFIG=/etc/phi/server.toml phi-server
 phi-server --config /etc/phi/server.toml backup /path/to/new-backup
 ```
 
+Init creates a commented `server.toml` (0644) and a separate `.env` (0600 on Unix)
+with a random 256-bit `PHI_SERVER_ADMIN_TOKEN`, refusing to overwrite either.
+Without `--dir`, it uses the current directory. Defaults are localhost, TLS off
+and token-protected space creation. Load `.env` explicitly as above (the server
+does not load dotenv), or use systemd/Compose env-file support. Pass the matching
+`PHI_ADMIN_TOKEN="$PHI_SERVER_ADMIN_TOKEN"` to `phi space create`.
+See [deployment](../../deploy/README.md) for Compose/nginx and rootless Docker.
+
 The default config path is `server.toml`. See
-[`deploy/server.example.toml`](../../deploy/server.example.toml). Unknown config
+[`deploy/server.toml`](../../deploy/server.toml). Unknown config
 fields fail startup. Every field can be overridden using `PHI_SERVER_` plus its
 uppercase name; use `__` for nested fields, e.g. `PHI_SERVER_DATA_DIR`,
 `PHI_SERVER_TLS__MODE`, `PHI_SERVER_TLS__DOMAIN`,
@@ -71,7 +84,7 @@ keys are client-owned and cannot be recovered from server backups.
 ## HTTP API
 
 All paths below start with `/v1`. JSON request/response type names are exported by
-`phi-proto`. Every request, including public grant operations, needs
+`phi-proto`. API requests, including public grant operations, need
 `Phi-Protocol: 0`. Success is HTTP 200 and JSON. Requests reject unknown fields,
 including nested signed records. Typed query/path fields and size bounds are
 validated; ordinary JSON bodies are capped at 1 MiB before parsing, blob uploads
@@ -81,6 +94,12 @@ aggregate upload buffers to one maximum-size body plus decoded ciphertext. Exces
 uploads get 429/Retry-After before their bodies are polled. Files are synced outside
 the database lock, then authorization and quota are rechecked at publication;
 interrupted or rejected uploads clean up their unpublished files.
+
+Outside `/v1`, `GET /healthz` returns HTTP 200 and
+`{"status":"ok","protocol_major":0}`; HEAD returns 200 without a body.
+These probes bypass auth and protocol admission even with a missing, invalid or
+mismatching `Phi-Protocol`. All other requests retain protocol/auth checks.
+This is process liveness, not a database/storage check.
 
 | Method/path | Body or query | Response |
 |---|---|---|

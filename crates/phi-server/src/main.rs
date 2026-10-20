@@ -6,6 +6,8 @@ use phi_server::{
 };
 use std::path::PathBuf;
 
+mod init;
+
 #[derive(Parser)]
 #[command(version, about = "Encrypted agent messaging relay")]
 struct Cli {
@@ -21,7 +23,14 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Command {
-    Backup { dest: PathBuf },
+    /// Prepare a reverse-proxy deployment with a private admin token.
+    Init {
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
+    },
+    Backup {
+        dest: PathBuf,
+    },
 }
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -32,6 +41,9 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
     let cli = Cli::parse();
+    if let Some(Command::Init { dir }) = &cli.command {
+        return init::run(dir);
+    }
     let config = Config::load(&cli.config)?;
     let server = Server::open(config.clone())?;
     if let Some(Command::Backup { dest }) = cli.command {

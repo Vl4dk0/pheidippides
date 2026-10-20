@@ -579,6 +579,15 @@ screenshot tests.
 
 ## 8. Server (`phi-server`)
 
+- `phi-server init [--dir DIR]` creates a commented, secret-free `server.toml`
+  (0644) and a separate `.env` (0600 on Unix) containing a cryptographically random
+  256-bit `PHI_SERVER_ADMIN_TOKEN`. Neither existing file is overwritten. Defaults
+  target a reverse proxy: localhost listener, TLS off, token-protected creation.
+  Print run/create-space steps and token location without printing the token.
+  The shell, systemd or Compose loads `.env`; the server retains its existing env
+  overrides without implicit dotenv loading. Keeping config readable permits
+  container users to mount it without exposing the admin token
+  (changed in prototype review).
 - Config: `server.toml` (path via arg or `PHI_SERVER_CONFIG`):
   `data_dir`, `listen` (e.g. `0.0.0.0:8443`), `[tls] mode = "acme"|"off"`
   (`acme` needs `domain`, `email`; `off` = plain HTTP for behind a reverse proxy
@@ -590,18 +599,32 @@ screenshot tests.
 - Long-poll: `GET /v1/spaces/{sid}/events?after=<seq>&timeout=<s>&handle=<h>`
   (max 900 s), wakes on relevant inserts via in-process notify.
 - Who can create spaces: config `allow_space_creation = "anyone"|"token"`
-  (`token` requires a server admin token in config — so a public home server
+  (`token` requires a server admin token via config or `PHI_SERVER_ADMIN_TOKEN` — so a public home server
   isn't an open relay). Default `token`; `phi space create` passes it via
   `PHI_ADMIN_TOKEN`. `anyone` is suitable on a private network
   (changed in prototype review).
 - Retention sweep hourly; rate limits; request validation (6.11); protocol
   check (6.10); structured logs without content.
+- `GET /healthz` and `HEAD /healthz` bypass protocol/auth checks, including a
+  missing or mismatching `Phi-Protocol`, and always return 200 while serving.
+  GET returns tiny JSON with `status = "ok"` and the derived `protocol_major`;
+  HEAD has no body. All other requests retain protocol/auth rules. This is a
+  liveness probe, not a storage audit (changed in prototype review).
 - Deployment targets (all three supported, decided):
   1. PC / private network: `tls.mode = off`, bind to VPN/LAN interface.
-  2. Home server with domain: `tls.mode = acme`.
+  2. Home server with domain: `tls.mode = acme`, or TLS off behind nginx with
+     rootless Docker (changed in prototype review).
   3. Company: `tls.mode = off` behind their reverse proxy (examples for Caddy
      and nginx in `deploy/`).
-  Plus Dockerfile and systemd unit.
+  Plus Dockerfile and systemd unit. Official `deploy/compose.yml` uses a selectable
+  image/tag, restart unless-stopped, loopback-only published port, named data
+  volume, readable mounted config and private host `.env` passed via `env_file`.
+  `deploy/nginx.phi.conf` covers forwarded headers, HTTP/1.1, no response buffering,
+  >= 960 s read/send timeouts and >= 40 MiB bodies for default base64 attachments;
+  document `certbot --nginx`. Deployment docs cover all three modes and rootless
+  Ubuntu 24.04 AppArmor/linger setup without using the root-equivalent docker
+  group. Omit container healthchecks when the image lacks a suitable HTTP probe
+  tool instead of adding curl (changed in prototype review).
 
 API sketch (implementer finalises in `phi-proto`; keep REST, JSON, `/v1`):
 `POST /v1/spaces`, `GET /v1/spaces/{sid}` (root cert, settings), `PATCH

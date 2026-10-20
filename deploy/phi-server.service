@@ -7,6 +7,9 @@ Wants=network-online.target
 User=phi
 Group=phi
 Environment=PHI_SERVER_CONFIG=/etc/phi/server.toml
+# systemd reads the private token as root before switching to the service user.
+EnvironmentFile=/etc/phi/.env
+Environment=PHI_SERVER_DATA_DIR=/var/lib/phi-server
 ExecStart=/usr/local/bin/phi-server
 Restart=on-failure
 # StateDirectory creates /var/lib/phi-server owned by the service user.

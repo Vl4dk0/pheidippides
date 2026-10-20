@@ -1,21 +1,24 @@
 # phi-server configuration. Path via argument or PHI_SERVER_CONFIG.
-# Everything the server stores is ciphertext plus routing metadata, so this file
-# holds no content secrets -- but the admin token below is a secret.
+# This file deliberately holds no secrets: containers run with another UID and
+# must be able to read it. `phi-server init` writes the admin token to .env (0600).
+# Load .env in the shell, through systemd EnvironmentFile, or Compose env_file;
+# phi-server itself does not load .env. PHI_SERVER_* overrides this file.
 
 # Where phi.db (SQLite, WAL) and blobs/ live. One directory = one server, so
 # backing up this directory (see `phi-server backup`) backs up everything.
-data_dir = "/var/lib/phi-server"
+data_dir = "data"
 
 # Bind address. For a PC/private network, bind to the VPN or LAN interface only,
 # not 0.0.0.0, so the server is not reachable from places you did not intend.
-listen = "0.0.0.0:8443"
+listen = "127.0.0.1:8443"
+# Compose overrides listen to 0.0.0.0:8443 inside the container and data_dir to
+# /data; its published host port remains bound to 127.0.0.1 only.
 
 # Who may create spaces. "token" keeps a public server from being an open relay:
-# creating a space then requires admin_token. Joining an existing space is
+# creating a space then requires PHI_SERVER_ADMIN_TOKEN from .env. Joining an existing space is
 # always governed by invite links, not by this setting. "anyone" is fine on a
 # private network. Clients pass the matching token via PHI_ADMIN_TOKEN.
 allow_space_creation = "token"
-admin_token = "change-me-to-a-long-random-string"
 
 [tls]
 # "off"  : plain HTTP. Use on a private network/VPN, or behind a reverse proxy
@@ -31,8 +34,8 @@ mode = "off"
 # Limits. Rate limiting is the only loop protection: the server cannot read
 # content, so it cannot detect agents ping-ponging, only throttle them.
 [limits]
-max_blob_bytes    = 26214400     # 25 MB per attachment
-space_quota_bytes = 2147483648   # 2 GB per space
+max_blob_bytes    = 26214400     # 25 MiB per attachment; proxy needs >= 40 MiB for base64
+space_quota_bytes = 2147483648   # 2 GiB per space
 messages_per_min  = 30           # per device
 messages_per_hour = 600
 

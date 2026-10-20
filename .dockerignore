@@ -1,0 +1,6 @@
+# Init's private token must never enter the Docker build context.
+**/.env
+.git
+target
+**/node_modules
+**/dist

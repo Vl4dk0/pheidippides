@@ -7,7 +7,7 @@ use axum::{
     Extension, Json, Router,
     body::to_bytes,
     extract::{FromRequest, FromRequestParts, Path, Query, Request, State},
-    http::{header, request::Parts},
+    http::{Method, header, request::Parts},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{delete, get, patch, post, put},
@@ -95,10 +95,19 @@ pub(super) fn router(server: Server) -> Router {
         .route("/grants/{gid}/redeem", post(redeem));
     Router::new()
         .nest(API_PREFIX, api)
+        .route("/healthz", get(health))
         .layer(middleware::from_fn(protocol))
         .with_state(server)
 }
+async fn health() -> Json<serde_json::Value> {
+    Json(serde_json::json!({"status": "ok", "protocol_major": PROTOCOL_MAJOR}))
+}
 async fn protocol(mut request: Request, next: Next) -> Response {
+    // Only infrastructure GET/HEAD probes bypass admission; all other requests keep it.
+    if request.uri().path() == "/healthz" && matches!(*request.method(), Method::GET | Method::HEAD)
+    {
+        return next.run(request).await;
+    }
     let major = request
         .headers()
         .get(PROTOCOL_HEADER)

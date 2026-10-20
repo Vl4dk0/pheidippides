@@ -1,0 +1,23 @@
+services:
+  phi-server:
+    # Build/tag locally or supply a registry-qualified PHI_IMAGE.
+    image: "${PHI_IMAGE:-phi-server}:${PHI_TAG:-0.1.0}"
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8443:8443"
+    env_file: .env
+    environment:
+      PHI_SERVER_DATA_DIR: /data
+      PHI_SERVER_LISTEN: 0.0.0.0:8443
+    volumes:
+      - phi-data:/data
+      - type: bind
+        source: ./server.toml
+        target: /etc/phi/server.toml
+        read_only: true
+        bind:
+          create_host_path: false
+    # The slim runtime has no HTTP probe tool; monitor /healthz from the host.
+
+volumes:
+  phi-data:

@@ -15,11 +15,13 @@ the CLI. A desktop GUI lets humans watch and optionally steer; nothing requires 
 ## Quick start
 
 ```sh
-# 1. Space creation defaults to token mode. Set the server admin token:
-PHI_SERVER_ADMIN_TOKEN='<server admin token>' phi-server --config deploy/server.example.toml
+# 1. Generate config + private admin token, then run the local relay:
+phi-server init
+set -a; . ./.env; set +a
+phi-server --config server.toml
 
-# 2. Create a space on it; this machine becomes its root device
-PHI_ADMIN_TOKEN='<server admin token>' phi space create game --server http://myhost:8443
+# 2. In another shell, load .env as above; this machine becomes the root device
+PHI_ADMIN_TOKEN="$PHI_SERVER_ADMIN_TOKEN" phi space create game --server http://127.0.0.1:8443
 
 # 3. Invite a person; share the link only with its intended recipient
 phi invite --note "for Bob"
@@ -37,7 +39,12 @@ phi send @bob "Review PR 42" "Repo foo @ abc123: please review the auth change; 
 `allow_space_creation = "token"` is the default. `PHI_ADMIN_TOKEN` on the client
 must match the server's `admin_token` (or `PHI_SERVER_ADMIN_TOKEN` override).
 `allow_space_creation = "anyone"` is fine on a private network; it needs no admin
-token for space creation. See [deployment](deploy/README.md) for real setups.
+token for space creation. Init refuses existing files and keeps the token in
+`.env` (0600), separate from container-readable `server.toml` (0644). The default
+listener is localhost; use a protected LAN/VPN interface or HTTPS reverse proxy
+for other machines. See [deployment](deploy/README.md) for Compose/nginx, native
+ACME and systemd setups. Unauthenticated `GET /healthz` and `HEAD /healthz` work
+without `Phi-Protocol` for infrastructure probes.
 
 For humans, plain `phi` opens the installed Pheidippides desktop app (or a GUI
 binary on PATH). If absent, it prints an installation hint and help.
@@ -81,7 +88,7 @@ cannot migrate device signatures. HTTP routes retain the `/v1` namespace.
 ## Layout
 
 - [`skill/`](skill/) -- agent skill, AGENTS.md snippet, optional hooks.
-- [`deploy/`](deploy/) -- Dockerfile, systemd unit, proxy examples, example config.
+- [`deploy/`](deploy/) -- Dockerfile, Compose, systemd unit, nginx/Caddy, config template.
 - [`SPEC.md`](SPEC.md) -- design and rationale.
 
 In `summary_mode=required`, a whole-thread summary is required at the signed
