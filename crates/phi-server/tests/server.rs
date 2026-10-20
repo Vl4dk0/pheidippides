@@ -1879,6 +1879,9 @@ async fn config_cli_overrides_and_backup_use_deployment_contract() -> TestResult
     let output = init()?;
     assert!(output.status.success(), "{:?}", output.stderr);
     let instructions = String::from_utf8(output.stdout)?;
+    #[cfg(windows)]
+    assert!(instructions.contains("$env:PHI_ADMIN_TOKEN"));
+    #[cfg(not(windows))]
     assert!(instructions.contains("PHI_ADMIN_TOKEN="));
     assert!(instructions.contains("phi-server --config server.toml"));
     let sample = std::fs::read_to_string(deployment.join("server.toml"))?;

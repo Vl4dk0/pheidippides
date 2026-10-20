@@ -240,7 +240,10 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Space {
             command: SpaceCommand::Create { name, server },
         } => {
-            let display = std::env::var("USER").unwrap_or_else(|_| "person".into());
+            // Windows accounts are USERNAME; USER is the Unix variable.
+            let display = std::env::var("USER")
+                .or_else(|_| std::env::var("USERNAME"))
+                .unwrap_or_else(|_| "person".into());
             let client = Client::create(
                 store,
                 &server,
@@ -692,24 +695,83 @@ mod tests {
         assert_eq!(format_last_seen(now.saturating_sub(7200)), "2 h ago");
         assert_eq!(format_last_seen(0), "1970-01-01 00:00 UTC");
         let directory = tempfile::tempdir()?;
-        for name in ["phi-gui", "Pheidippides", "phi-gui.exe"] {
-            std::fs::write(
-                directory.path().join(name),
-                b"test launcher; never executed",
-            )?;
+        let bin = directory.path().join("bin");
+        let usr = directory.path().join("usr");
+        let local = directory.path().join("local");
+        let programs = directory.path().join("pf");
+        let apps = directory.path().join("Applications");
+        std::fs::create_dir_all(&bin)?;
+        std::fs::create_dir_all(&usr)?;
+        std::fs::create_dir_all(local.join("Pheidippides"))?;
+        std::fs::create_dir_all(local.join("Programs").join("Pheidippides"))?;
+        std::fs::create_dir_all(programs.join("Pheidippides"))?;
+        std::fs::create_dir_all(apps.join("Pheidippides.app"))?;
+        for path in [
+            bin.join("pheidippides"),
+            bin.join("pheidippides.exe"),
+            usr.join("pheidippides"),
+            local.join("Pheidippides").join("pheidippides.exe"),
+            local
+                .join("Programs")
+                .join("Pheidippides")
+                .join("pheidippides.exe"),
+            programs.join("Pheidippides").join("pheidippides.exe"),
+            apps.join("Pheidippides.AppImage"),
+        ] {
+            std::fs::write(path, b"test launcher; never executed")?;
         }
-        let path = directory.path().as_os_str();
-        let mac = desktop::candidates("macos", path);
+        let roots = desktop::Roots {
+            local_app_data: Some(local.clone()),
+            program_files: Some(programs.clone()),
+            application_dirs: vec![apps.clone()],
+            system_bin: Some(usr.clone()),
+        };
+        let path = bin.as_os_str();
+        let mac = desktop::candidates("macos", path, &roots);
         assert_eq!(mac[0].program, PathBuf::from("/usr/bin/open"));
-        assert_eq!(mac[0].args, ["-a", "Pheidippides"]);
-        let linux = desktop::candidates("linux", path);
-        assert_eq!(linux.len(), 2);
-        assert_eq!(linux[0].program, directory.path().join("phi-gui"));
-        let windows = desktop::candidates("windows", path);
-        assert_eq!(windows[0].program, directory.path().join("phi-gui.exe"));
+        assert_eq!(
+            mac[0].args,
+            vec!["-a".to_string(), "Pheidippides".to_string()]
+        );
+        assert_eq!(
+            mac[1].args,
+            vec![apps.join("Pheidippides.app").to_string_lossy().into_owned()]
+        );
+        assert_eq!(mac[2].program, bin.join("pheidippides"));
+        let linux = desktop::candidates("linux", path, &roots);
+        assert_eq!(linux[0].program, bin.join("pheidippides"));
+        assert_eq!(linux[1].program, usr.join("pheidippides"));
+        assert_eq!(linux[2].program, apps.join("Pheidippides.AppImage"));
+        let windows = desktop::candidates("windows", path, &roots);
+        assert_eq!(
+            windows[0].program,
+            local.join("Pheidippides").join("pheidippides.exe")
+        );
+        assert_eq!(
+            windows[1].program,
+            local
+                .join("Programs")
+                .join("Pheidippides")
+                .join("pheidippides.exe")
+        );
+        assert_eq!(
+            windows[2].program,
+            programs.join("Pheidippides").join("pheidippides.exe")
+        );
+        assert_eq!(windows[3].program, bin.join("pheidippides.exe"));
+        let empty = desktop::Roots {
+            local_app_data: None,
+            program_files: None,
+            application_dirs: Vec::new(),
+            system_bin: None,
+        };
         assert!(
-            desktop::candidates("linux", &directory.path().join("missing").into_os_string())
-                .is_empty()
+            desktop::candidates(
+                "linux",
+                &directory.path().join("missing").into_os_string(),
+                &empty
+            )
+            .is_empty()
         );
         Ok(())
     }

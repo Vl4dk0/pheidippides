@@ -29,7 +29,16 @@ pub fn receipt(client: &Client, message: &Message) -> Result<()> {
     )
 }
 fn quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\"'\"'"))
+    // Retry lines are pasted into a shell. PowerShell single quotes are
+    // literal and escape ' by doubling it. POSIX shells use '\''.
+    #[cfg(windows)]
+    {
+        format!("'{}'", value.replace('\'', "''"))
+    }
+    #[cfg(not(windows))]
+    {
+        format!("'{}'", value.replace('\'', "'\"'\"'"))
+    }
 }
 pub fn draft_error(
     client: &Client,

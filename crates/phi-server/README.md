@@ -18,12 +18,14 @@ PHI_SERVER_CONFIG=/etc/phi/server.toml phi-server
 phi-server --config /etc/phi/server.toml backup /path/to/new-backup
 ```
 
-Init creates a commented `server.toml` (0644) and a separate `.env` (0600 on Unix)
-with a random 256-bit `PHI_SERVER_ADMIN_TOKEN`, refusing to overwrite either.
-Without `--dir`, it uses the current directory. Defaults are localhost, TLS off
-and token-protected space creation. Load `.env` explicitly as above (the server
-does not load dotenv), or use systemd/Compose env-file support. Pass the matching
-`PHI_ADMIN_TOKEN="$PHI_SERVER_ADMIN_TOKEN"` to `phi space create`.
+Init creates a commented `server.toml` (0644 on Unix; directory ACL on Windows)
+and a separate `.env` (0600 on Unix, owner-only ACL on Windows) with a random
+256-bit `PHI_SERVER_ADMIN_TOKEN`, refusing to overwrite either or to follow a
+symlinked deployment directory. Without `--dir`, it uses the current directory.
+Defaults are localhost, TLS off and token-protected space creation. Load `.env`
+explicitly as above (the server does not load dotenv). On Windows, init prints
+the PowerShell equivalent. systemd/Compose can load the env file. Pass the
+matching `PHI_ADMIN_TOKEN` to `phi space create`.
 See [deployment](../../deploy/README.md) for Compose/nginx and rootless Docker.
 
 The default config path is `server.toml`. See
@@ -52,7 +54,8 @@ ACME uses production Let's Encrypt and TLS-ALPN-01: public port **443** must
 reach `listen` directly, preserving ALPN. Port 80 is unnecessary. Configure
 `listen = "0.0.0.0:443"`, or forward public 443 to 8443. Certificates/accounts
 are cached under `data_dir/acme`. TLS off does not add TLS headers or trust proxy
-identity; authorization always uses bearer tokens. SIGINT/SIGTERM stop serving.
+identity; authorization always uses bearer tokens. Ctrl+C stops serving on every
+platform; Unix also stops on SIGTERM.
 
 SQLite uses WAL and indexes space sequences, channel/thread sequences,
 membership, normalized mentions, claims, and retention activity. SQLite work runs

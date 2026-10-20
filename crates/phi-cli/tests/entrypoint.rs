@@ -351,29 +351,37 @@ async fn cli_workflow_references_wait_skill_and_exit_codes() -> phi_core::Result
             && retry.contains("--as")
             && retry.contains(draft)
     );
-    let shell_retry = retry
-        .replacen(
-            "phi ",
-            &format!("'{}' --json ", binary.replace('\'', "'\"'\"'")),
-            1,
-        )
-        .replace(
-            "--summary \"…\"",
-            "--summary 'All messages plus recovered draft'",
-        );
-    let receipt: serde_json::Value = serde_json::from_str(
-        &phi_with_input("zsh", workspace.path(), &["-c", &shell_retry, "--as"], None).await?,
-    )?;
-    assert_eq!(receipt["thread_id"], thread);
-    assert!(receipt["message_id"].is_string());
-    let restored: serde_json::Value =
-        serde_json::from_str(&phi(binary, workspace.path(), &["read", thread, "--json"]).await?)?;
-    let last = restored["thread"]["messages"]
-        .as_array()
-        .and_then(|m| m.last())
-        .ok_or_else(|| phi_core::Error::User("missing recovered reply".into()))?;
-    assert_eq!(last["body"], pending);
-    assert_eq!(last["attachments"][0]["name"], "draft attachment.txt");
+    // The printed retry is quoted for the host shell. Only a POSIX shell can
+    // execute that form; Windows CI checks PowerShell quoting below.
+    #[cfg(unix)]
+    {
+        let shell_retry = retry
+            .replacen(
+                "phi ",
+                &format!("'{}' --json ", binary.replace('\'', "'\"'\"'")),
+                1,
+            )
+            .replace(
+                "--summary \"…\"",
+                "--summary 'All messages plus recovered draft'",
+            );
+        let receipt: serde_json::Value = serde_json::from_str(
+            &phi_with_input("zsh", workspace.path(), &["-c", &shell_retry, "--as"], None).await?,
+        )?;
+        assert_eq!(receipt["thread_id"], thread);
+        assert!(receipt["message_id"].is_string());
+        // The reply exists only after the POSIX retry above. Windows checks
+        // quoting on the next error instead of requiring zsh.
+        let restored: serde_json::Value = serde_json::from_str(
+            &phi(binary, workspace.path(), &["read", thread, "--json"]).await?,
+        )?;
+        let last = restored["thread"]["messages"]
+            .as_array()
+            .and_then(|m| m.last())
+            .ok_or_else(|| phi_core::Error::User("missing recovered reply".into()))?;
+        assert_eq!(last["body"], pending);
+        assert_eq!(last["attachments"][0]["name"], "draft attachment.txt");
+    }
     let root_error = phi_with_input(
         binary,
         workspace.path(),
@@ -384,9 +392,11 @@ async fn cli_workflow_references_wait_skill_and_exit_codes() -> phi_core::Result
     .err()
     .ok_or_else(|| phi_core::Error::User("root summary should fail".into()))?
     .to_string();
-    assert!(
-        root_error.contains("body saved to draft:") && root_error.contains("'send' '#all' 'Root '")
-    );
+    assert!(root_error.contains("body saved to draft:"));
+    #[cfg(windows)]
+    assert!(root_error.contains("'send' '#all' 'Root ''quotes'' $HOME'"));
+    #[cfg(not(windows))]
+    assert!(root_error.contains("'send' '#all' 'Root '\"'\"'quotes'\"'\"' $HOME'"));
     let receipt: serde_json::Value = serde_json::from_str(
         &phi(
             binary,

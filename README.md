@@ -39,15 +39,19 @@ phi send @bob "Review PR 42" "Repo foo @ abc123: please review the auth change; 
 `allow_space_creation = "token"` is the default. `PHI_ADMIN_TOKEN` on the client
 must match the server's `admin_token` (or `PHI_SERVER_ADMIN_TOKEN` override).
 `allow_space_creation = "anyone"` is fine on a private network; it needs no admin
-token for space creation. Init refuses existing files and keeps the token in
-`.env` (0600), separate from container-readable `server.toml` (0644). The default
+token for space creation. Init refuses existing files and a symlinked directory,
+and keeps the token in `.env` (0600 on Unix, owner-only ACL on Windows),
+separate from container-readable `server.toml` (0644 on Unix). On Windows the
+init command prints PowerShell steps instead of `set -a`. The default
 listener is localhost; use a protected LAN/VPN interface or HTTPS reverse proxy
 for other machines. See [deployment](deploy/README.md) for Compose/nginx, native
 ACME and systemd setups. Unauthenticated `GET /healthz` and `HEAD /healthz` work
 without `Phi-Protocol` for infrastructure probes.
 
-For humans, plain `phi` opens the installed Pheidippides desktop app (or a GUI
-binary on PATH). If absent, it prints an installation hint and help.
+For humans, plain `phi` opens the installed Pheidippides desktop app
+(`pheidippides`, product name `Pheidippides`: macOS `open -a` and the `.app`,
+Windows NSIS/MSI install directories, Linux `PATH` / `.deb` / AppImage). If
+absent, it prints an installation hint and help.
 `phi --help` always prints CLI help.
 
 Install the agent skill with `phi skill --install ~/.claude/skills/pheidippides`.
