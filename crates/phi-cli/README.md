@@ -62,12 +62,12 @@ Global options are `--as <handle>` (default `cli`, the device name) and
 | `phi device list` | Device IDs, owners, kinds, human-readable last-seen ages/dates and revoked marks. |
 | `phi device revoke <id>` | Revoke a device, then rotate its affected channels. |
 | `phi init [<space-name-or-id>]` | Write `.phi`; one local profile is automatic, otherwise list space names/IDs and exact init commands. |
-| `phi threads [#channel\|@person]` | All visible threads, newest activity first: id, channel, title, participants, message/unread counts, claims and relative last activity. `@person` selects DM/self history. |
+| `phi threads [#channel\|@person]` | All visible threads, newest activity first: id, channel, title, participants, message/unread counts, per-message claims (`claims: 2 · bob/main #3, alice/fixer #5`), and relative last activity. `@person` selects DM/self history. |
 | `phi channels` | Current-space channels with kind, members and unread thread/message counts. |
 | `phi spaces` | Local profiles with name, id, server and current directory binding; needs no selected profile. |
 | `phi who` | Person names/IDs, devices and recently cached handles. |
 | `phi fetch` | Counts only. With no binding/selection, cover every local profile. |
-| `phi inbox` | Unread threads with title, author, summary, mention and reaction state. |
+| `phi inbox` | Unread threads with title, author, summary, mention, latest-message reactions, and per-message claims. |
 | `phi read <thread> [--all\|--last N]` | Read a thread, download attachments, advance the person's read cursor. |
 | `phi send <to> <title> [body\|-] [--file F]… [--summary S]` | Create a thread; print its thread/message references and raw ID. |
 | `phi reply <thread> [body\|-] [--file F]… [--summary S]` | Reply; print its thread/message references and raw ID. |
@@ -146,6 +146,7 @@ closed under the crypto library's current policy.
 <thread-id> · to: @bob · @bob · Review PR 42 · bob/reviewer · 2026-10-19 08:12 UTC · mentioned you
   summary: Auth review found one missing authorization check.
   latest message reactions: claimed by vladko/main · 4 reactions in thread
+  claims: 1 · vladko/main #4
 ```
 
 Own-person messages are labeled `(you · agent)` or `(your other session · agent)`
@@ -219,7 +220,12 @@ local cursors.
 
 ## Summaries, storage, and limits
 
-In `required` mode, CLI sends/replies need a whole-thread `--summary` only at
+A `--summary` covers the whole thread from the first message, including the
+message being sent. Build it by extending the previous summary with every message
+after that summary. Keep decisions and facts from the start; drop only what a
+later message superseded. Do not summarize only the newest messages.
+
+In `required` mode, CLI sends/replies need that summary only at
 **`summary_every` messages since the last summary, including the pending message**.
 The signed per-space interval defaults to 3 and accepts positive integers up to
 4294967295. Use `phi space set summary_every 5`; `phi space show` displays it.
@@ -300,7 +306,10 @@ and handle. Choose other work or coordinate with the claimant rather than retryi
 ## Summary preflight and drafts
 
 Read and wait include `next reply: --summary required (3 since last, including
-next reply; threshold 3)` (or `optional`). A configured local summarizer is noted.
+next reply; threshold 3)` (or `optional`). When a summary already exists they also
+print `previous summary (extend it):` followed by that summary, so the next one
+extends it instead of starting from the newest messages. A configured local
+summarizer is noted.
 This is a snapshot; concurrent sends can change the threshold before commit.
 A missing-summary rejection saves the exact body to a private, randomly named
 `drafts/<id>.md` under the profile cache directory (0600 file and 0700 directory
@@ -348,7 +357,9 @@ the success receipt remains the only stdout document.
 `ThreadEntry` fields: `id,channel_id,channel,to,title,from,created_at,summary,
 trusted:false,mentioned,unread,own_agent_activity,latest_message,latest_seq,
 participants,message_count,unread_count,last_activity,last_activity_relative,
-reactions,reaction_context,claims`. Claims are `{message,person,author,handle}`.
+reactions,reaction_context,claims`. Claims are `{message,number,person,author,handle}`,
+one per claimed message. `number` is that message's thread position (`#1` is the
+root) or null when the position is unknown.
 Participants are `person/handle` strings. Unread counts use the shared per-person
 thread cursor. Activity includes reaction additions/removals; timestamps and event
 sequences are server hints, separate from signed message verification/retention.
@@ -358,7 +369,8 @@ own `#channel` filters. Listing never advances read state or creates a DM.
 `ThreadView` fields: `id,to,title,title_trusted,trusted,participants,summary,
 summary_trusted,summary_covers_seq,summary_number,newer_messages,next_reply,
 messages,reactions,reaction_context,omitted_message_reactions`. `next_reply` is `{required,
-messages_since_summary,threshold,summarizer_configured}`, counting the pending reply.
+messages_since_summary,threshold,summarizer_configured,previous_summary}`, counting the pending reply.
+`previous_summary` is the current rolling summary to extend, or null.
 `messages` are `{id,thread_id,seq,number,reference,author_person,author_device,
 author,handle,author_kind,perspective,trusted,created_at,created,body,attachments,
 reactions,reaction_context,verification_error}`. `author_kind` is `cli/gui`;

@@ -770,9 +770,8 @@ impl Client {
         Ok((self.new_channel(kind, "dm", members).await?, mentions))
     }
     fn next_reply(&self, history: &[DecodedMessage]) -> SummaryPreflight {
-        let messages_since_summary = history
-            .iter()
-            .rposition(|m| m.content.summary.is_some())
+        let last_summary = history.iter().rposition(|m| m.content.summary.is_some());
+        let messages_since_summary = last_summary
             .map_or(history.len(), |i| history.len() - i - 1)
             .saturating_add(1);
         SummaryPreflight {
@@ -783,6 +782,7 @@ impl Client {
             messages_since_summary,
             threshold: self.settings.summary_every,
             summarizer_configured: self.profile.summarizer.is_some(),
+            previous_summary: last_summary.and_then(|index| history[index].content.summary.clone()),
         }
     }
     pub fn save_draft(&self, body: &str) -> Result<PathBuf> {
@@ -842,7 +842,7 @@ impl Client {
                 options.summary = Some(run_summarizer(command, &input).await?);
             } else if summary_required {
                 return Err(Error::SummaryRequired(format!(
-                    "--summary is required now: {since_summary} messages since the last summary (including this message; threshold {summary_every}) and summary_mode=required; summarize the whole thread or configure a summarizer in profile.toml"
+                    "--summary is required now: {since_summary} messages since the last summary (including this message; threshold {summary_every}) and summary_mode=required; extend the previous summary with every message after it, keep decisions and facts from the start, drop only what a later message superseded, or configure a summarizer in profile.toml"
                 )));
             }
         }
@@ -1627,6 +1627,10 @@ impl Client {
                         && m.verification_error.is_none()
                 }),
                 reactions: thread.iter().flat_map(|m| m.reactions.clone()).collect(),
+                message_numbers: thread
+                    .iter()
+                    .map(|message| (message.message.id, message.number))
+                    .collect(),
                 latest_message: latest.message.id,
                 latest_seq: latest.message.seq,
                 channel_id: root.message.envelope.channel_id,
@@ -2146,6 +2150,7 @@ impl Client {
                     own_agent_activity: message.author_person == self.profile.person_id
                         && author.certificate().data.kind == DeviceKind::Cli,
                     reactions: self.thread_reactions(root.id)?,
+                    message_numbers: BTreeMap::new(),
                     latest_message: message.id,
                     latest_seq: message.seq,
                     channel_id: message.envelope.channel_id,
