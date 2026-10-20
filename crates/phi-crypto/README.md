@@ -53,6 +53,8 @@ ambiguity. Mention lists preserve order and encode each mention as
 | `phi reaction v1` | space_id, message_id, person_id, device_id, handle, kind, created_at, remove |
 | `phi settings v1` | space_id, issuer_device, created_at, retention_days, summary_mode, messages_per_minute, messages_per_hour |
 | `phi channel membership v2` | previous, key_commitment, space_id, channel_id, epoch, kind, members, issuer_device |
+| `phi thread state v1` | space_id, channel_id, thread_id, person_id, device_id, closed, created_at |
+| `phi thread deletion v1` | space_id, channel_id, thread_id, person_id, device_id, created_at |
 
 A certificate issuer is `['device', device_id]` or `['grant', grant_id]`; a
 revocation target is `['device', device_id]` or `['person', person_id]` (JSON uses

@@ -14,7 +14,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS one_all ON channels(space_id) WHERE kind='all'
 CREATE TABLE IF NOT EXISTS members(channel_id TEXT NOT NULL REFERENCES channels(id), person_id TEXT NOT NULL REFERENCES persons(id), PRIMARY KEY(channel_id, person_id));
 CREATE INDEX IF NOT EXISTS members_person ON members(person_id, channel_id);
 CREATE TABLE IF NOT EXISTS wrapped_keys(channel_id TEXT NOT NULL REFERENCES channels(id), epoch INTEGER NOT NULL, device_id TEXT NOT NULL REFERENCES devices(id), json TEXT NOT NULL, PRIMARY KEY(channel_id,epoch,device_id));
-CREATE TABLE IF NOT EXISTS threads(id TEXT PRIMARY KEY, space_id TEXT NOT NULL REFERENCES spaces(id), channel_id TEXT NOT NULL REFERENCES channels(id), activity INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS threads(id TEXT PRIMARY KEY, space_id TEXT NOT NULL REFERENCES spaces(id), channel_id TEXT NOT NULL REFERENCES channels(id), activity INTEGER NOT NULL, closed_by TEXT, closed_at INTEGER, close_json TEXT);
 CREATE INDEX IF NOT EXISTS threads_retention ON threads(space_id,activity);
 CREATE TABLE IF NOT EXISTS messages(id TEXT PRIMARY KEY, space_id TEXT NOT NULL, channel_id TEXT NOT NULL, thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE, seq INTEGER NOT NULL, author_person TEXT NOT NULL, json TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS messages_space_seq ON messages(space_id,seq);

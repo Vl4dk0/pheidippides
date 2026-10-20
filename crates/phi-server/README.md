@@ -125,6 +125,8 @@ This is process liveness, not a database/storage check.
 | POST `/messages/{mid}/reactions` | `ReactionRequest`, `remove=false` | `ReactionResponse` |
 | DELETE `/messages/{mid}/reactions/{kind}` | `ReactionRequest`, `remove=true` | `ReactionResponse` |
 | PUT `/threads/{tid}/cursor` | `PutCursorRequest` | `PutCursorResponse` |
+| PUT `/threads/{tid}/state` | `ThreadStateRequest` | `ThreadStateResponse` |
+| DELETE `/threads/{tid}` | `DeleteThreadRequest` | `DeleteThreadResponse` |
 | GET `/spaces/{sid}/counts` | `CountsQuery` | `CountsResponse` |
 | GET `/spaces/{sid}/events` | `EventsQuery` | `EventsResponse` |
 | POST `/blobs` | `UploadBlobRequest` | `UploadBlobResponse` |

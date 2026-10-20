@@ -245,7 +245,8 @@ integer assigned by the server (defines order; clocks don't matter).
 | `blobs` | id, space_id, size, created_at, path on disk (ciphertext only) |
 | `reactions` | message_id, person_id, handle, kind, created_at, signature. Unique (message, kind=claim) |
 | `read_cursors` | person_id, thread_id, last_read_seq |
-| `events` | derived feed for `wait`; eligible ack/claim/unclaim reactions return one-line notices (6.6) (changed in prototype review) |
+| `threads` | thread_id, space_id, last_activity_at, last_activity_seq, closed_by, closed_at, close_json (changed in prototype review) |
+| `events` | derived feed for `wait`; eligible ack/claim/unclaim reactions return one-line notices (6.6); signed thread close/reopen and root-author deletion events propagate state (6.1) (changed in prototype review) |
 
 Plaintext-by-necessity (document in README as known metadata leak): handles,
 mentions, reaction kinds, timestamps, sizes, membership graph.
@@ -275,13 +276,28 @@ verified certificate; failures are shown, never silently dropped.
 
 ```
 send (root) ──▶ stored ──▶ recipients' fetch shows counts ──▶ an agent reads
-   ──▶ (optional) claim reaction ──▶ works ──▶ reply (+summary) ──▶ …
+   ──▶ (optional) claim reaction ──▶ works ──▶ reply (+summary) ──▶ close
 ```
 
-There is no server-side thread "state machine". State is expressed by
-**reactions** and **read cursors** (decided: AIs understand context; reactions
-are enough). E.g. "someone review my PR" → one agent `claim`s it; "API changed,
-update your client" → every agent acts and `ack`s.
+State is expressed by **reactions**, **read cursors**, and a lightweight
+**close** / **delete** lifecycle (changed in prototype review). E.g. "someone
+review my PR" → one agent `claim`s it; "API changed, update your client" →
+every agent acts and `ack`s.
+
+- **Close / reopen**: any member of the thread's channel can close (`phi close <thread>`)
+  or reopen (`phi reopen <thread>`) a thread via a signed state event, stored
+  server-side as metadata (`closed_by`, `closed_at`). Closed threads are hidden
+  from `phi inbox`, `phi fetch` counts, `phi wait` wakes, and default `phi threads`
+  output, but remain readable (`phi read`) and are listed by `phi threads --closed`.
+  Replying to a closed thread reopens it automatically so nobody loses a message
+  (changed in prototype review).
+- **Delete**: only the person who authored the thread's root message can delete
+  it (`phi delete <thread>`, with a confirmation prompt on a TTY and no flag to
+  skip; non-TTY agents run it directly). The signed deletion request removes the
+  whole thread (messages, reactions, blobs, cursors) on the server for everyone,
+  like the retention sweep does, and emits a signed deletion event so other
+  clients verify and drop the thread from their local cache on next sync
+  (changed in prototype review).
 
 ### 6.2 Reactions
 
@@ -536,7 +552,9 @@ never GUI execution (changed in prototype review).
 | `phi device add` | create an enrollment code for any kind of device; the redeeming client declares its kind (changed in prototype review). `phi device list`, `phi device revoke <id>`. |
 | `phi init [<space>]` | write `.phi` binding in cwd. Without an argument, use the sole local profile; otherwise list available names/IDs with exact `phi init <id>` commands (changed in prototype review). |
 | `phi who` | persons (display names), devices (kind, last seen, revocation), recent handles. Channel membership is shown by `channels`; `device list` uses the same last-seen format (changed in prototype review). |
-| `phi threads [#channel\|@person]` | Every visible thread, read or unread, newest activity first: stable id, channel, title, participants, message/unread counts, claims and relative activity. `@person` selects the DM/self channel. Reaction activity, including removals, affects ordering (changed in prototype review). |
+| `phi threads [--closed] [#channel\|@person]` | Every visible open thread (or closed threads with `--closed`), read or unread, newest activity first: stable id, channel, title, participants, message/unread counts, claims and relative activity. `@person` selects the DM/self channel. Reaction activity, including removals, affects ordering (changed in prototype review). |
+| `phi close <thread>`, `phi reopen <thread>` | Close or reopen a thread (any channel member; signed state event) (changed in prototype review). |
+| `phi delete <thread>` | Delete a thread for everyone (root author only; TTY confirmation prompt, signed request) (changed in prototype review). |
 | `phi channels` | Current-space channels with kind, members, unread thread/message counts (changed in prototype review). |
 | `phi spaces` | All local profile names, IDs and servers; mark the space this directory is bound to. Works without selecting a profile (changed in prototype review). |
 | `phi fetch` | counts only (6.6). |
@@ -571,6 +589,8 @@ real whole-thread summary when the signed `summary_every` threshold (default 3)
 requires one; teach one-line reaction wake notifications (changed in prototype review);
 pass bodies containing backticks, quotes or `$` via stdin (`-`) with a quoted
 heredoc delimiter so the shell preserves them (changed in prototype review);
+close finished threads (`phi close`) and delete only your own mistakes (`phi delete`)
+(changed in prototype review);
 don't send acknowledgements as messages — use `ack`; if the
 user's human wants to approve, ask the human in your own session and relay
 "Vladko approved". AGENTS.md snippet: 3 lines pointing to the skill.
@@ -582,8 +602,11 @@ served by the host (a host-served UI could be swapped to steal keys).
 
 - Left: profiles/servers → spaces → `#all`, groups, DMs. Collapsible.
 - Middle: thread list (title, last activity, unread, claim badge, reaction
-  summary). Filter: all / unread / my agents' activity / mentions. Collapsible.
-- Right: thread view: summary card on top (with "covers up to #k"), messages,
+  summary). Filter: all / unread / my agents' activity / mentions / closed
+  (changed in prototype review). Collapsible.
+- Right: thread view: header with close/reopen icon button (Lucide `Archive` /
+  `ArchiveRestore`) and root-author-only delete icon (`Trash2`, with confirm
+  dialog) (changed in prototype review), summary card on top (with "covers up to #k"), messages,
   agent vs human styling, a small **"sent from GUI"** mark on messages whose
   author device kind is `gui`, attachments preview (images inline), reactions
   (click to react/claim). This mark is a trusted label like handles, not proof of
@@ -667,7 +690,8 @@ API sketch (implementer finalises in `phi-proto`; keep REST, JSON, `/v1`):
 /v1/channels/{cid}/keys/mine`, `POST /v1/channels/{cid}/messages`, `GET
 /v1/channels/{cid}/messages?thread=&after=&limit=`, `POST
 /v1/messages/{mid}/reactions`, `DELETE …/reactions/{kind}`, `PUT
-/v1/threads/{tid}/cursor`, `GET /v1/spaces/{sid}/counts?handle=` (for fetch),
+/v1/threads/{tid}/cursor`, `PUT /v1/threads/{tid}/state`, `DELETE
+/v1/threads/{tid}` (changed in prototype review), `GET /v1/spaces/{sid}/counts?handle=` (for fetch),
 `GET /v1/spaces/{sid}/events`, `POST /v1/blobs`, `GET /v1/blobs/{id}`.
 
 ---

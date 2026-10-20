@@ -545,6 +545,69 @@ async fn claim_exclusivity_reactions_unread_and_person_cursor() -> Result<()> {
         "reaction activity reorders discovery even within one second"
     );
     ensure!(reordered[0].unread_count == 1 && reordered[0].unread);
+    bob.close_thread(root.id).await?;
+    ensure!(
+        alice.inbox().await?.iter().all(|entry| entry.id != root.id),
+        "closed thread hidden from inbox"
+    );
+    ensure!(
+        alice
+            .discover_threads(None)
+            .await?
+            .iter()
+            .all(|entry| entry.id != root.id),
+        "closed thread hidden from default threads"
+    );
+    let closed_list = alice.discover_threads_filtered(None, true).await?;
+    ensure!(
+        closed_list.len() == 1
+            && closed_list[0].id == root.id
+            && closed_list[0].closed
+            && closed_list[0].closed_by.as_deref() == Some("bob")
+    );
+    let closed_view = alice.read(root.id, ReadOptions::default()).await?;
+    ensure!(closed_view.closed && closed_view.can_delete);
+    carol
+        .reply(root.id, options("reply reopens closed thread"))
+        .await?;
+    ensure!(
+        alice
+            .discover_threads_filtered(None, true)
+            .await?
+            .is_empty()
+    );
+    ensure!(
+        alice
+            .inbox()
+            .await?
+            .iter()
+            .any(|entry| entry.id == root.id && !entry.closed),
+        "replying to a closed thread reopens it automatically"
+    );
+    bob.close_thread(root.id).await?;
+    ensure!(alice.discover_threads_filtered(None, true).await?.len() == 1);
+    bob.reopen_thread(root.id).await?;
+    ensure!(
+        alice
+            .discover_threads_filtered(None, true)
+            .await?
+            .is_empty()
+    );
+    bob.read(later.id, ReadOptions::default()).await?;
+    ensure!(bob.search("later activity").await?.len() == 1);
+    ensure!(bob.delete_thread(later.id).await.is_err());
+    alice.delete_thread(later.id).await?;
+    ensure!(alice.search("later activity").await?.is_empty());
+    ensure!(
+        bob.discover_threads(None)
+            .await?
+            .iter()
+            .all(|entry| entry.id != later.id)
+    );
+    ensure!(
+        bob.search("later activity").await?.is_empty(),
+        "deletion event drops deleted thread from peer local cache on next sync"
+    );
 
     Ok(())
 }

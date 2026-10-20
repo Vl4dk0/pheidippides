@@ -54,6 +54,10 @@ export const entrySchema = z.object({
   latest_seq: integer,
   reactions: z.array(reactionSchema),
   reaction_summary: reactionSummarySchema,
+  closed: z.boolean(),
+  closed_by: z.string().nullable(),
+  closed_at: integer.nullable(),
+  can_delete: z.boolean(),
 });
 export const snapshotSchema = z.object({
   profile: profileSchema,
@@ -114,6 +118,10 @@ export const threadSchema = z.object({
       ),
     }),
   ),
+  closed: z.boolean(),
+  closed_by: z.string().nullable(),
+  closed_at: integer.nullable(),
+  can_delete: z.boolean(),
 });
 export const pollSchema = z.object({
   changed: z.boolean(),
@@ -144,6 +152,8 @@ const requestSchema = z.discriminatedUnion('kind', [
     remove: z.boolean(),
   }),
   z.object({ kind: z.literal('unread'), thread: id }),
+  z.object({ kind: z.literal('close'), thread: id, closed: z.boolean() }),
+  z.object({ kind: z.literal('delete'), thread: id }),
   z.object({
     kind: z.literal('settings'),
     retention_days: integer.max(4294967295),

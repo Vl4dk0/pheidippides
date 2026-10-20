@@ -32,6 +32,10 @@ const entry: Entry = {
   latest_seq: 1,
   reactions: [],
   reaction_summary: { up: 0, down: 0, ack: 0, claims: [] },
+  closed: false,
+  closed_by: null,
+  closed_at: null,
+  can_delete: true,
 };
 describe('desktop state boundary', () => {
   it('keeps UTF-8 agent animals stable across calls and distinguishes identities', () => {
@@ -43,7 +47,7 @@ describe('desktop state boundary', () => {
     );
     expect(agentAvatar('Žofia', 'main')).toBe(Snail);
   });
-  it('filters channel, unread, agent activity and mentions independently, sorted by sequence', () => {
+  it('filters channel, unread, agent activity, mentions and closed independently, sorted by sequence', () => {
     const items = [
       entry,
       {
@@ -55,12 +59,24 @@ describe('desktop state boundary', () => {
         latest_seq: 5,
       },
       { ...entry, channel: '@bob', latest_seq: 3 },
+      {
+        ...entry,
+        id: 'CCCCCCCCCCCCCCCCCCCCCC',
+        closed: true,
+        closed_by: 'vladko',
+        closed_at: 10,
+        unread: true,
+        mentioned: true,
+        own_agent_activity: true,
+        latest_seq: 9,
+      },
     ];
     expect(filterThreads(items, 'all', '').map((t) => t.latest_seq)).toEqual([
       5, 3, 1,
     ]);
     for (const filter of ['unread', 'agents', 'mentions'] as const)
       expect(filterThreads(items, filter, '#all')).toEqual([items[1]]);
+    expect(filterThreads(items, 'closed', '')).toEqual([items[3]]);
     expect(filterThreads(items, 'all', '@bob')).toEqual([items[2]]);
     expect(items[0]).toBe(entry);
   });

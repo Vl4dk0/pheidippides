@@ -1701,6 +1701,110 @@ async fn retention_deletes_whole_threads_and_orphan_blobs_but_keeps_activity() -
         .0,
         404
     );
+    let member = f.join(&f.root, GrantKind::Invite).await?;
+    let state = sign_thread_state(
+        ThreadStateData {
+            space_id: f.sid,
+            thread_id: active.id,
+            person_id: member.cert.data.person_id,
+            device_id: member.cert.data.device_id,
+            handle: "main".parse()?,
+            closed: true,
+            created_at: timestamp(),
+        },
+        &member.key,
+    )?;
+    let returned_state: ThreadState = ok(
+        &f.app,
+        "PUT",
+        &format!("/v1/threads/{}/state", active.id),
+        Some(&member.token),
+        ThreadStateRequest {
+            state: state.clone(),
+        },
+    )
+    .await?;
+    assert_eq!(returned_state, state);
+    let counts: Counts = ok(
+        &f.app,
+        "GET",
+        &f.space("/counts"),
+        Some(&member.token),
+        json!(null),
+    )
+    .await?;
+    assert_eq!(counts.unread_threads, 0);
+    let _ = f.send(&f.root, f.all, Some(active.id)).await?;
+    let page: ListMessagesResponse = ok(
+        &f.app,
+        "GET",
+        &format!("/v1/channels/{}/messages", f.all),
+        Some(&member.token),
+        json!(null),
+    )
+    .await?;
+    assert!(
+        page.activities
+            .iter()
+            .any(|a| a.thread_id == active.id && a.closed_at.is_none() && a.state.is_none())
+    );
+    let forbidden_del = sign_thread_deletion(
+        ThreadDeletionData {
+            space_id: f.sid,
+            thread_id: active.id,
+            person_id: member.cert.data.person_id,
+            device_id: member.cert.data.device_id,
+            handle: "main".parse()?,
+            created_at: timestamp(),
+        },
+        &member.key,
+    )?;
+    assert_eq!(
+        request(
+            &f.app,
+            "DELETE",
+            &format!("/v1/threads/{}", active.id),
+            Some(&member.token),
+            DeleteThreadRequest {
+                deletion: forbidden_del
+            }
+        )
+        .await?
+        .0,
+        403
+    );
+    let root_del = sign_thread_deletion(
+        ThreadDeletionData {
+            space_id: f.sid,
+            thread_id: active.id,
+            person_id: f.root.cert.data.person_id,
+            device_id: f.root.cert.data.device_id,
+            handle: "main".parse()?,
+            created_at: timestamp(),
+        },
+        &f.root.key,
+    )?;
+    let deleted: ThreadDeletion = ok(
+        &f.app,
+        "DELETE",
+        &format!("/v1/threads/{}", active.id),
+        Some(&f.root.token),
+        DeleteThreadRequest {
+            deletion: root_del.clone(),
+        },
+    )
+    .await?;
+    assert_eq!(deleted, root_del);
+    let after_del: ListMessagesResponse = ok(
+        &f.app,
+        "GET",
+        &format!("/v1/channels/{}/messages", f.all),
+        Some(&member.token),
+        json!(null),
+    )
+    .await?;
+    assert!(after_del.messages.is_empty());
+    assert_eq!(after_del.deleted, vec![root_del]);
     Ok(())
 }
 #[tokio::test]

@@ -62,6 +62,18 @@ impl Store {
         let conn = Connection::open(config.data_dir.join("phi.db"))?;
         conn.busy_timeout(std::time::Duration::from_secs(30))?;
         conn.execute_batch(include_str!("schema.sql"))?;
+        let has_closed: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('threads') WHERE name='closed_by')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_closed {
+            conn.execute_batch(
+                "ALTER TABLE threads ADD COLUMN closed_by TEXT;
+                 ALTER TABLE threads ADD COLUMN closed_at INTEGER;
+                 ALTER TABLE threads ADD COLUMN close_json TEXT;",
+            )?;
+        }
         if conn.query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))? < 1 {
             conn.execute_batch("BEGIN IMMEDIATE;
                 INSERT OR IGNORE INTO message_mentions

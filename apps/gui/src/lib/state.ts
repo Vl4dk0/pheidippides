@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import type { Entry, Poll } from './api';
-export type Filter = 'all' | 'unread' | 'agents' | 'mentions';
+export type Filter = 'all' | 'unread' | 'agents' | 'mentions' | 'closed';
 export function filterThreads(
   threads: Entry[],
   filter: Filter,
@@ -10,10 +10,13 @@ export function filterThreads(
     .filter(
       (t) =>
         (!channel || t.channel === channel) &&
-        (filter === 'all' ||
-          (filter === 'unread' && t.unread) ||
-          (filter === 'agents' && t.own_agent_activity) ||
-          (filter === 'mentions' && t.mentioned)),
+        (filter === 'closed'
+          ? t.closed
+          : !t.closed &&
+            (filter === 'all' ||
+              (filter === 'unread' && t.unread) ||
+              (filter === 'agents' && t.own_agent_activity) ||
+              (filter === 'mentions' && t.mentioned))),
     )
     .sort((a, b) => b.latest_seq - a.latest_seq);
 }

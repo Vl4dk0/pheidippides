@@ -324,7 +324,8 @@ time {
   border-radius: 10px;
 }
 .filter-bar .icon-button {
-  width: 38px;
+  width: 34px;
+  min-width: 34px;
   height: 29px;
 }
 .thread-count {
@@ -780,6 +781,23 @@ time {
 .danger,
 .icon-button.danger {
   color: var(--danger);
+}
+.danger-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 38%, var(--line));
+  background: color-mix(in srgb, var(--danger) 9%, transparent);
+}
+.danger-action:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--danger) 16%, transparent);
+}
+.closed-pill {
+  color: var(--accent);
+  background: var(--soft);
+  padding: 2px 7px;
+  border-radius: 6px;
 }
 .modal-backdrop {
   position: fixed;

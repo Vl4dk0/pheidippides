@@ -2,7 +2,7 @@ use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use phi_core::*;
 use phi_proto::{DeviceId, ReactionKind, RevocationTarget};
 use std::{
-    io::{self, Read},
+    io::{self, IsTerminal, Read, Write},
     path::PathBuf,
     process::ExitCode,
 };
@@ -47,10 +47,13 @@ Daily messaging
   reply           Add a message to an existing thread
   react           Add or remove up, down, ack, or claim on one message
   unread          Hand a thread back to your other sessions
+  close           Hide a finished thread from inbox, fetch, wait, and default threads
+  reopen          Show a closed thread in those lists again
+  delete          Remove a thread you started, for everyone
   wait            Long-poll until a relevant message or reaction arrives
 
 Discovery
-  threads         List every visible thread, newest activity first
+  threads         List open threads, newest activity first (--closed for closed)
   channels        List channels with members and unread counts
   spaces          List local profiles and which directory is bound
   who             List people, devices, and recent handles
@@ -199,21 +202,27 @@ EXAMPLES:
     )]
     Who,
     #[command(
-        about = "List every visible thread, newest activity first",
+        about = "List open threads, newest activity first",
         long_about = "\
-Discovery, not an inbox: read and unread threads in channels you belong to. Each line has id, channel, title, participants, message count, unread count, per-message claims (claims: 2 · bob/main #3, alice/fixer #5), and relative activity. An optional filter selects one #channel or the DM/self channel of @person. Does not mark anything read.",
+Discovery, not an inbox. Open threads in channels you belong to, unless --closed, which lists closed ones instead. Each line has id, channel, title, participants, message count, unread count, per-message claims (claims: 2 · bob/main #3, alice/fixer #5), and relative activity. A closed thread also ends with \" · closed\". An optional filter selects one #channel or the DM/self channel of @person. Does not mark anything read. Closed threads stay out of inbox, fetch, and wait.",
         after_long_help = "\
 EXAMPLES:
   phi threads
   phi threads '#all'
+  phi threads --closed
   phi --as main threads @bob"
     )]
     Threads {
         #[arg(
             value_name = "CHANNEL",
-            help = "Optional filter: #channel (quote it) or @person for that DM or self channel. Omit to list every visible thread. Example: '#backend'"
+            help = "Optional filter: #channel (quote it) or @person for that DM or self channel. Omit to list every thread in the open set, or the closed set when --closed is set. Example: '#backend'"
         )]
         destination: Option<String>,
+        #[arg(
+            long,
+            help = "List closed threads instead of open ones. Closed threads are omitted from inbox, fetch, wait, and this list by default. Example: --closed"
+        )]
+        closed: bool,
     },
     #[command(
         about = "List channels with members and unread counts",
@@ -372,6 +381,60 @@ EXAMPLES:
             allow_hyphen_values = true,
             value_name = "THREAD",
             help = "Thread id, a message id in the thread, or <thread-id>#<n>. Example: <thread-id>"
+        )]
+        thread: MessageRef,
+    },
+    #[command(
+        about = "Hide a finished thread from inbox, fetch, wait, and the default thread list",
+        long_about = "\
+Any channel member can close a thread. It leaves inbox, fetch, and wait, and phi threads omits it unless you pass --closed. It stays readable by id. A later reply reopens it. Use delete only to erase a thread you started.",
+        after_long_help = "\
+EXAMPLES:
+  phi close <thread-id>
+  phi --as main close '<thread-id>#4'
+  phi threads --closed"
+    )]
+    Close {
+        #[arg(
+            allow_hyphen_values = true,
+            value_name = "THREAD",
+            help = "Thread id, a message id in the thread, or <thread-id>#<n>. Closes the whole thread. Example: <thread-id>"
+        )]
+        thread: MessageRef,
+    },
+    #[command(
+        about = "Show a closed thread in inbox, fetch, wait, and the default thread list again",
+        long_about = "\
+Reopen a thread any member closed. Replying also reopens it, so use this when the thread should be visible again without a new message.",
+        after_long_help = "\
+EXAMPLES:
+  phi reopen <thread-id>
+  phi --as main reopen '<thread-id>#2'
+  phi threads --closed"
+    )]
+    Reopen {
+        #[arg(
+            allow_hyphen_values = true,
+            value_name = "THREAD",
+            help = "Thread id, a message id in the thread, or <thread-id>#<n>. Reopens the whole thread. Example: <thread-id>"
+        )]
+        thread: MessageRef,
+    },
+    #[command(
+        about = "Remove a thread you started, for everyone",
+        long_about = "\
+Only the root author's person can delete. This removes the whole thread for everyone, not just your view. A terminal asks you to confirm; a non-interactive caller deletes immediately. Use close when the work is done but the history should stay.",
+        after_long_help = "\
+EXAMPLES:
+  phi delete <thread-id>
+  phi --as main delete '<thread-id>#1'
+  phi delete <message-id>"
+    )]
+    Delete {
+        #[arg(
+            allow_hyphen_values = true,
+            value_name = "THREAD",
+            help = "Thread id, a message id in the thread, or <thread-id>#<n>. Deletes the whole thread. Example: <thread-id>"
         )]
         thread: MessageRef,
     },
@@ -904,8 +967,13 @@ async fn run(cli: Cli) -> Result<()> {
                         print!("{}", view.text());
                     }
                 }
-                Command::Threads { destination } => {
-                    let entries = client.discover_threads(destination.as_deref()).await?;
+                Command::Threads {
+                    destination,
+                    closed,
+                } => {
+                    let entries = client
+                        .discover_threads_filtered(destination.as_deref(), closed)
+                        .await?;
                     if cli.json {
                         output::print(
                             "threads",
@@ -1009,6 +1077,30 @@ async fn run(cli: Cli) -> Result<()> {
                     let thread = client.resolve_thread(thread).await?;
                     client.unread(thread).await?;
                     println!("marked unread");
+                }
+                Command::Close { thread } => {
+                    let thread = client.resolve_thread(thread).await?;
+                    client.close_thread(thread).await?;
+                    println!("closed thread {thread}");
+                }
+                Command::Reopen { thread } => {
+                    let thread = client.resolve_thread(thread).await?;
+                    client.reopen_thread(thread).await?;
+                    println!("reopened thread {thread}");
+                }
+                Command::Delete { thread } => {
+                    let thread = client.resolve_thread(thread).await?;
+                    if io::stdin().is_terminal() {
+                        eprint!("Delete thread {thread} for everyone? [y/N] ");
+                        io::stderr().flush()?;
+                        let mut answer = String::new();
+                        io::stdin().read_line(&mut answer)?;
+                        if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+                            return Err(Error::User("aborted".into()));
+                        }
+                    }
+                    client.delete_thread(thread).await?;
+                    println!("deleted thread {thread}");
                 }
                 Command::Wait { seconds } => {
                     if cli.json {
@@ -1119,7 +1211,9 @@ mod tests {
             vec!["init"],
             vec!["who"],
             vec!["threads"],
+            vec!["threads", "--closed"],
             vec!["threads", "#all"],
+            vec!["threads", "#all", "--closed"],
             vec!["threads", "@bob"],
             vec!["channels", "--json"],
             vec!["spaces"],
@@ -1148,6 +1242,9 @@ mod tests {
             vec!["react", id, "claim"],
             vec!["react", id, "unclaim"],
             vec!["unread", id],
+            vec!["close", id],
+            vec!["reopen", id],
+            vec!["delete", id],
             vec!["wait"],
             vec!["wait", "5"],
             vec!["group", "create", "backend", "@alice", "@bob"],
@@ -1165,7 +1262,9 @@ mod tests {
         }
         assert!(Cli::try_parse_from(["phi", "read", id, "--all", "--last", "2"]).is_err());
         assert!(Cli::try_parse_from(["phi", "join", "link"]).is_err());
-        for command in ["read", "reply", "react", "unread"] {
+        for command in [
+            "read", "reply", "react", "unread", "close", "reopen", "delete",
+        ] {
             let reference = format!("{id}#2");
             let mut argv = vec!["phi", command, reference.as_str()];
             if command == "react" {
@@ -1184,6 +1283,9 @@ mod tests {
             vec!["react", &reference, "ack"],
             vec!["reply", &reference, "body"],
             vec!["unread", &reference],
+            vec!["close", &reference],
+            vec!["reopen", &reference],
+            vec!["delete", &reference],
             vec!["device", "revoke", id],
             vec!["--space", id, "who"],
         ] {
@@ -1214,6 +1316,26 @@ mod tests {
             assert!(text.contains("previous summary"), "{text}");
             assert!(text.contains("WHOLE thread"), "{text}");
         }
+        for command in ["close", "reopen", "delete", "threads"] {
+            let flag = help_text(&["phi", command, "--help"])?;
+            let via_help = help_text(&["phi", "help", command])?;
+            for text in [&flag, &via_help] {
+                assert!(text.contains("EXAMPLES"), "{command}\n{text}");
+            }
+        }
+        let close_help = help_text(&["phi", "close", "--help"])?;
+        assert!(
+            close_help.contains("inbox") && close_help.contains("THREAD"),
+            "{close_help}"
+        );
+        let threads_help = help_text(&["phi", "threads", "--help"])?;
+        assert!(
+            threads_help.contains("--closed") && threads_help.contains("claims:"),
+            "{threads_help}"
+        );
+        assert!(help_text(&["phi", "delete", "--help"])?.contains("everyone"));
+        assert!(help_text(&["phi", "reopen", "--help"])?.contains("reply"));
+        assert!(root_help.contains("close") && root_help.contains("--closed"));
         assert!(help_text(&["phi", "help", "space", "set"])?.contains("summary_every"));
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

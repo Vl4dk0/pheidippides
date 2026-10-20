@@ -476,6 +476,46 @@ impl Cache {
         )?;
         Ok(())
     }
+    pub fn delete_thread(&mut self, thread: MessageId, cache_dir: &Path) -> Result<()> {
+        let tid = thread.to_string();
+        let contents: Vec<String> = {
+            let mut stmt = self
+                .db
+                .prepare("SELECT content FROM messages WHERE thread=?")?;
+            stmt.query_map([&tid], |r| r.get(0))?
+                .collect::<std::result::Result<_, _>>()?
+        };
+        let tx = self
+            .db
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        tx.execute(
+            "DELETE FROM reactions WHERE message IN (SELECT id FROM messages WHERE thread=?)",
+            [&tid],
+        )?;
+        tx.execute("DELETE FROM messages WHERE thread=?", [&tid])?;
+        tx.execute("DELETE FROM message_numbers WHERE thread=?", [&tid])?;
+        tx.execute("DELETE FROM observations WHERE thread=?", [&tid])?;
+        tx.execute("DELETE FROM cursors WHERE thread=?", [&tid])?;
+        tx.execute(
+            "DELETE FROM state WHERE name=? OR name=? OR name LIKE ?",
+            params![
+                format!("activity/{tid}"),
+                format!("discovery/{tid}"),
+                format!("read/%/{tid}")
+            ],
+        )?;
+        tx.commit()?;
+        for raw in contents {
+            if let Ok(content) = serde_json::from_str::<MessageContent>(&raw) {
+                for attachment in content.attachments {
+                    let _ = fs::remove_dir_all(
+                        cache_dir.join("blobs").join(attachment.blob_id.to_string()),
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
 }
 fn observe_activity(db: &Connection, thread: MessageId, evidence: &str) -> Result<()> {
     let inserted = db.execute(
