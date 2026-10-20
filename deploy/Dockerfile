@@ -1,10 +1,12 @@
 # Multi-stage so the runtime image carries only the binary, not the toolchain.
-FROM rust:1-bookworm AS build
+# rust:1-bookworm
+FROM rust@sha256:e12566d5abc17a0da741628782cdb504b68b8961f5bfcf677936bf3e8b32de29 AS build
 WORKDIR /src
 COPY . .
 RUN cargo build --release --locked -p phi-server
 
-FROM debian:bookworm-slim
+# debian:bookworm-slim
+FROM debian@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587
 # ca-certificates: ACME mode talks to the certificate authority.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates \

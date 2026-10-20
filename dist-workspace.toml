@@ -19,3 +19,29 @@ hosting = "github"
 install-updater = true
 # Desktop bundles join the GitHub Release dist just announced
 post-announce-jobs = ["./gui-release"]
+# release.yml has two hand-edits dist 0.33 cannot generate (checksummed
+# cargo-dist installer, explicit Tauri secrets). allow-dirty makes
+# `dist generate` and `dist generate --check` skip .github/workflows/release.yml
+# entirely, so --check stays green without proving the file matches the
+# generator. Remove this, regenerate, then re-apply the HAND-EDIT blocks.
+allow-dirty = ["ci"]
+# Tag pushes only. A pull_request run would execute this workflow from the PR
+# commit with a contents: write token.
+pr-run-mode = "skip"
+# Attest the built archives. The default phase (build-local-artifacts) also
+# narrows that job to contents: read plus id-token and attestations write.
+# The workflow still has contents: write: the plan job runs
+# `dist host --steps=create` and must be allowed to create the GitHub Release.
+# dist 0.33 has no setting for a read-only workflow token.
+github-attestations = true
+# Publish bundles only. Declared here so the caller job does not inherit a
+# broader token if the workflow permissions grow later.
+github-custom-job-permissions = { gui-release = { contents = "write" } }
+
+# Full commit SHAs. dist pastes each value after `@`, so the ` # vX.Y.Z`
+# suffix becomes a YAML comment on the generated `uses:` line.
+[dist.github-action-commits]
+"actions/checkout" = "3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1"
+"actions/upload-artifact" = "cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2"
+"actions/download-artifact" = "9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2"
+"actions/attest" = "1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2"

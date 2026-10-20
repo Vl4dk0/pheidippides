@@ -52,6 +52,15 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/Vl4dk0/pheidippides/rel
 powershell -ExecutionPolicy Bypass -c "irm https://github.com/Vl4dk0/pheidippides/releases/latest/download/phi-cli-installer.ps1 | iex"
 ```
 
+Those scripts install from the movable `latest` release. To check an archive
+first, download a versioned asset and its `.sha256` (names look like
+`phi-cli-aarch64-apple-darwin.tar.xz`), then:
+
+```sh
+shasum -a 256 -c phi-cli-aarch64-apple-darwin.tar.xz.sha256   # Linux: sha256sum -c
+gh attestation verify phi-cli-aarch64-apple-darwin.tar.xz --repo Vl4dk0/pheidippides
+```
+
 **Desktop app** (optional, for humans to watch and steer), from the
 [latest release](https://github.com/Vl4dk0/pheidippides/releases/latest):
 macOS `Pheidippides_<version>_universal.dmg`, Windows `Pheidippides_<version>_x64-setup.exe`,

@@ -17,6 +17,11 @@ services:
         read_only: true
         bind:
           create_host_path: false
+    # Root is read-only. The process only writes the /data volume (db, blobs,
+    # ACME cache); SQLite temp files stay beside the database, so no tmpfs.
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
     # The slim runtime has no HTTP probe tool; monitor /healthz from the host.
 
 volumes:

@@ -27,19 +27,19 @@ jobs:
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - id: meta
-        uses: docker/metadata-action@v6
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ env.IMAGE }}
-      - uses: docker/setup-buildx-action@v4
-      - uses: docker/login-action@v4
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - id: build
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: deploy/Dockerfile
@@ -53,8 +53,13 @@ jobs:
           DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           mkdir -p "$RUNNER_TEMP/digests"
-          touch "$RUNNER_TEMP/digests/${DIGEST#sha256:}"
-      - uses: actions/upload-artifact@v7
+          hex="${DIGEST#sha256:}"
+          if [[ ! "$hex" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "refusing unexpected digest: $DIGEST" >&2
+            exit 1
+          fi
+          touch "$RUNNER_TEMP/digests/$hex"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: digest-${{ matrix.runner }}
           path: ${{ runner.temp }}/digests/*
@@ -63,30 +68,75 @@ jobs:
   manifest:
     needs: build
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: ${{ runner.temp }}/digests
           pattern: digest-*
           merge-multiple: true
-      # Tags: the release version (0.1.0) and, for non-prereleases, latest.
+      # Tag: the release version only (for example 0.1.0). Not :latest.
       - id: meta
-        uses: docker/metadata-action@v6
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ env.IMAGE }}
           tags: type=semver,pattern={{version}}
-      - uses: docker/setup-buildx-action@v4
-      - uses: docker/login-action@v4
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Create multi-arch manifest
+        id: push
         working-directory: ${{ runner.temp }}/digests
+        env:
+          IMAGE: ${{ env.IMAGE }}
         run: |
-          # shellcheck disable=SC2046
-          docker buildx imagetools create \
-            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
-            $(printf '${{ env.IMAGE }}@sha256:%s ' *)
+          set -euo pipefail
+          # metadata-action exports DOCKER_METADATA_OUTPUT_JSON. Keep every tag
+          # and digest as its own argv element; the tag filter allows a suffix.
+          mapfile -t tags < <(jq -r '.tags[]' <<<"$DOCKER_METADATA_OUTPUT_JSON")
+          if ((${#tags[@]} == 0)); then
+            echo "metadata-action produced no tags" >&2
+            exit 1
+          fi
+          args=()
+          for tag in "${tags[@]}"; do
+            args+=(-t "$tag")
+          done
+          shopt -s nullglob
+          digest_files=(*)
+          if ((${#digest_files[@]} == 0)); then
+            echo "no image digests to publish" >&2
+            exit 1
+          fi
+          for file in "${digest_files[@]}"; do
+            if [[ ! "$file" =~ ^[0-9a-f]{64}$ ]]; then
+              echo "refusing unexpected digest filename: $file" >&2
+              exit 1
+            fi
+            args+=("${IMAGE}@sha256:${file}")
+          done
+          docker buildx imagetools create "${args[@]}"
+          digest="$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "${tags[0]}" | tr -d '[:space:]')"
+          if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "refusing unexpected manifest digest: $digest" >&2
+            exit 1
+          fi
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+          echo "ref=${tags[0]}" >> "$GITHUB_OUTPUT"
+      - name: Attest manifest
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
       - name: Inspect
-        run: docker buildx imagetools inspect "${{ env.IMAGE }}:${{ steps.meta.outputs.version }}"
+        env:
+          REF: ${{ steps.push.outputs.ref }}
+        run: docker buildx imagetools inspect "$REF"
