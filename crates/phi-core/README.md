@@ -115,8 +115,9 @@ Settings/revocations and rejected-event
 outcomes remain visible. Message events and inbox entries carry the root's `to:`
 address, tag matching person/handles `(you)`, prioritize matching mentions, and
 include current reaction context. Read/wait text names reactors per exact
-message; inbox text filters to the latest message and adds the thread total
-(`InboxEntry.latest_message` identifies that message). `wait_text` groups all available relevant
+message; inbox text filters non-claim reactions to the latest message, adds the
+thread total (`InboxEntry.latest_message` identifies that message), and lists every
+claim with its thread position. `threads` uses that same claim list. `wait_text` groups all available relevant
 messages by thread, renders full bodies with read's framing, includes a summary only for omitted
 history, wraps the entire batch once when it contains foreign content,
 downloads attachments, then marks through each thread's last displayed message.
@@ -162,7 +163,8 @@ carry a signed reaction, verified before naming its person/handle/time; other
 conflict errors include the request/resource and server cause.
 
 `SummaryPreflight` on `ThreadView.next_reply` includes the pending reply, threshold,
-required status and summarizer configuration. Missing threshold summaries produce
+required status, summarizer configuration, and `previous_summary` (the current
+rolling summary to extend, when one exists). Missing threshold summaries produce
 `Error::SummaryRequired`, including the server's atomic-send rejection. The CLI
 uses `Client::save_draft` to preserve exact bodies privately under the profile cache.
 `read` records a local handle/thread read boundary to prevent event replay in that

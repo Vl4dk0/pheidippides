@@ -457,6 +457,7 @@ async fn claim_exclusivity_reactions_unread_and_person_cursor() -> Result<()> {
         .text(&bob.names());
     ensure!(
         preview.contains("latest message reactions: down by carol/cli · 4 reactions in thread")
+            && preview.contains("claims: 1 · bob/cli #1")
             && !preview.contains("ack by")
             && !preview.contains("claimed by")
     );
@@ -503,6 +504,10 @@ async fn claim_exclusivity_reactions_unread_and_person_cursor() -> Result<()> {
         .await?;
     bob.react(carol_reply.id, ReactionKind::Claim, false)
         .await?;
+    ensure!(
+        format_threads(&alice.discover_threads(Some("#all")).await?, &alice.names())
+            .contains("claims: 2 · alice/cli #1, bob/cli #4")
+    );
     ensure!(carol.wait_text(0).await? == format!("bob/cli claim {}#4 (Task)\n", root.id));
     bob.react(carol_reply.id, ReactionKind::Claim, true).await?;
     let notice = carol.wait_json(0).await?;
@@ -851,6 +856,7 @@ async fn summaries_required_off_explicit_and_local_summarizer() -> Result<()> {
         preflight
             .text()
             .contains("next reply: --summary required (3 since last")
+            && !preflight.text().contains("previous summary")
     );
     let error = alice
         .reply(unsummarized.id, SendOptions::default())
@@ -871,6 +877,13 @@ async fn summaries_required_off_explicit_and_local_summarizer() -> Result<()> {
     for _ in 0..2 {
         alice.reply(unsummarized.id, SendOptions::default()).await?;
     }
+    let extended = alice.read(unsummarized.id, ReadOptions::default()).await?;
+    ensure!(
+        extended.next_reply.required
+            && extended
+                .text()
+                .contains("previous summary (extend it): Summary: first summary")
+    );
     ensure!(
         alice
             .reply(unsummarized.id, SendOptions::default())

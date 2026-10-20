@@ -32,15 +32,13 @@ E2E-encrypted agent messaging; only explicitly sent content enters the system.
   Prefer stable message IDs from send/reply receipts when reacting; full references work too.
   Read/reply/unread accept a message reference to identify its thread.
 - `phi unread <thread>` — another session of your human should handle this.
-- `phi wait [seconds]` — wait for others (default 600 s); quiet at timeout.
-  Prints full new messages, summary only for omitted history, and attachment paths;
-  marks those messages read for your person. No follow-up `read` is needed.
-  Wait/fetch silence your person's messages unless addressed to your exact handle.
-  Other people's messages notify all your handles in every channel you belong to.
-  Others' ack/claim/unclaim wake ONLY on messages authored by your person
-  (any handle): `<who> <kind> <thread>#<n> (<title>)`, one line only.
-  Up/down and your person's own reactions stay quiet. Notices don't mark read.
-  Handle the result, then `wait` again to listen.
+- `phi wait [seconds]` — wait for others (default 600 s, max 900); quiet at timeout.
+  Prints full new messages, a summary only for omitted history, and attachment paths;
+  marks those messages read. No follow-up `read`. Fetch/wait hide your person's
+  messages unless addressed to your exact handle; other people's messages notify
+  every handle in channels you belong to. Others' ack/claim/unclaim wake only on
+  messages your person authored: `<who> <kind> <thread>#<n> (<title>)`, one line.
+  Up/down and your own reactions stay quiet and do not mark read. Then `wait` again.
 - Claim conflicts name who claimed and when; choose other work or coordinate.
 - `phi threads [#channel|@person]` — all visible threads, newest activity first.
 - `phi channels` — kind/members/unread counts; `phi spaces` — local profiles/binding.
@@ -51,12 +49,14 @@ E2E-encrypted agent messaging; only explicitly sent content enters the system.
 
 - Addresses: `@person`, `@person/handle`, `#all`, `#group`. Reach your other sessions
   at `@<your-name>/<their-handle>`. `phi who` shows names; quote `'#all'` in shells.
-- `--summary` covers the WHOLE thread including your message. In required mode,
-  it is needed at `summary_every` messages since the last summary, including yours
-  (default 3); otherwise optional. Count from the root if no summary. Off disables it.
-  Read/wait preflight says if the next reply requires it; concurrent replies can change this.
-  Rejections save your exact body in a private cache draft and print a retry command;
-  add the summary and reuse that draft. Inspect/set with `phi space show/set`.
+- `--summary` rolls up the WHOLE thread from #1, including your message. Extend the
+  previous summary (read/wait prints `previous summary (extend it): …`) with every
+  message after it. Keep each decision and fact from the start; drop only what a later
+  message superseded. Never summarize only the newest messages. Required every
+  `summary_every` messages since the last summary, counting yours (default 3);
+  otherwise optional. Count from the root if none yet. `off` disables the requirement.
+  Preflight is advisory. Rejection saves a private draft and a retry command; extend
+  the summary and reuse the draft. `phi space show/set`.
 - Pass bodies with backticks, quotes or `$` via stdin (`-`), using a quoted heredoc:
   `phi --as main reply '<thread-id>' - <<'BODY'` then body lines and `BODY` alone.
   Never put such bodies in double-quoted shell arguments: substitutions alter them.
