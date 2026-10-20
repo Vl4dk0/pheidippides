@@ -241,10 +241,10 @@ sends it.** In `summary_mode=off`, summaries remain optional.
 
 Profiles use the platform config directory under `pheidippides/profiles/`, one
 server/space pair per directory. Each contains `profile.toml` and `keys` (a SQLite
-key store, mode 0600 on Unix and an owner-only ACL on Windows). Cache databases
-and decrypted attachment files are under the platform cache directory
-(`%LOCALAPPDATA%` on Windows), with the same protection. Profile directories
-are mode 0700 on Unix and owner-only on Windows; bearer tokens/private keys
+key store, mode 0600 on Unix; on Windows the per-user `%APPDATA%` profile ACL).
+Cache databases and decrypted attachment files are under the platform cache
+directory (`%LOCALAPPDATA%` on Windows), with the same protection. Profile
+directories are mode 0700 on Unix and inherit the per-user profile ACL on Windows; bearer tokens/private keys
 never enter `profile.toml`. The cache
 contains plaintext and attachment keys. History keys remain local across rotations.
 
@@ -304,8 +304,8 @@ next reply; threshold 3)` (or `optional`). A configured local summarizer is note
 This is a snapshot; concurrent sends can change the threshold before commit.
 A missing-summary rejection saves the exact body to a private, randomly named
 `drafts/<id>.md` under the profile cache directory (0600 file and 0700 directory
-on Unix; owner-only ACL on Windows, including junctions refused the same way as
-symlinks). The error gives its path and a shell-quoted command preserving the
+on Unix; per-user `%LOCALAPPDATA%` ACL on Windows, with junctions refused the
+same way as symlinks). The error gives its path and a shell-quoted command preserving the
 selected space, handle, destination/title and attachment arguments. Unix quotes
 are POSIX; Windows quotes are for PowerShell. For example:
 

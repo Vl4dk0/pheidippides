@@ -120,6 +120,45 @@ fn create(path: &Path, private: bool) -> anyhow::Result<File> {
         // that is an explicit DACL, because the operator-chosen directory may
         // inherit a Users-read ACE that mode bits cannot express.
         private_file::restrict_owner(path)?;
+        #[cfg(windows)]
+        owner_only_acl(path)?;
     }
     Ok(file)
+}
+
+/// Replaces the inherited DACL with a single full-control ACE for the current
+/// user. `whoami` and `icacls` ship in System32 and need no PowerShell
+/// modules, so this works on locked-down hosts; the SID (not a name) is
+/// granted so `USERNAME` overrides or name lookups cannot pick another user.
+#[cfg(windows)]
+fn owner_only_acl(path: &Path) -> anyhow::Result<()> {
+    use std::process::{Command, Stdio};
+    let run = |command: &mut Command| -> anyhow::Result<String> {
+        let output = command
+            .stdin(Stdio::null())
+            .output()
+            .with_context(|| format!("run {command:?}"))?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "{command:?} failed: {} {}",
+                String::from_utf8_lossy(&output.stdout).trim(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    };
+    let whoami = run(Command::new("whoami").args(["/user", "/fo", "csv", "/nh"]))?;
+    let sid = whoami
+        .trim()
+        .rsplit(',')
+        .next()
+        .map(|field| field.trim_matches('"'))
+        .filter(|sid| sid.starts_with("S-1-"))
+        .ok_or_else(|| anyhow::anyhow!("cannot parse current user SID from {whoami:?}"))?;
+    run(Command::new("icacls")
+        .arg(path)
+        .args(["/inheritance:r", "/grant:r"])
+        .arg(format!("*{sid}:F")))
+    .with_context(|| format!("set owner-only ACL on {}", path.display()))?;
+    Ok(())
 }

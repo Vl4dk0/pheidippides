@@ -686,11 +686,16 @@ async fn redeem_is_atomic_single_use_and_rejects_forged_certificates() -> TestRe
 #[tokio::test]
 async fn expired_grants_and_revoked_issuers_cannot_redeem() -> TestResult {
     let f = Fixture::new().await?;
-    let (g, k) = f
-        .grant(&f.root, GrantKind::Invite, Some(timestamp() + 1))
-        .await?;
+    // Timestamps are whole seconds and a grant is dead once `now >= expires_at`,
+    // so a two-second expiry leaves at least a full second for creation; then
+    // wait for the wall clock to actually reach the expiry instant.
+    let expires = timestamp() + 2;
+    let (g, k) = f.grant(&f.root, GrantKind::Invite, Some(expires)).await?;
     let (_, r) = f.redeem_request(&g, &k)?;
-    tokio::time::sleep(Duration::from_millis(1100)).await;
+    let expiry = UNIX_EPOCH + Duration::from_secs(expires);
+    if let Ok(remaining) = expiry.duration_since(SystemTime::now()) {
+        tokio::time::sleep(remaining).await;
+    }
     assert_eq!(
         request(
             &f.app,

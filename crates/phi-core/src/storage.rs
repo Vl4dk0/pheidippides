@@ -555,8 +555,8 @@ fn private_database(path: &Path) -> Result<Connection> {
         options.mode(0o600);
     }
     options.open(path)?;
-    // Windows cannot set a DACL at create time without unsafe Win32 calls.
-    // Tighten before SQLite writes pages, -wal or -shm beside the file.
+    // Tighten a pre-existing file before SQLite writes pages, -wal or -shm
+    // beside it; creation mode alone does not touch an older file.
     crate::private_file::restrict_owner(path)?;
     // A filesystem path, not a SQLite URI, so Windows separators stay literal.
     // WAL matches the server: the default rollback journal holds a lock that
@@ -587,9 +587,6 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
         file.write_all(bytes)?;
         file.sync_all()?;
         fs::rename(&temp, path)?;
-        // Rename keeps the temp file's DACL on the same volume; re-apply in
-        // case the destination was replaced from a looser parent ACL.
-        crate::private_file::restrict_owner(path)?;
         Result::Ok(())
     })();
     if result.is_err() {

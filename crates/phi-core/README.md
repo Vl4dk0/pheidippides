@@ -36,9 +36,9 @@ No daemon, GUI, listener or server process is started by the library.
 - `keys` is a private SQLite account store separate from the plaintext cache.
   Account `identity` stores device secrets/token/certificate; channel accounts
   store epoch keys. JSON secret buffers use `Zeroizing`; rusqlite/HTTP internals
-  are not guaranteed to erase every transient copy. The file is mode 0600 on Unix
-  and an owner-only DACL on Windows (profile directory `%APPDATA%` is already
-  per-user; the DACL also covers operator-chosen paths). The same OS user,
+  are not guaranteed to erase every transient copy. The file is mode 0600 on Unix;
+  on Windows it inherits the per-user `%APPDATA%` profile ACL (user, SYSTEM,
+  Administrators). The same OS user,
   including local agents, can read it. Lost keys lose history.
 - Wait cursors are durable per profile/handle. Each delivered sequence gets a
   durable `wait_outcomes` record before advancement: verified/cacheable, ignored
