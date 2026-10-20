@@ -32,6 +32,7 @@ struct Faults {
     fail_message: Option<MessageId>,
     lose_revocation_response: bool,
     directory_reads: usize,
+    drop_event_polls: usize,
 }
 async fn hostile_host(
     State(faults): State<Arc<Mutex<Faults>>>,
@@ -39,14 +40,22 @@ async fn hostile_host(
     next: Next,
 ) -> Response {
     let path = request.uri().path().to_owned();
-    let Ok(faults) = faults.lock().map(|mut f| {
+    let Ok((faults, drop_poll)) = faults.lock().map(|mut f| {
         if path.ends_with("/devices") {
             f.directory_reads += 1;
         }
-        f.clone()
+        let drop_poll = path.ends_with("/events") && f.drop_event_polls > 0;
+        if drop_poll {
+            f.drop_event_polls -= 1;
+        }
+        (f.clone(), drop_poll)
     }) else {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
+    if drop_poll {
+        // What nginx returns when its proxy_read_timeout cuts an idle long-poll.
+        return (StatusCode::BAD_GATEWAY, "<html>502 Bad Gateway</html>").into_response();
+    }
     if (faults
         .fail_metadata
         .is_some_and(|id| path == format!("/v1/channels/{id}"))
@@ -1930,5 +1939,21 @@ async fn remaining_members_rekey_private_channels_unknown_to_removal_issuer() ->
         |r| r.get(0),
     )?;
     ensure!(leaked == 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn wait_survives_transient_gateway_errors() -> Result<()> {
+    let f = Fixture::new().await?;
+    let (mut alice, mut bob) = f.pair().await?;
+    alice
+        .send("@bob/cli", "Ping", options("Proxy restarted mid-wait."))
+        .await?;
+    f.faults(|f| f.drop_event_polls = 2)?;
+    let waited = bob.wait_text(10).await?;
+    ensure!(waited.contains("Proxy restarted mid-wait."));
+    f.faults(|f| f.drop_event_polls = 4)?;
+    let error = bob.wait_text(10).await.err().map(|e| e.to_string());
+    ensure!(error.as_deref().is_some_and(|e| e.contains("HTTP 502")));
     Ok(())
 }

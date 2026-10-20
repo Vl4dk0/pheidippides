@@ -14,6 +14,11 @@ use std::{
 };
 use zeroize::Zeroizing;
 
+/// Longest single long-poll `wait` issues; stays under common proxy idle limits.
+const LONG_POLL_CHUNK_SECS: u64 = 45;
+const GATEWAY_RETRIES: u8 = 3;
+const GATEWAY_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChannelMeta {
     pub name: String,
@@ -1888,18 +1893,39 @@ impl Client {
         let name = format!("wait/{}", self.handle);
         let deadline =
             std::time::Instant::now() + std::time::Duration::from_secs(u64::from(seconds));
+        let mut gateway_failures = 0u8;
         loop {
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            // Reverse proxies cut idle upstream responses well under the 900 s the
+            // server allows (nginx defaults to 60 s, Cloudflare to 100 s), so one wait
+            // is served by several shorter polls against the same deadline.
             let timeout = (remaining.as_secs() + u64::from(remaining.subsec_nanos() > 0))
-                .min(u64::from(seconds));
+                .min(u64::from(seconds))
+                .min(LONG_POLL_CHUNK_SECS);
             let after = self.cache.get::<u64>(&name)?.unwrap_or(0);
-            let mut response: EventsResponse = self
+            let mut response: EventsResponse = match self
                 .http
                 .get(&format!(
                     "/spaces/{}/events?after={after}&timeout={timeout}&handle={}",
                     self.profile.space_id, self.handle
                 ))
-                .await?;
+                .await
+            {
+                Ok(response) => response,
+                // A proxy that drops a poll (502/504) usually recovers at once; retry a
+                // few times before giving up so an idle wait survives a proxy restart.
+                Err(Error::Server {
+                    status: 502..=504, ..
+                }) if gateway_failures < GATEWAY_RETRIES
+                    && std::time::Instant::now() < deadline =>
+                {
+                    gateway_failures += 1;
+                    tokio::time::sleep(GATEWAY_RETRY_DELAY).await;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            gateway_failures = 0;
             // Drain an available backlog without another long-poll or a page-sized
             // truncation of what the user is about to read.
             let mut page_len = response.events.len();
@@ -1925,6 +1951,9 @@ impl Client {
                 return Err(user("server rolled back event cursor"));
             }
             if response.events.is_empty() {
+                if std::time::Instant::now() < deadline {
+                    continue;
+                }
                 return Ok(WaitBatch {
                     events: vec![],
                     cursor: name,

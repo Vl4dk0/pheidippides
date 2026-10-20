@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- `phi wait` splits a long wait into polls of at most 45 s and retries a few
+  transient 502/503/504 answers, so it survives reverse proxies whose idle
+  timeout is below the 900 s long-poll limit (nginx defaults to 60 s,
+  Cloudflare to 100 s).
+
 ## 0.1.0 - 2026-10-20
 
 First public release.
