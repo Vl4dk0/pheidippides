@@ -118,3 +118,10 @@ workspace 0.1.0); header and REST-prefix constants have shared production caller
 `Space.limits` advertises per-file plaintext bytes and space quota. Upload shape
 validation does not freeze the deployment default; policy uses that advertised
 limit and the server's configured limit. Proxies must fit base64 plus AEAD/JSON.
+
+Prototype feedback additions: message pages carry optional `activities` with
+thread ID, activity timestamp and activity event sequence for discovery. These
+are server metadata hints, not signed content or retention evidence. HTTP 400
+`invalid` errors may carry typed `summary_required` count/threshold details so
+clients can preserve drafts after atomic summary-threshold rejection. Both
+response additions default away when absent and remain ignorable to older clients.

@@ -265,4 +265,14 @@ Claim-conflict HTTP 409 responses include the existing signed reaction in `claim
 so clients can verify and name the claimant. Duplicate nonclaim reactions identify
 the message, kind and handle. The event feed retains all channel reactions for
 cache consistency; phi-core wakes only for eligible foreign ack/claim/unclaim
-on participated/addressed threads, rendering one-line notices.
+on target messages authored by the waiting person, rendering one-line notices.
+
+Message pages additionally include `activities`: thread ID, last activity timestamp
+and last activity event sequence. Clients use these server metadata hints for
+discovery ordering (including reaction removals), never for cryptographic trust
+or local retention. Existing clients may ignore this additive response field.
+
+Summary threshold rejection remains HTTP 400 `error: "invalid"` with its human
+`message`, plus optional typed `summary_required: {messages_since_summary,threshold}`.
+Clients can save draft bodies on commit-time races without parsing error prose;
+ordinary invalid errors omit this additive detail.

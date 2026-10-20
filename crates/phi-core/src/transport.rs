@@ -8,6 +8,8 @@ use std::time::Duration;
 pub enum Error {
     #[error("{0}")]
     User(String),
+    #[error("{0}")]
+    SummaryRequired(String),
     #[error("server HTTP {status}: {message}")]
     Server { status: u16, message: String },
     #[error("conflict: {0}")]
@@ -139,10 +141,17 @@ impl Http {
                     Error::RateLimited(retry.unwrap_or(retry_after))
                 }
                 (429, _) => Error::RateLimited(retry.unwrap_or(1)),
+                (
+                    400,
+                    Some(ErrorBody::Invalid {
+                        message,
+                        summary_required: Some(_),
+                    }),
+                ) => Error::SummaryRequired(message),
                 (_, Some(e)) => Error::Server {
                     status: status.as_u16(),
                     message: match e {
-                        ErrorBody::Invalid { message }
+                        ErrorBody::Invalid { message, .. }
                         | ErrorBody::Unauthorized { message }
                         | ErrorBody::Forbidden { message }
                         | ErrorBody::NotFound { message }

@@ -26,7 +26,7 @@ pub struct NamedChannel {
     pub channel: Channel,
     pub meta: ChannelMeta,
 }
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct SendOptions {
     pub body: String,
     pub summary: Option<String>,
@@ -764,6 +764,32 @@ impl Client {
         }
         Ok((self.new_channel(kind, "dm", members).await?, mentions))
     }
+    fn next_reply(&self, history: &[DecodedMessage]) -> SummaryPreflight {
+        let messages_since_summary = history
+            .iter()
+            .rposition(|m| m.content.summary.is_some())
+            .map_or(history.len(), |i| history.len() - i - 1)
+            .saturating_add(1);
+        SummaryPreflight {
+            required: self.profile.kind == DeviceKind::Cli
+                && self.settings.summary_mode == SummaryMode::Required
+                && u64::try_from(messages_since_summary).unwrap_or(u64::MAX)
+                    >= u64::from(self.settings.summary_every),
+            messages_since_summary,
+            threshold: self.settings.summary_every,
+            summarizer_configured: self.profile.summarizer.is_some(),
+        }
+    }
+    pub fn save_draft(&self, body: &str) -> Result<PathBuf> {
+        let dir = self.store.cache_dir(&self.profile).join("drafts");
+        private_dir(&dir)?;
+        let path = dir.join(format!(
+            "{}.md",
+            MessageId::from_bytes(random_id(&mut entropy)?)
+        ));
+        atomic_write(&path, body.as_bytes())?;
+        Ok(path)
+    }
     pub async fn send(&mut self, to: &str, title: &str, options: SendOptions) -> Result<Message> {
         self.begin_operation().await?;
         let (channel, mentions) = self.destination(to).await?;
@@ -788,15 +814,10 @@ impl Client {
         history: &[DecodedMessage],
     ) -> Result<Message> {
         self.ensure_safe_epoch(channel).await?;
-        let since_summary = history
-            .iter()
-            .rposition(|message| message.content.summary.is_some())
-            .map_or(history.len(), |index| history.len() - index - 1)
-            .saturating_add(1);
-        let summary_every = self.settings.summary_every;
-        let summary_required = self.settings.summary_mode == SummaryMode::Required
-            && self.profile.kind == DeviceKind::Cli
-            && u64::try_from(since_summary).unwrap_or(u64::MAX) >= u64::from(summary_every);
+        let preflight = self.next_reply(history);
+        let since_summary = preflight.messages_since_summary;
+        let summary_every = preflight.threshold;
+        let summary_required = preflight.required;
         if options.summary.is_none()
             && (summary_required || self.profile.summarizer.is_some())
             && history.iter().any(|m| m.verification_error.is_some())
@@ -815,7 +836,7 @@ impl Client {
                 ));
                 options.summary = Some(run_summarizer(command, &input).await?);
             } else if summary_required {
-                return Err(user(format!(
+                return Err(Error::SummaryRequired(format!(
                     "--summary is required now: {since_summary} messages since the last summary (including this message; threshold {summary_every}) and summary_mode=required; summarize the whole thread or configure a summarizer in profile.toml"
                 )));
             }
@@ -1026,6 +1047,15 @@ impl Client {
                     return Err(user("read cursor crossed person boundary"));
                 }
                 self.cache.db.execute("INSERT INTO cursors VALUES(?,?) ON CONFLICT(thread) DO UPDATE SET seq=excluded.seq", params![cursor.thread_id.to_string(), cursor.last_read_seq])?;
+            }
+            for activity in page.activities {
+                if !decoded.iter().rev().take(count).any(|m| {
+                    m.message.envelope.thread_id.unwrap_or(m.message.id) == activity.thread_id
+                }) {
+                    return Err(user("thread activity crossed page boundary"));
+                }
+                self.cache
+                    .set(&format!("discovery/{}", activity.thread_id), &activity)?;
             }
             // A page contains authoritative current reactions for each returned message, including empty lists.
             for message in decoded.iter().rev().take(count) {
@@ -1269,8 +1299,9 @@ impl Client {
                         })
                         .collect();
                     let latest = sequences.iter().next_back().copied().unwrap_or(0);
-                    let (text, foreign) = self.wait_thread(entry, &sequences).await?;
-                    output.push_str(&text);
+                    let (view, warnings, foreign) = self.wait_thread(entry, &sequences).await?;
+                    output.push_str(&view.text_unwrapped());
+                    output.push_str(&warnings);
                     foreign_content |= foreign;
                     read.push((entry.id, latest));
                 }
@@ -1300,7 +1331,7 @@ impl Client {
         &mut self,
         entry: &InboxEntry,
         sequences: &BTreeSet<Seq>,
-    ) -> Result<(String, bool)> {
+    ) -> Result<(ThreadView, String, bool)> {
         let latest = sequences.iter().next_back().copied().unwrap_or(0);
         let mut warnings = String::new();
         for sequence in sequences {
@@ -1334,6 +1365,7 @@ impl Client {
             .filter(|m| m.message.id == entry.id)
             .map(|m| self.addressed_to(&m.message))
             .unwrap_or_else(|| entry.to.clone());
+        let next_reply = self.next_reply(&history);
         let mut view = compose_thread(
             entry.id,
             history,
@@ -1344,6 +1376,7 @@ impl Client {
             &self.names(),
             to,
         )?;
+        view.next_reply = next_reply;
         let foreign_content = view.has_foreign_content();
         let hidden_messages = view
             .messages
@@ -1357,9 +1390,17 @@ impl Client {
             view.summary = None;
             view.summary_perspective = None;
         }
+        for message in &view.messages {
+            if !sequences.contains(&message.message.seq) && !message.reactions.is_empty() {
+                let text = format_reactions(&message.reactions, &view.names);
+                if !text.is_empty() {
+                    view.reaction_context
+                        .push(format!("{}: {text}", message.reference()));
+                }
+            }
+        }
         view.messages
             .retain(|message| sequences.contains(&message.message.seq));
-        view.reactions = self.thread_reactions(entry.id)?;
         view.newer_messages = view
             .messages
             .iter()
@@ -1374,10 +1415,7 @@ impl Client {
                 message.attachments.push(self.download(attachment).await?);
             }
         }
-        Ok((
-            format!("{}{warnings}", view.text_unwrapped()),
-            foreign_content,
-        ))
+        Ok((view, warnings, foreign_content))
     }
     pub async fn read(&mut self, thread: MessageId, options: ReadOptions) -> Result<ThreadView> {
         self.begin_operation().await?;
@@ -1387,13 +1425,16 @@ impl Client {
             .first()
             .map(|m| self.addressed_to(&m.message))
             .unwrap_or_default();
+        let next_reply = self.next_reply(&messages);
         let mut view = compose_thread(thread, messages, options, &self.names(), to)?;
+        view.next_reply = next_reply;
         for message in &mut view.messages {
             for attachment in &message.content.attachments {
                 message.attachments.push(self.download(attachment).await?);
             }
         }
         self.mark_read(thread, latest).await?;
+        self.advance_wait(&format!("read/{}/{thread}", self.handle), latest)?;
         Ok(view)
     }
     async fn mark_read(&mut self, thread: MessageId, latest: Seq) -> Result<()> {
@@ -1548,6 +1589,9 @@ impl Client {
                                 || mention.handle.as_ref().is_none_or(|h| h == &self.handle))
                     })
                 });
+            let activity = self
+                .cache
+                .get::<ThreadActivity>(&format!("discovery/{id}"))?;
             result.push(InboxEntry {
                 id,
                 channel: self.channel_name(root.message.envelope.channel_id),
@@ -1577,6 +1621,27 @@ impl Client {
                 reactions: thread.iter().flat_map(|m| m.reactions.clone()).collect(),
                 latest_message: latest.message.id,
                 latest_seq: latest.message.seq,
+                channel_id: root.message.envelope.channel_id,
+                participants: thread
+                    .iter()
+                    .map(|m| {
+                        format!(
+                            "{}/{}",
+                            self.person_name(m.message.author_person),
+                            m.message.envelope.handle
+                        )
+                    })
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect(),
+                message_count: thread.len(),
+                unread_count: thread.iter().filter(|m| m.message.seq > cursor).count(),
+                last_activity: activity
+                    .as_ref()
+                    .map_or(latest.message.created_at, |a| a.last_activity),
+                last_activity_seq: activity
+                    .as_ref()
+                    .map_or(latest.message.seq, |a| a.last_activity_seq),
             });
         }
         result.sort_by_key(|e| {
@@ -1762,6 +1827,53 @@ impl Client {
         let (output, read) = self.format_wait_entries(&batch.events).await?;
         for (thread, latest) in read {
             self.mark_read(thread, latest).await?;
+        }
+        self.advance_wait(&batch.cursor, batch.next_after)?;
+        Ok(output)
+    }
+    /// JSON uses the same verified views, downloads and commit boundary as text delivery.
+    pub async fn wait_json(&mut self, seconds: u16) -> Result<serde_json::Value> {
+        self.begin_operation().await?;
+        let batch = self.wait_batch(seconds).await?;
+        let mut events = Vec::new();
+        let mut read = Vec::new();
+        let mut seen = BTreeSet::new();
+        for event in &batch.events {
+            let value = match event {
+                WaitEntry::Message(entry) => {
+                    if !seen.insert(entry.id) {
+                        continue;
+                    }
+                    let sequences = batch
+                        .events
+                        .iter()
+                        .filter_map(|e| match e {
+                            WaitEntry::Message(e) if e.id == entry.id => Some(e.latest_seq),
+                            _ => None,
+                        })
+                        .collect::<BTreeSet<_>>();
+                    let (view, warnings, _) = self.wait_thread(entry, &sequences).await?;
+                    read.push((entry.id, sequences.last().copied().unwrap_or(0)));
+                    serde_json::json!({"type": "thread", "thread": view.json(), "warnings": warnings})
+                }
+                WaitEntry::Reaction(notice) => {
+                    serde_json::json!({"type": "reaction", "trusted": false, "author": notice.author, "kind": reaction_notice_kind(&notice.reaction), "reference": notice.reference.to_string(), "message_id": notice.reference.id, "thread_id": notice.reference.thread, "title": notice.title, "reaction": notice.reaction})
+                }
+                WaitEntry::Settings(change) => {
+                    serde_json::json!({"type": "settings", "change": change})
+                }
+                WaitEntry::Revocation(revocation) => {
+                    serde_json::json!({"type": "revocation", "revocation": revocation})
+                }
+                WaitEntry::VerificationFailure { seq, description } => {
+                    serde_json::json!({"type": "verification_failure", "seq": seq, "description": description})
+                }
+            };
+            events.push(value);
+        }
+        let output = serde_json::json!({"schema_version": 1, "command": "wait", "events": events});
+        for (thread, seq) in read {
+            self.mark_read(thread, seq).await?;
         }
         self.advance_wait(&batch.cursor, batch.next_after)?;
         Ok(output)
@@ -1954,6 +2066,14 @@ impl Client {
                     &message.signature,
                 )?;
                 self.cache.message(&message, &content)?;
+                let thread = message.envelope.thread_id.unwrap_or(message.id);
+                let already_read = self
+                    .cache
+                    .get::<Seq>(&format!("read/{}/{thread}", self.handle))?
+                    .unwrap_or(0);
+                if message.seq <= already_read {
+                    return Ok(None);
+                }
                 if message.author_person == self.profile.person_id
                     && !message.envelope.mentions.iter().any(|mention| {
                         mention.person_id == self.profile.person_id
@@ -1994,6 +2114,12 @@ impl Client {
                     reactions: self.thread_reactions(root.id)?,
                     latest_message: message.id,
                     latest_seq: message.seq,
+                    channel_id: message.envelope.channel_id,
+                    participants: vec![],
+                    message_count: 0,
+                    unread_count: 1,
+                    last_activity: message.created_at,
+                    last_activity_seq: message.seq,
                 })
             }
             EventData::Reaction(reaction) => {
@@ -2020,21 +2146,10 @@ impl Client {
                 }
                 self.directory.verify_message(&target)?;
                 let thread = target.envelope.thread_id.unwrap_or(target.id);
-                let history = self.load_thread(thread).await?;
-                let participating = history.iter().any(|message| {
-                    message.verification_error.is_none()
-                        && message.message.seq < event.seq
-                        && (message.message.author_person == self.profile.person_id
-                            || message
-                                .message
-                                .envelope
-                                .mentions
-                                .iter()
-                                .any(|mention| mention.person_id == self.profile.person_id))
-                });
-                if !participating {
+                if target.author_person != self.profile.person_id {
                     return Ok(None);
                 }
+                let history = self.load_thread(thread).await?;
                 let message = history
                     .iter()
                     .find(|message| {
@@ -2430,58 +2545,108 @@ impl Client {
         Ok(result)
     }
 
-    pub async fn who(&mut self) -> Result<String> {
+    pub async fn who_view(&mut self) -> Result<DirectoryView> {
         self.begin_operation().await?;
-        let mut output = String::new();
-        for (person, name) in self.names() {
-            output.push_str(&format!("@{name} ({person})\n"));
-            for device in self
-                .devices
-                .iter()
-                .filter(|d| d.cert.data.person_id == person)
-            {
-                output.push_str(&format!(
-                    "  {} · {:?} · last seen {}{}\n",
-                    device.cert.data.device_id,
-                    device.cert.data.kind,
-                    device
-                        .last_seen_at
-                        .map(format_last_seen)
-                        .unwrap_or_else(|| "never".into()),
-                    if device.revoked_at.is_some() {
-                        " · revoked"
-                    } else {
-                        ""
-                    }
-                ));
-            }
-        }
-        for channel in &self.channels {
-            if matches!(channel.channel.kind, ChannelKind::Group | ChannelKind::All) {
-                output.push_str(&format!(
-                    "{}: {}\n",
-                    self.channel_name(channel.channel.id),
-                    channel
-                        .channel
-                        .members
-                        .iter()
-                        .map(|p| format!("@{}", self.person_name(*p)))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ));
-            }
-        }
+        let people = self
+            .names()
+            .into_iter()
+            .map(|(id, name)| PersonView {
+                id,
+                name,
+                devices: self
+                    .devices
+                    .iter()
+                    .filter(|d| d.cert.data.person_id == id)
+                    .map(|d| DeviceView {
+                        id: d.cert.data.device_id,
+                        kind: d.cert.data.kind,
+                        last_seen_at: d.last_seen_at,
+                        last_seen: d
+                            .last_seen_at
+                            .map(format_last_seen)
+                            .unwrap_or_else(|| "never".into()),
+                        revoked: d.revoked_at.is_some(),
+                    })
+                    .collect(),
+            })
+            .collect();
         let mut stmt = self.cache.db.prepare("SELECT DISTINCT json_extract(raw,'$.author_person'),json_extract(raw,'$.envelope.handle') FROM messages WHERE created>? ORDER BY 1,2")?;
+        let mut handles = Vec::new();
         for row in stmt.query_map([now().saturating_sub(7 * 86400)], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
         })? {
             let (person, handle) = row?;
-            output.push_str(&format!(
-                "recent handle: {}/{handle}\n",
-                self.person_name(person.parse()?)
-            ));
+            handles.push(format!("{}/{handle}", self.person_name(person.parse()?)));
         }
-        Ok(output)
+        Ok(DirectoryView { people, handles })
+    }
+    pub async fn who(&mut self) -> Result<String> {
+        Ok(self.who_view().await?.text())
+    }
+    pub async fn discover_threads(&mut self, destination: Option<&str>) -> Result<Vec<InboxEntry>> {
+        let mut threads = self.threads().await?;
+        let channel_id = if let Some(to) = destination {
+            if let Some(name) = to.strip_prefix('#') {
+                Some(
+                    self.channels
+                        .iter()
+                        .find(|c| {
+                            matches!(c.channel.kind, ChannelKind::All | ChannelKind::Group)
+                                && c.meta.name == name
+                        })
+                        .ok_or_else(|| user("channel not found"))?
+                        .channel
+                        .id,
+                )
+            } else if let Some(person) = to.strip_prefix('@') {
+                let person = self.person(person)?;
+                let kind = if person == self.profile.person_id {
+                    ChannelKind::SelfChannel
+                } else {
+                    ChannelKind::Dm
+                };
+                self.channels
+                    .iter()
+                    .find(|c| c.channel.kind == kind && c.channel.members.contains(&person))
+                    .map(|c| c.channel.id)
+            } else {
+                return Err(user("threads expects #channel or @person"));
+            }
+        } else {
+            None
+        };
+        if destination.is_some() {
+            threads.retain(|t| Some(t.channel_id) == channel_id);
+        }
+        threads.sort_by_key(|t| std::cmp::Reverse((t.last_activity_seq, t.latest_seq)));
+        Ok(threads)
+    }
+    pub async fn channel_views(&mut self) -> Result<Vec<ChannelView>> {
+        let threads = self.threads().await?;
+        Ok(self
+            .channels
+            .iter()
+            .map(|c| ChannelView {
+                id: c.channel.id,
+                name: self.channel_name(c.channel.id),
+                kind: c.channel.kind,
+                members: c
+                    .channel
+                    .members
+                    .iter()
+                    .map(|p| format!("@{}", self.person_name(*p)))
+                    .collect(),
+                unread_threads: threads
+                    .iter()
+                    .filter(|t| t.channel_id == c.channel.id && t.unread)
+                    .count(),
+                unread_messages: threads
+                    .iter()
+                    .filter(|t| t.channel_id == c.channel.id)
+                    .map(|t| t.unread_count)
+                    .sum(),
+            })
+            .collect())
     }
 }
 

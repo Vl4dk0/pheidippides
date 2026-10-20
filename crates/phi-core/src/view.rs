@@ -40,6 +40,8 @@ pub struct ThreadView {
     pub summary_number: Option<usize>,
     pub summary_perspective: Option<MessagePerspective>,
     pub newer_messages: usize,
+    pub next_reply: SummaryPreflight,
+    pub reaction_context: Vec<String>,
     pub messages: Vec<DecodedMessage>,
     pub reactions: Vec<Reaction>,
     pub names: BTreeMap<PersonId, String>,
@@ -59,6 +61,12 @@ pub struct InboxEntry {
     pub reactions: Vec<Reaction>,
     pub latest_message: MessageId,
     pub latest_seq: Seq,
+    pub channel_id: ChannelId,
+    pub participants: Vec<String>,
+    pub message_count: usize,
+    pub unread_count: usize,
+    pub last_activity: u64,
+    pub last_activity_seq: Seq,
 }
 #[derive(Clone, Debug)]
 pub enum WaitEntry {
@@ -78,13 +86,7 @@ pub struct ReactionNotice {
 }
 impl ReactionNotice {
     pub fn text(&self) -> String {
-        let kind = match (self.reaction.data.kind, self.reaction.data.remove) {
-            (ReactionKind::Claim, true) => "unclaim",
-            (ReactionKind::Claim, false) => "claim",
-            (ReactionKind::Ack, _) => "ack",
-            (ReactionKind::Up, _) => "up",
-            (ReactionKind::Down, _) => "down",
-        };
+        let kind = reaction_notice_kind(&self.reaction);
         let title = self.title.split_whitespace().collect::<Vec<_>>().join(" ");
         format!("{} {kind} {} ({title})\n", self.author, self.reference)
     }
@@ -162,6 +164,8 @@ pub(crate) fn compose_thread(
         summary_number,
         summary_perspective,
         newer_messages,
+        next_reply: SummaryPreflight::default(),
+        reaction_context: Vec::new(),
         messages,
         reactions,
         names: names.clone(),
@@ -300,6 +304,7 @@ impl ThreadView {
             self.to,
             self.participants.join(", ")
         );
+        output.push_str(&self.next_reply.text());
         if let Some(summary) = &self.summary {
             let status = if self.newer_messages == 0 {
                 "up to date".into()
@@ -315,6 +320,9 @@ impl ThreadView {
                 self.summary_number.unwrap_or(1)
             ));
             output.push_str(&format!("{summary}\n"));
+        }
+        for context in &self.reaction_context {
+            output.push_str(&format!("reaction context · {context}\n"));
         }
         for message in &self.messages {
             output.push_str(&format_addressed_message(
@@ -474,5 +482,180 @@ pub fn format_last_seen(seconds: u64) -> String {
         60..3600 => format!("{} min ago", age / 60),
         3600..86400 => format!("{} h ago", age / 3600),
         _ => format!("{} d ago", age / 86400),
+    }
+}
+
+/// Preflight includes the pending reply so callers can prepare a summary before composing it.
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub struct SummaryPreflight {
+    pub required: bool,
+    pub messages_since_summary: usize,
+    pub threshold: u32,
+    pub summarizer_configured: bool,
+}
+impl SummaryPreflight {
+    pub fn text(&self) -> String {
+        format!(
+            "next reply: --summary {} ({} since last, including next reply; threshold {}){}\n",
+            if self.required {
+                "required"
+            } else {
+                "optional"
+            },
+            self.messages_since_summary,
+            self.threshold,
+            if self.summarizer_configured {
+                "; local summarizer configured"
+            } else {
+                ""
+            }
+        )
+    }
+}
+
+pub(crate) fn reaction_notice_kind(reaction: &Reaction) -> &'static str {
+    match (reaction.data.kind, reaction.data.remove) {
+        (ReactionKind::Claim, true) => "unclaim",
+        (ReactionKind::Claim, false) => "claim",
+        (ReactionKind::Ack, _) => "ack",
+        (ReactionKind::Up, _) => "up",
+        (ReactionKind::Down, _) => "down",
+    }
+}
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct DeviceView {
+    pub id: DeviceId,
+    pub kind: DeviceKind,
+    pub last_seen_at: Option<u64>,
+    pub last_seen: String,
+    pub revoked: bool,
+}
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct PersonView {
+    pub id: PersonId,
+    pub name: String,
+    pub devices: Vec<DeviceView>,
+}
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct DirectoryView {
+    pub people: Vec<PersonView>,
+    pub handles: Vec<String>,
+}
+impl DirectoryView {
+    pub fn text(&self) -> String {
+        let mut out = String::new();
+        for person in &self.people {
+            out.push_str(&format!("@{} ({})\n", person.name, person.id));
+            for d in &person.devices {
+                out.push_str(&format!(
+                    "  {} · {:?} · last seen {}{}\n",
+                    d.id,
+                    d.kind,
+                    d.last_seen,
+                    if d.revoked { " · revoked" } else { "" }
+                ));
+            }
+        }
+        for handle in &self.handles {
+            out.push_str(&format!("recent handle: {handle}\n"));
+        }
+        out
+    }
+}
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct ChannelView {
+    pub id: ChannelId,
+    pub name: String,
+    pub kind: ChannelKind,
+    pub members: Vec<String>,
+    pub unread_threads: usize,
+    pub unread_messages: usize,
+}
+impl ChannelView {
+    pub fn text(&self) -> String {
+        let kind = match self.kind {
+            ChannelKind::All => "all",
+            ChannelKind::Group => "group",
+            ChannelKind::Dm => "dm",
+            ChannelKind::SelfChannel => "self",
+        };
+        format!(
+            "{} · {} · {kind} · members: {} · {} unread threads, {} unread messages\n",
+            self.id,
+            self.name,
+            self.members.join(", "),
+            self.unread_threads,
+            self.unread_messages
+        )
+    }
+}
+impl ThreadView {
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({"id": self.id, "to": self.to, "title": self.title,
+            "trusted": !self.has_foreign_content(), "title_trusted": self.title_perspective != MessagePerspective::Other,
+            "participants": self.participants, "summary": self.summary,
+            "summary_trusted": self.summary_perspective.map(|p| p != MessagePerspective::Other),
+            "summary_covers_seq": self.summary_covers_seq, "summary_number": self.summary_number,
+            "newer_messages": self.newer_messages, "next_reply": self.next_reply,
+            "messages": self.messages.iter().map(|m| m.json(&self.names)).collect::<Vec<_>>(),
+            "reactions": self.reactions, "reaction_context": format_reactions(&self.reactions, &self.names), "omitted_message_reactions":self.reaction_context})
+    }
+}
+impl DecodedMessage {
+    pub fn json(&self, names: &BTreeMap<PersonId, String>) -> serde_json::Value {
+        let m = &self.message;
+        serde_json::json!({"id": m.id, "thread_id": m.envelope.thread_id.unwrap_or(m.id),
+            "seq": m.seq, "number": self.number, "reference": self.reference().to_string(),
+            "author_person": m.author_person, "author_device": m.author_device,
+            "author": names.get(&m.author_person).cloned().unwrap_or_else(|| m.author_person.to_string()),
+            "handle": m.envelope.handle, "author_kind": self.author_kind,
+            "perspective": match self.perspective { MessagePerspective::You => "you", MessagePerspective::YourOtherSession => "your_other_session", MessagePerspective::Other => "other" },
+            "trusted": self.perspective != MessagePerspective::Other && self.verification_error.is_none(),
+            "created_at": m.created_at, "created": timestamp(m.created_at),
+            "body": self.content.body, "attachments": self.content.attachments.iter().zip(&self.attachments).map(|(a,p)| serde_json::json!({"path":p,"name":a.name,"mime":a.mime,"size":a.size})).collect::<Vec<_>>(),
+            "reactions": self.reactions, "reaction_context": format_reactions(&self.reactions,names),
+            "verification_error": self.verification_error})
+    }
+}
+impl InboxEntry {
+    pub fn json(&self, names: &BTreeMap<PersonId, String>) -> serde_json::Value {
+        serde_json::json!({"id":self.id, "channel_id":self.channel_id, "channel":self.channel, "to":self.to,
+            "title":self.title, "from":self.from,"created_at":self.created_at,"summary":self.summary,"trusted":false,
+            "mentioned":self.mentioned,"unread":self.unread,"own_agent_activity":self.own_agent_activity,
+            "latest_message":self.latest_message,"latest_seq":self.latest_seq,
+            "participants":self.participants,"message_count":self.message_count,"unread_count":self.unread_count,
+            "last_activity":self.last_activity,"last_activity_relative":format_last_seen(self.last_activity),
+            "reactions":self.reactions,"reaction_context":format_reactions(&self.reactions,names),
+            "claims":reaction_summary(&self.reactions,names).claims})
+    }
+    pub fn discovery_text(&self, names: &BTreeMap<PersonId, String>) -> String {
+        wrap_untrusted(
+            format!(
+                "{} · {} · {} · participants: {} · {} messages · {} unread · {} · {}\n",
+                self.id,
+                self.channel,
+                self.title.split_whitespace().collect::<Vec<_>>().join(" "),
+                self.participants.join(", "),
+                self.message_count,
+                self.unread_count,
+                {
+                    let claims = reaction_summary(&self.reactions, names).claims;
+                    if claims.is_empty() {
+                        "unclaimed".into()
+                    } else {
+                        format!(
+                            "claimed by {}",
+                            claims
+                                .iter()
+                                .map(|c| format!("{}/{}", c.author, c.handle))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    }
+                },
+                format_last_seen(self.last_activity)
+            ),
+            true,
+        )
     }
 }

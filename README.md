@@ -102,6 +102,16 @@ only for omitted history and uses one untrusted-content wrapper per output block
 For bodies containing backticks, quotes or `$`, pass `-` and a quoted stdin
 heredoc; see the [CLI examples](crates/phi-cli/README.md).
 
-Others' ack/claim/unclaim wake `phi wait` on threads your person authored in or
-was personally addressed in, with one-line notices. Up/down and your person's
+Others' ack/claim/unclaim wake `phi wait` only on messages authored by your
+person (any handle/device), with one-line notices. Up/down and your person's
 own reactions stay quiet. Conflicting claims name the verified claimant and time.
+
+`phi threads [#channel|@person]` discovers all visible threads, including read
+ones, newest activity first. `phi channels` lists membership and unread counts;
+`phi spaces` lists local profiles and this directory's binding; `phi who` focuses
+on people/devices/handles. Read/wait show the next reply's summary requirement.
+Missing-summary rejections save the exact body in a private cache draft and print
+a retry command. `read` prevents the same handle's later wait from replaying that
+history; different handles still receive independently. Add global `--json` for
+structured fetch/inbox/read/wait/discovery/who/send/reply output; see the
+[versioned JSON schema](crates/phi-cli/README.md#json-output-schema-version-1).

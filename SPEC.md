@@ -338,6 +338,14 @@ to solve it").
 - Summaries may contain bounded multiline text (up to the message-content byte
   bound); local summarizer output may be multiline. Only compact inbox previews
   normalize whitespace (changed in prototype review).
+- Read/wait show whether the next reply requires `--summary`, the count including
+  that reply and the threshold. Preflight is advisory: concurrent sends may change
+  the count. A CLI send/reply rejected for missing summary saves its exact body in
+  a private draft under that profile's cache directory and reports the path plus
+  a shell-quoted retry command using stdin, preserving profile, handle, destination,
+  title and attachments. Drafts remain until removed by the user; missing-summary
+  failures at server commit are covered too, via typed optional `summary_required`
+  details on the existing invalid-error response (changed in prototype review).
 - Summary truthfulness is not verified (decided: not a concern).
 
 ### 6.5 What agents read (`phi read <thread>`)
@@ -400,13 +408,16 @@ structured reaction counts/all claimants; frontends render them
   two `wait` calls are never lost. Sessions of a notified handle both see the
   event; `claim` resolves who acts. Skill tells agents: after `wait` returns, handle
   it, then run `wait` again if you still want to listen.
-  `ack`, `claim` and `unclaim` reactions by **other people** wake wait when the
-  waiting person participates in the thread: they authored a message or were
-  personally addressed by a mention in any message, through any of their handles,
-  before the reaction. Channel membership, reading or reacting alone do not count.
+  `ack`, `claim` and `unclaim` reactions by **other people** wake wait only
+  when the reacted-to message was authored by the waiting **person**, through
+  any handle or device. Other reactions stay quiet and appear as context on the
+  next message or in `read` (changed in prototype review).
   Each reaction prints exactly one line: `<who> <kind> <thread>#<n> (<thread title>)`;
   collapse title whitespace to keep one line, do not reprint the thread or advance
-  its read cursor. Up/down, ack removal, unrelated-thread reactions and all
+  its read cursor. When wait omits earlier messages, include compact reaction
+  context labeled with each exact message reference, without reprinting those
+  bodies (changed in prototype review). Up/down, ack removal, reactions to
+  others' messages and all
   own-person reactions stay quiet; ignored events are still verified/cached while
   wait continues to its original deadline (changed in prototype review).
   Every message event shows its
@@ -422,7 +433,11 @@ structured reaction counts/all claimants; frontends render them
   downloads succeed, wait advances the shared per-person read cursor through the
   last displayed message in each thread, just like `read`. Later messages fetched
   only for context are not marked read; failed reads leave the wait batch pending
-  for retry. GUI background event polling does not read messages
+  for retry. An explicit `read` also records a local per-handle/thread read
+  boundary: later wait calls by that same handle skip already-read message events,
+  while other handles retain independent event delivery. Concurrent waits still
+  each see events; reactions/settings are not skipped by this message boundary
+  (changed in prototype review). GUI background event polling does not read messages
   (changed in prototype review).
 - **Start hook (optional)**: ship ready snippets for Claude Code
   (`SessionStart` → `phi fetch`) and Codex (if hooks available) in `skill/hooks/`.
@@ -498,7 +513,12 @@ Profile resolution (no flags needed in normal use):
 3. Else list each available space name/ID and an exact `phi init <id>` command;
    an explicit `--space <name-or-id>` also selects it (changed in prototype review).
 
-Global options: `--as <handle>` (default: device name), `--space <name>`.
+Global options: `--as <handle>` (default: device name), `--space <name>`,
+`--json` for fetch, inbox, read, wait, threads, channels, spaces, who and send/reply
+receipts. Text is the default. JSON emits one schema-versioned document per
+command, including an empty `events` array for wait timeouts; foreign content is
+marked `trusted: false` instead of UNTRUSTED wrappers. The stable schema is
+specified in `crates/phi-cli/README.md` (changed in prototype review).
 
 Plain `phi` with no arguments opens the installed desktop app: macOS uses
 `open -a Pheidippides`, with a GUI binary on PATH as fallback; other platforms
@@ -513,10 +533,13 @@ never GUI execution (changed in prototype review).
 | `phi join <link> --name <name>` | redeem invite or enroll code; sets up profile; asks display name via `--name`. |
 | `phi device add` | create an enrollment code for any kind of device; the redeeming client declares its kind (changed in prototype review). `phi device list`, `phi device revoke <id>`. |
 | `phi init [<space>]` | write `.phi` binding in cwd. Without an argument, use the sole local profile; otherwise list available names/IDs with exact `phi init <id>` commands (changed in prototype review). |
-| `phi who` | persons (display names), their devices (kind, human-readable last seen such as `5 min ago` or a UTC date), groups + members, handles seen recently. `device list` uses the same last-seen format (changed in prototype review). |
+| `phi who` | persons (display names), devices (kind, last seen, revocation), recent handles. Channel membership is shown by `channels`; `device list` uses the same last-seen format (changed in prototype review). |
+| `phi threads [#channel\|@person]` | Every visible thread, read or unread, newest activity first: stable id, channel, title, participants, message/unread counts, claims and relative activity. `@person` selects the DM/self channel. Reaction activity, including removals, affects ordering (changed in prototype review). |
+| `phi channels` | Current-space channels with kind, members, unread thread/message counts (changed in prototype review). |
+| `phi spaces` | All local profile names, IDs and servers; mark the space this directory is bound to. Works without selecting a profile (changed in prototype review). |
 | `phi fetch` | counts only (6.6). |
 | `phi inbox` | unread/mentioned threads (6.6). |
-| `phi read <thread> [--all\|--last N]` | 6.5; advances read cursor. |
+| `phi read <thread> [--all\|--last N]` | 6.5; advances read cursor and this handle's local replay boundary (changed in prototype review). |
 | `phi send <to> <title> [body\|-] [--file F]… [--summary S]` | new thread. `to` = `@person`, `@person/handle`, `#group`, `#all`. Body from arg or stdin (`-`). |
 | `phi reply <thread> [body\|-] [--file F]… [--summary S]` | reply in thread. |
 | `phi react <msg> up\|down\|ack\|claim\|unclaim` | 6.2. |
