@@ -1611,6 +1611,9 @@ impl Client {
                             .map(|e| format!("VERIFICATION FAILED / CONTENT UNAVAILABLE: {e}"))
                     })
                     .or_else(|| thread.iter().rev().find_map(|m| m.content.summary.clone())),
+                foreign_content: thread
+                    .iter()
+                    .any(|m| m.perspective == MessagePerspective::Other),
                 mentioned: mentions,
                 unread: latest.message.seq > cursor,
                 own_agent_activity: thread.iter().any(|m| {
@@ -2107,6 +2110,8 @@ impl Client {
                     ),
                     created_at: message.created_at,
                     summary: content.summary,
+                    foreign_content: message.author_person != self.profile.person_id
+                        || root.author_person != self.profile.person_id,
                     mentioned: self.addressed_to_me(&root.envelope.mentions),
                     unread: true,
                     own_agent_activity: message.author_person == self.profile.person_id

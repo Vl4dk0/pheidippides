@@ -1,26 +1,26 @@
 # How many tokens does phi cost?
 
-**Measured six-message review: 3,627 tokens for agent A and 3,444 for B**
+**Measured six-message review: 3,592 tokens for agent A and 3,400 for B**
 with the default `summary_every=3` (`o200k_base`, input + output). Of those,
-**2,743 / 2,560 are extra versus manually relaying the same bodies**.
-Loading the skill and AGENTS snippet adds **1,354 input tokens per agent**.
+**2,708 / 2,516 are extra versus manually relaying the same bodies**.
+Loading the skill and AGENTS snippet adds **1,370 input tokens per agent**.
 An idle session-start hook prints **0 tokens**.
 
 These are text measurements, not an API invoice. The requested workflow reads
 each incoming message twice: `wait`, then `read --last 1`. `wait` already includes
-the full new message. Subtracting those redundant reads gives **2,219 / 2,182
+the full new message. Subtracting those redundant reads gives **2,210 / 2,167
 tokens per agent** at the default interval, before skill loading.
 
 ## Measured items
 
-Run on **2026-10-20**, macOS, binaries built from `6e9482d26138`.
+Run on **2026-10-20**, macOS, binaries built from `f64471d607c4`.
 All paired counts below are **input / output**: exact CLI stdout (plus stderr,
 empty during the exchange) / agent-written shell command, body and summary.
 Per-message figures are averages across all six messages, rounded to one decimal.
 
 | One-off or session item | o200k_base | cl100k_base |
 | --- | ---: | ---: |
-| Load `skill/SKILL.md` (input only) | 1,279 | 1,280 |
+| Load `skill/SKILL.md` (input only) | 1,295 | 1,296 |
 | Load `skill/AGENTS-snippet.md` (input only) | 75 | 75 |
 | Session-start `phi --as main fetch`, empty | 0 / 6 | 0 / 6 |
 | Session-start `phi --as main fetch`, one unread mention | 32 / 6 | 32 / 6 |
@@ -36,14 +36,14 @@ phi · atlas: 1 unread threads (@alice 1) · 1 mention(s) of you (@bob/main) · 
 
 | Per-message/action average | summary_every | o200k_base, in / out | cl100k_base, in / out |
 | --- | ---: | ---: | ---: |
-| Send, including applicable summary and receipt | 3 | 55.2 / 203.3 | 57.8 / 204.7 |
-| Send, including summary and receipt | 1 | 53.3 / 230.7 | 58.0 / 233.2 |
-| Receive via `wait 1` | 3 | 439.7 / 8.0 | 446.0 / 8.0 |
-| Receive via `wait 1` | 1 | 432.5 / 8.0 | 443.0 / 8.0 |
-| Additional `read --last 1` after wait | 3 | 419.0 / 26.0 | 423.0 / 27.0 |
-| Additional `read --last 1` after wait | 1 | 380.0 / 25.0 | 385.7 / 27.0 |
-| `claim` or `ack`, including receipt | 3 | 3.0 / 27.0 | 3.0 / 28.0 |
-| `claim` or `ack`, including receipt | 1 | 3.0 / 26.0 | 3.0 / 28.0 |
+| Send, including applicable summary and receipt | 3 | 57.7 / 204.2 | 58.5 / 204.7 |
+| Send, including summary and receipt | 1 | 53.8 / 230.7 | 54.5 / 231.5 |
+| Receive via `wait 1` | 3 | 431.7 / 8.0 | 434.7 / 8.0 |
+| Receive via `wait 1` | 1 | 420.7 / 8.0 | 423.8 / 8.0 |
+| Additional `read --last 1` after wait | 3 | 408.8 / 27.0 | 411.8 / 27.0 |
+| Additional `read --last 1` after wait | 1 | 368.2 / 25.0 | 371.2 / 25.0 |
+| `claim` or `ack`, including receipt | 3 | 3.0 / 28.0 | 3.0 / 28.0 |
+| `claim` or `ack`, including receipt | 1 | 3.0 / 25.0 | 3.0 / 25.0 |
 
 ## Whole thread versus human copy-paste
 
@@ -60,14 +60,14 @@ copy-paste time is unpriced. The baseline is identical for both summary settings
 | --- | --- | ---: | ---: |
 | Manual copy-paste | A | 459 / 425 = **884** | 459 / 428 = **887** |
 | Manual copy-paste | B | 425 / 459 = **884** | 428 / 459 = **887** |
-| phi, summary_every=3 | A | 2,819 / 808 = **3,627** | 2,855 / 818 = **3,673** |
-| phi, summary_every=3 | B | 2,708 / 736 = **3,444** | 2,750 / 744 = **3,494** |
-| phi extra over manual, interval 3 | A | 2,360 / 383 = **2,743** | 2,396 / 390 = **2,786** |
-| phi extra over manual, interval 3 | B | 2,283 / 277 = **2,560** | 2,322 / 285 = **2,607** |
-| phi, summary_every=1 | A | 2,555 / 860 = **3,415** | 2,615 / 879 = **3,494** |
-| phi, summary_every=1 | B | 2,684 / 838 = **3,522** | 2,749 / 854 = **3,603** |
-| phi extra over manual, interval 1 | A | 2,096 / 435 = **2,531** | 2,156 / 451 = **2,607** |
-| phi extra over manual, interval 1 | B | 2,259 / 379 = **2,638** | 2,321 / 395 = **2,716** |
+| phi, summary_every=3 | A | 2,776 / 816 = **3,592** | 2,795 / 818 = **3,613** |
+| phi, summary_every=3 | B | 2,657 / 743 = **3,400** | 2,679 / 744 = **3,423** |
+| phi extra over manual, interval 3 | A | 2,317 / 391 = **2,708** | 2,336 / 390 = **2,726** |
+| phi extra over manual, interval 3 | B | 2,232 / 284 = **2,516** | 2,251 / 285 = **2,536** |
+| phi, summary_every=1 | A | 2,490 / 857 = **3,347** | 2,507 / 860 = **3,367** |
+| phi, summary_every=1 | B | 2,610 / 837 = **3,447** | 2,634 / 839 = **3,473** |
+| phi extra over manual, interval 1 | A | 2,031 / 432 = **2,463** | 2,048 / 432 = **2,480** |
+| phi extra over manual, interval 1 | B | 2,185 / 378 = **2,563** | 2,206 / 380 = **2,586** |
 
 More summaries increase generated text here, but can reduce read output:
 `read --last 1` also includes messages newer than the latest summary. Consequently
@@ -92,9 +92,9 @@ Using `o200k_base` counts, **both agents combined**:
 
 | Model | Manual bodies | phi interval 3 | phi interval 1 | Extra over manual, 3 / 1 | Load skill + snippet on both agents |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| GPT-4.1 mini | $0.001768 | $0.004681 | $0.004812 | $0.002913 / $0.003044 | $0.001083 |
-| Gemini 2.5 Flash | $0.002475 | $0.005518 | $0.005817 | $0.003043 / $0.003342 | $0.000812 |
-| Claude Sonnet 4.6 | $0.015912 | $0.039741 | $0.041187 | $0.023829 / $0.025275 | $0.008124 |
+| GPT-4.1 mini | $0.001768 | $0.004668 | $0.004750 | $0.002900 / $0.002982 | $0.001096 |
+| Gemini 2.5 Flash | $0.002475 | $0.005527 | $0.005765 | $0.003052 / $0.003290 | $0.000822 |
+| Claude Sonnet 4.6 | $0.015912 | $0.039684 | $0.040710 | $0.023772 / $0.024798 | $0.008220 |
 
 Formula: `(input_tokens × input_price + output_tokens × output_price) / 1,000,000`.
 These charge each piece of text once. Real agent sessions repeatedly submit prior

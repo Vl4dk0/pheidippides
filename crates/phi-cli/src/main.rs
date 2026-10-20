@@ -397,9 +397,7 @@ async fn run(cli: Cli) -> Result<()> {
                             serde_json::json!({"threads":entries.iter().map(|e|e.json(&client.names())).collect::<Vec<_>>()}),
                         )?;
                     } else {
-                        for e in entries {
-                            print!("{}", e.discovery_text(&client.names()));
-                        }
+                        print!("{}", format_threads(&entries, &client.names()));
                     }
                 }
                 Command::Channels => {
@@ -423,9 +421,7 @@ async fn run(cli: Cli) -> Result<()> {
                             serde_json::json!({"threads":entries.iter().map(|e|e.json(&client.names())).collect::<Vec<_>>()}),
                         )?;
                     } else {
-                        for entry in entries {
-                            print!("{}", entry.text(&client.names()));
-                        }
+                        print!("{}", format_inbox(&entries, &client.names()));
                     }
                 }
                 Command::Read { thread, all, last } => {
@@ -564,18 +560,8 @@ async fn run(cli: Cli) -> Result<()> {
                     }
                 },
                 Command::Search { text } => {
-                    for message in client.search(&text).await? {
-                        println!(
-                            "thread {} · message {}",
-                            message
-                                .message
-                                .envelope
-                                .thread_id
-                                .unwrap_or(message.message.id),
-                            message.message.id
-                        );
-                        print!("{}", format_message(&message, &client.names()));
-                    }
+                    let messages = client.search(&text).await?;
+                    print!("{}", format_search(&messages, &client.names()));
                 }
                 _ => unreachable!("handled before profile resolution"),
             }

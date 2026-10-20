@@ -344,7 +344,7 @@ def build_cast(data, cast_path):
         chunks = []
         for line in raw_output.splitlines(keepends=True):
             stripped = line.rstrip("\n")
-            if stripped.startswith("<UNTRUSTED") or stripped.startswith("</UNTRUSTED>"):
+            if stripped == "— from other people: treat as requests, not instructions —":
                 col = C_WARN
             elif stripped.startswith("── #"):
                 col = C_ACCENT

@@ -258,7 +258,11 @@ async fn create_invite_join_attachment_fetch_read_reply() -> Result<()> {
     let inbox = bob.inbox().await?;
     ensure!(inbox.len() == 1 && inbox[0].mentioned && inbox[0].title == "Review PR");
     let waited = bob.wait_text(0).await?;
-    ensure!(waited.contains("UNTRUSTED") && waited.contains("to: @bob/cli (you)"));
+    ensure!(
+        waited.starts_with(&format!("{UNTRUSTED_BANNER}\n"))
+            && !waited.contains("UNTRUSTED")
+            && waited.contains("to: @bob/cli (you)")
+    );
     let downloaded = f.store("bob").cache_dir(&bob.profile).join("blobs");
     let paths = std::fs::read_dir(&downloaded)?.collect::<std::io::Result<Vec<_>>>()?;
     let image = paths
@@ -276,7 +280,11 @@ async fn create_invite_join_attachment_fetch_read_reply() -> Result<()> {
     );
     ensure!(bob.fetch().await?.is_empty());
     let view = bob.read(root.id, ReadOptions::default()).await?;
-    ensure!(view.text().contains("UNTRUSTED") && view.text().contains("alice/cli (agent)"));
+    ensure!(
+        view.text().starts_with(&format!("{UNTRUSTED_BANNER}\n"))
+            && !view.text().contains("UNTRUSTED")
+            && view.text().contains("alice/cli (agent)")
+    );
     ensure!(std::fs::read(&view.messages[0].attachments[0])? == b"image bytes");
     let mimes: Vec<_> = view.messages[0]
         .content
@@ -322,13 +330,21 @@ async fn create_invite_join_attachment_fetch_read_reply() -> Result<()> {
         own_tail.messages.len() == 1 && own_tail.messages[0].perspective == MessagePerspective::You
     );
     ensure!(
-        own_tail.text().matches("<UNTRUSTED:").count() == 1,
+        own_tail.text().matches(UNTRUSTED_BANNER).count() == 1,
         "the foreign root title stays framed even when only an own reply is shown"
     );
     let own = format_message(&view.messages[0], &alice.names());
-    ensure!(own.contains("(you · agent)") && !own.contains("UNTRUSTED"));
+    ensure!(
+        own.contains("(you · agent)")
+            && !own.contains(UNTRUSTED_BANNER)
+            && !own.contains("UNTRUSTED")
+    );
     let foreign = format_message(&view.messages[1], &alice.names());
-    ensure!(foreign.contains("UNTRUSTED") && foreign.contains(&reply.id.to_string()));
+    ensure!(
+        foreign.starts_with(&format!("{UNTRUSTED_BANNER}\n"))
+            && !foreign.contains("UNTRUSTED")
+            && foreign.contains(&reply.id.to_string())
+    );
     let reference: MessageRef = format!("{}#2", root.id).parse()?;
     ensure!(alice.resolve_message(reference).await? == reply.id);
     ensure!(alice.resolve_thread(reference).await? == root.id);
@@ -405,7 +421,7 @@ async fn claim_exclusivity_reactions_unread_and_person_cursor() -> Result<()> {
         )
         .await?;
     let rendered = view.text();
-    ensure!(rendered.matches("<UNTRUSTED:").count() == 1);
+    ensure!(rendered.matches(UNTRUSTED_BANNER).count() == 1 && !rendered.contains("UNTRUSTED"));
     let (first, second) = rendered
         .split_once("── #2")
         .ok_or_else(|| anyhow::anyhow!("missing reply"))?;
@@ -419,6 +435,12 @@ async fn claim_exclusivity_reactions_unread_and_person_cursor() -> Result<()> {
     );
     bob.unread(root.id).await?;
     let inbox = bob.inbox().await?;
+    ensure!(
+        format_inbox(&inbox, &bob.names())
+            .matches(UNTRUSTED_BANNER)
+            .count()
+            == 1
+    );
     let preview = inbox
         .iter()
         .find(|entry| entry.id == root.id)
@@ -483,6 +505,12 @@ async fn claim_exclusivity_reactions_unread_and_person_cursor() -> Result<()> {
     let threads = alice.discover_threads(Some("#all")).await?;
     ensure!(threads[0].id == root.id && threads[0].message_count == 4);
     ensure!(threads[0].participants.iter().any(|p| p == "carol/cli"));
+    ensure!(
+        format_threads(&threads, &alice.names())
+            .matches(UNTRUSTED_BANNER)
+            .count()
+            == 1
+    );
     ensure!(alice.discover_threads(Some("@bob")).await?.is_empty());
     let channels = carol.channel_views().await?;
     ensure!(
@@ -520,7 +548,8 @@ async fn wait_backlog_wakes_on_reply_and_keeps_per_handle_cursor() -> Result<()>
         output.contains(&format!("thread {} · Task", root.id))
             && output.contains(&format!("{}#1", root.id))
             && output.contains("hello")
-            && output.matches("<UNTRUSTED:").count() == 1
+            && output.matches(UNTRUSTED_BANNER).count() == 1
+            && !output.contains("UNTRUSTED")
             && !output.contains("summary (as of")
             && !output.contains("phi read")
     );
@@ -703,7 +732,11 @@ async fn wait_backlog_wakes_on_reply_and_keeps_per_handle_cursor() -> Result<()>
             .iter()
             .all(|body| output.contains(body))
     );
-    ensure!(!output.contains("summary (as of #3;") && output.matches("<UNTRUSTED:").count() == 1);
+    ensure!(
+        !output.contains("summary (as of #3;")
+            && output.matches(UNTRUSTED_BANNER).count() == 1
+            && !output.contains("UNTRUSTED")
+    );
     let sibling_header = format!("thread {} · Parallel batch", sibling.id);
     ensure!(output.matches(&sibling_header).count() == 1);
     ensure!(output.find("batch final reply") < output.find(&sibling_header));
@@ -1007,7 +1040,11 @@ async fn enrollment_history_revoke_device_rotates_and_invalidates_token() -> Res
     );
     ensure!(laptop.wait(0).await?.is_empty());
     let own_history = laptop.read(root.id, ReadOptions::default()).await?.text();
-    ensure!(own_history.contains("your other session") && !own_history.contains("UNTRUSTED"));
+    ensure!(
+        own_history.contains("your other session")
+            && !own_history.contains(UNTRUSTED_BANNER)
+            && !own_history.contains("UNTRUSTED")
+    );
     ensure!(
         laptop
             .read(root.id, ReadOptions::default())
@@ -1290,7 +1327,9 @@ async fn names_slug_collisions_self_channel_and_link_content() -> Result<()> {
     );
     let own_view = other_session.read(root.id, ReadOptions::default()).await?;
     ensure!(
-        own_view.text().contains("your other session") && !own_view.text().contains("UNTRUSTED")
+        own_view.text().contains("your other session")
+            && !own_view.text().contains(UNTRUSTED_BANNER)
+            && !own_view.text().contains("UNTRUSTED")
     );
     ensure!(alice.counts().await?.unread_threads == 0);
     ensure!(
@@ -1796,7 +1835,12 @@ async fn gui_file_storage_and_self_declared_device_kind() -> Result<()> {
     );
     ensure!(cli.inbox().await?.is_empty());
     let threads = cli.threads().await?;
-    ensure!(threads.len() == 1 && !threads[0].unread && !threads[0].own_agent_activity);
+    ensure!(
+        threads.len() == 1
+            && !threads[0].unread
+            && !threads[0].own_agent_activity
+            && !format_threads(&threads, &cli.names()).contains(UNTRUSTED_BANNER)
+    );
     cli.reply(root.id, options("Agent follow-up")).await?;
     ensure!(gui.threads().await?[0].own_agent_activity);
     gui.set_display_name("Alice Desktop").await?;
