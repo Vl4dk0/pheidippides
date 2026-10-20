@@ -16,11 +16,14 @@
     "@lucide/svelte": "^1.59.0",
     "@tauri-apps/api": "^2.8.0",
     "@tauri-apps/plugin-notification": "^2.3.0",
+    "@tauri-apps/plugin-process": "^2.4.0",
+    "@tauri-apps/plugin-updater": "^2.14.0",
     "svelte": "^5.39.0",
     "zod": "~4.1.12"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^6.2.0",
+    "@tauri-apps/cli": "^2.12.3",
     "playwright": "^1.64.1",
     "prettier": "^3.6.0",
     "prettier-plugin-svelte": "^3.4.0",

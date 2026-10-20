@@ -3,7 +3,10 @@
   "productName": "Pheidippides",
   "version": "0.1.0",
   "identifier": "sk.pheidippides.desktop",
-  "build": { "frontendDist": "../dist", "beforeBuildCommand": "pnpm build" },
+  "build": {
+    "frontendDist": "../dist",
+    "beforeBuildCommand": "pnpm build"
+  },
   "app": {
     "windows": [
       {
@@ -20,7 +23,9 @@
     }
   },
   "bundle": {
-    "active": false,
+    "active": true,
+    "targets": ["app", "dmg", "nsis", "msi", "appimage", "deb"],
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/icon.png",
       "icons/32x32.png",
@@ -28,6 +33,20 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "macOS": {
+      "signingIdentity": "-"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDhBQzM5OTg2MDE0NzMzNzgKUldSNE0wY0JocG5EaXJYemFzUXVyeDJsYS9CZXY5TnFmZTlBSlU3NlFFQ3IrRWlHN3o0VUJjUDUK",
+      "endpoints": [
+        "https://github.com/Vl4dk0/pheidippides/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }
