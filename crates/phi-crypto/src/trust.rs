@@ -715,7 +715,7 @@ impl VerifiedMembership {
 impl VerifiedDirectory {
     /// Roster link checks. The issuer certificate may belong to a revoked device;
     /// authorization of that signature is decided by the channel walk.
-    pub fn check_membership(
+    fn check_membership(
         &self,
         membership: &ChannelMembership,
         pinned: Option<&ChannelMembership>,
