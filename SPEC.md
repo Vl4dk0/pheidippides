@@ -183,12 +183,48 @@ token; the token is only access control + rate limiting.
 
 ### 4.4 Revocation and removal
 
-- `phi device revoke <id>` / `phi remove <person>`: issuer signs a revocation;
-  server immediately rejects the revoked token(s). Issuer's client then
-  **rotates** every affected channel (new epoch key, wrapped to every remaining
-  verified device). Anyone may rotate; clients pick the highest epoch.
-- Honest limit (show in UI/docs): whatever a revoked device already read is
-  compromised. Removal protects only future messages.
+- `phi device revoke <id>` / `phi remove <person>` prepares, then signs a
+  revocation. Prepare places a hold on every device of the target: the server
+  rejects that device's token (401) and rejects grants it issued. A hold has no
+  expiry and no release route. It is not a revocation: it is unsigned, it
+  rotates nothing, and the target's reactions stay until commit.
+  `ListDevicesResponse.holds` lists each hold as the held device and the holder
+  device. `phi who` and `phi device list` show `held by <person/device>`. A
+  device stays rejected until every hold on it is gone. A hold ends only inside
+  a revocation commit: the target's holds are cleared, and so are holds placed
+  by a revoked holder.
+- Prepare returns the signatures of what the target had signed (messages by
+  author device, roster records, non-root certificates it issued, settings,
+  thread state and thread deletion). Reactions, revocations the target issued,
+  and grant records are not in the list. The client signs `phi revocation v2`
+  over that list's root (BLAKE3 of the strictly ascending raw signature bytes,
+  derive-key `phi revocation history v1`). The server stores the list it handed
+  out and commits only when the target has signed nothing new since. Shrinkage
+  (retention or a deleted thread) still commits. A root the caller never
+  prepared for that target is rejected and the holds stay. Members fetch the
+  stored list once by root and cache it. A missing list is an empty set.
+- Revocation is monotone. Every revocation with a valid signature takes effect.
+  After it is known, an object signed by a covered key verifies only if that
+  exact signature is in every covering history. The one exception is a roster
+  record a later active signer extends: that signer's previous pointer endorses
+  it. No later object, revocation, pin or cache makes a revoked device active
+  again. New epoch keys are wrapped only to active devices.
+- Reactions of a removed member do not count, and the server deletes them at
+  commit. A claim slot that device held is free. A sibling device's claim
+  survives a device revocation.
+- The issuer's client then **rotates** every affected channel it can see (new
+  epoch key, wrapped to every remaining active device). Anyone may rotate;
+  clients pick the highest epoch. Remaining members rotate private channels the
+  issuer cannot see before they send, and a person revocation drops that person
+  from groups.
+- Honest limits (show in UI/docs): whatever a revoked device already read is
+  compromised. Removal protects only future messages. A malicious host can only
+  subtract from a history list (those objects fail closed) or insert objects the
+  key signed before the freeze. A pre-signed invite certificate plus a roster
+  head, when listed, makes that person an active member who receives later
+  epoch keys. Signatures alone cannot tell that person from a legitimate
+  invitee of the revoked member; revoke the new person afterwards. A delayed
+  message is inert.
 
 Every rotation, including group additions/removals and device revocation, uses
 one atomic channel PATCH carrying the next signed roster/key commitment, metadata
@@ -506,9 +542,15 @@ request whose major ≠ its own with HTTP 426 and body `{"error":"upgrade",
 phi`. The protocol major is derived from the workspace crate's
 `CARGO_PKG_VERSION_MAJOR`: version `0.1.0` sends `Phi-Protocol: 0`; it is never a
 separately maintained number. `/v1` is the REST namespace, not the protocol major
-(changed in prototype review). Within a major, minors must stay wire-compatible (additive only; unknown
-fields ignored by clients, rejected by server validation only if they violate
-schema). No support for older majors, ever.
+(changed in prototype review). Within a released major, minors must stay
+wire-compatible (additive only; unknown fields ignored by clients, rejected by
+server validation only if they violate schema). Development majors (`0.x`) are
+the exception: the header carries only the major, so it cannot tell 0.x peers
+apart, and an old peer sees signature failures rather than HTTP 426. The
+shared-profile signing domains and `phi revocation v2` (a required history root)
+are not wire-compatible with 0.1.0. Server and all clients upgrade together.
+Spaces that contain a revocation, and any space or profile from an earlier 0.x
+build, must be recreated. No support for older majors, ever.
 
 ### 6.11 Validation
 
@@ -556,7 +598,7 @@ never GUI execution (changed in prototype review).
 | `phi join <link> --name <name>` | redeem invite or enroll code; sets up profile; asks display name via `--name`. |
 | `phi device add` | create an enrollment code for another machine (changed in prototype review). `phi device list`, `phi device revoke <id>`. |
 | `phi init [<space>]` | write `.phi` binding in cwd. Without an argument, use the sole local profile; otherwise list available names/IDs with exact `phi init <id>` commands (changed in prototype review). |
-| `phi who` | persons (display names), devices (last seen, revocation), recent handles. Channel membership is shown by `channels`; `device list` uses the same last-seen format (changed in prototype review). |
+| `phi who` | persons (display names), devices (last seen, revocation, holds), recent handles. Channel membership is shown by `channels`; `device list` uses the same last-seen format and shows holds (changed in prototype review). |
 | `phi threads [--closed] [#channel\|@person]` | Every visible open thread (or closed threads with `--closed`), read or unread, newest activity first: stable id, channel, title, participants, message/unread counts, claims and relative activity. `@person` selects the DM/self channel. Reaction activity, including removals, affects ordering (changed in prototype review). |
 | `phi close <thread>`, `phi reopen <thread>` | Close or reopen a thread (any channel member; signed state event) (changed in prototype review). |
 | `phi delete <thread>` | Delete a thread for everyone (root author only; TTY confirmation prompt, signed request) (changed in prototype review). |
@@ -689,7 +731,8 @@ API sketch (implementer finalises in `phi-proto`; keep REST, JSON, `/v1`):
 `POST /v1/spaces`, `GET /v1/spaces/{sid}` (root cert, settings), `PATCH
 /v1/spaces/{sid}/settings`, `POST /v1/spaces/{sid}/grants`, `POST
 /v1/grants/{grant_id}/redeem`, `GET /v1/spaces/{sid}/devices` (certs),
-`POST /v1/spaces/{sid}/revocations`, `POST/GET /v1/spaces/{sid}/channels`,
+`POST /v1/spaces/{sid}/revocations/prepare`, `POST /v1/spaces/{sid}/revocations`,
+`GET /v1/spaces/{sid}/histories/{root}`, `POST/GET /v1/spaces/{sid}/channels`,
 `PUT /v1/channels/{cid}/keys` (enrollment self-rewraps only),
 `PATCH /v1/channels/{cid}` (atomic membership/metadata/epoch/wrap publication)
 (changed in prototype review), `GET

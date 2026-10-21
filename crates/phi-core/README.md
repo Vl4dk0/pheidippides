@@ -31,7 +31,9 @@ No daemon, GUI, listener or server process is started by the library.
   the same directory snapshot. Each read/search decrypt revalidates signatures.
   Pins are updated inside SQLite immediate transactions; a failed verification
   preserves prior state. Observed message IDs/sequences and immutable epoch keys
-  cannot be replaced silently. Revoked authors fail closed per phi-crypto.
+  cannot be replaced silently. A revoked author's objects verify only when that
+  signature is listed in every covering revocation history (phi-crypto); a
+  missing list fails closed.
 - `keys` is a private SQLite account store separate from the plaintext cache.
   Account `identity` stores device secrets/token/certificate; channel accounts
   store epoch keys. JSON secret buffers use `Zeroizing`; rusqlite/HTTP internals
@@ -60,7 +62,9 @@ See [`phi-cli/README.md`](../phi-cli/README.md) for commands, output and honest
 limits. `tests/e2e.rs` starts in-process Axum servers bound to ephemeral loopback
 ports only for test lifetimes; no production server or GUI is launched.
 
-After revocation, the issuing client rotates every affected channel it can access.
+A revocation signs the history root from prepare. The client stores that list,
+fetches any other root it does not have, checks the bytes against the root, and
+caches the list in the profile cache, beside the trust pins. After revocation, the issuing client rotates every affected channel it can access.
 Before sending, remaining members also rotate any channel affected by a revocation
 not already protected by their own local rotation, removing revoked people from
 group rosters. This protects private groups the removal issuer cannot discover.

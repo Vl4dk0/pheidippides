@@ -8,6 +8,10 @@
   device kind; device certificates no longer carry a kind. This changes message
   and certificate signing bytes, so spaces and profiles from earlier builds must
   be recreated. The app ignores profiles in the old `gui/` directory.
+- A revocation signs `phi revocation v2` over a required history root. After it
+  is known, a covered key's objects verify only when that exact signature is in
+  every covering history. Server and all clients upgrade together. Spaces that
+  contain a revocation must be recreated.
 - `phi wait` splits a long wait into polls of at most 45 s and retries a dropped
   connection, DNS/connect failure, or HTTP 502/503/504 with backoff until the
   wait's own deadline (1s, 2s, 4s, … at most 15s). A blip that lasts the whole

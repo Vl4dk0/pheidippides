@@ -160,8 +160,8 @@ coverage, and at least the final five messages. `--last N` changes the tail;
 plus its own signed message ID; the server-assigned current sequence is not part
 of the signature. Failed verification or missing historical keys are displayed
 explicitly, and unverifiable content is never decrypted/displayed as trusted.
-A failed root signature stops the read with an error. Revoked authors also fail
-closed under the crypto library's current policy.
+A failed root signature stops the read with an error. A revoked author's
+messages verify only if listed in its revocation's history.
 
 `inbox` prints compact entries:
 
@@ -304,7 +304,8 @@ future messages; historical epochs they never received remain unavailable.
 Revocation protects future content only. Remaining members rekey affected private
 groups before sending, including groups the removal issuer cannot access. Revoke this device/person from another
 active device/person so the issuer remains authorized to finish rotations.
-Signed revocations are pinned before publication. Interrupted publication,
+Signed revocations are pinned before publication. Each one signs the history
+root returned by prepare. Interrupted publication,
 affected revocation rotations resume on the next command opening that profile;
 errors stay visible and all affected accessible channels are attempted. A failed
 atomic PATCH leaves the old roster, epoch and metadata together. Sending also checks for any
@@ -370,8 +371,8 @@ notification history, and concurrent waiting sessions still each receive events.
 ## JSON output (schema version 1)
 
 Global `--json` works before or after any supported subcommand: `fetch`, `inbox`,
-`read`, `wait`, `threads`, `channels`, `spaces`, `who`, `send`, `reply`. Other
-commands reject it. Text remains the default. Stdout is exactly one JSON document
+`read`, `wait`, `threads`, `channels`, `spaces`, `who`, `device list`, `send`,
+`reply`. Other commands reject it. Text remains the default. Stdout is exactly one JSON document
 with `schema_version: 1` and `command: "<subcommand>"`; no untrusted header line.
 Arrays are present even when empty; optional values are `null`. IDs/references are
 strings, timestamps are Unix seconds, sequences/counts are numbers. Additive fields
@@ -390,7 +391,8 @@ the success receipt remains the only stdout document.
 | wait | `events: [WaitEvent]`; timeout is `events: []`; one document per invocation |
 | channels | `trusted:false, channels:[{id,name,kind,members:["@person"],unread_threads,unread_messages}]`; kind is `all/group/dm/self` |
 | spaces | `trusted:false, binding:{bound,directory,space,space_id,server,person,spaces,bind,listen}, spaces:[{name,id,server,bound}]`; `bound` on each profile reflects `.phi` found walking up from cwd. `binding.bound` is false when no `.phi` exists (process exit 5). `person` is the local display name, or null when the binding has no local profile. `bind` is the init command when not bound, else null. `listen` is `phi wait` when bound, else null. |
-| who | `trusted:false, people:[{id,name,devices:[{id,last_seen_at,last_seen,revoked}]}], handles:["person/handle"]` |
+| who | `trusted:false, people:[{id,name,devices:[{id,last_seen_at,last_seen,revoked,held_by}]}], handles:["person/handle"]` |
+| device list | `devices:[{id,person,last_seen_at,revoked,held_by}]`; `held_by` is `["person/device", …]` |
 | send, reply | `thread_id,message_id,reference`; `reference` may be null if optional lookup failed |
 
 `ThreadEntry` fields: `id,channel_id,channel,to,title,from,created_at,summary,

@@ -49,16 +49,19 @@ ambiguity. Mention lists preserve order and encode each mention as
 | `phi message v2` | id, summary_covers_seq, space_id, channel_id, thread_id, epoch, handle, from_gui, mentions, nonce, ciphertext |
 | `phi device certificate v2` | space_id, person_id, device_id, sign_pub, kex_pub, created_at, issuer |
 | `phi grant record v1` | space_id, grant_id, grant_pub, kind, person_id, created_at, expires_at, issuer_device |
-| `phi revocation v1` | space_id, target, issuer_device, created_at |
+| `phi revocation v2` | space_id, target, issuer_device, created_at, history |
 | `phi reaction v1` | space_id, message_id, person_id, device_id, handle, kind, created_at, remove |
 | `phi settings v1` | space_id, issuer_device, created_at, retention_days, summary_mode, messages_per_minute, messages_per_hour |
+| `phi settings v2` | space_id, issuer_device, created_at, settings |
 | `phi channel membership v2` | previous, key_commitment, space_id, channel_id, epoch, kind, members, issuer_device |
-| `phi thread state v1` | space_id, channel_id, thread_id, person_id, device_id, closed, created_at |
-| `phi thread deletion v1` | space_id, channel_id, thread_id, person_id, device_id, created_at |
+| `phi thread state v1` | space_id, thread_id, person_id, device_id, handle, closed, created_at |
+| `phi thread delete v1` | space_id, thread_id, person_id, device_id, handle, created_at |
 
 A certificate issuer is `['device', device_id]` or `['grant', grant_id]`; a
 revocation target is `['device', device_id]` or `['person', person_id]` (JSON uses
-double quotes). The wire issuer references the grant ID; its signed grant record
+double quotes). `history` is the base64url history root. `phi settings v2` is
+used when `summary_every` is not the default; otherwise the change signs
+`phi settings v1` and does not bind `summary_every`. The wire issuer references the grant ID; its signed grant record
 supplies the grant public key. The root certificate names itself as device issuer
 and is self-signed. Only the root may use a device issuer: every other certificate
 must be grant-signed. Client-chosen message IDs and coverage claims are signed;
@@ -138,20 +141,31 @@ handles, not hardware/keychain attestation or proof that a human typed the
 message. Dropping the kind field and adding the flag changes certificate and
 message signing bytes; earlier prototype spaces must be recreated.
 
-Current revocation dominates attacker-controlled wall clocks. A certificate whose
-grant issuer is currently revoked is accepted **only if that exact certificate
-was already pinned**. Backdating a new grant/certificate cannot recreate trust.
-Exact old evidence survives a later issuer revocation, including when certificate
-creation and revocation share one Unix second. New signed revocations from an
-already revoked issuer also need exact prior evidence, except self-revocation.
-Revoked devices/persons never become active `VerifiedDevice`s. Timestamps still
-check creation bounds and expiry, but are not an ordering oracle. Expiry is
-exclusive at redemption; an old redeemed certificate remains valid after expiry.
+A revocation signs a history root (`phi revocation v2`). After that revocation is
+known, an object signed by a covered key verifies only when its exact signature
+is in the list of every revocation covering the key. A missing list is an empty
+set, so the object fails closed. The one exception is a roster record that a
+later active signer's record extends: the `previous` signature inside the
+membership preimage endorses it. Revocation is monotone. A valid signature takes
+effect, and no later object, revocation, pin or cache makes a revoked device
+active again. There is no certificate pin exception and no wall-clock ordering
+of who revoked whom. `authorize` returns `Ok(true)` for an active device,
+`Ok(false)` when the device is revoked and the signature is listed, and
+`Err(Revoked)` otherwise. `VerifiedDevice::active()` is that bit: false means
+listed evidence from a revoked device, and `wrap_channel_key` refuses a
+recipient that is not active. Reactions are not listed. `reaction_counts`
+returns `Ok(false)` when the device is revoked or its issuer chain is broken; a
+bad signature is still an error. `history_root` rejects a list that is not
+strictly ascending and hashes the raw signature bytes with BLAKE3 derive-key
+`phi revocation history v1`. The empty list has one fixed root.
+
+Timestamps still check creation bounds and expiry, but are not an ordering oracle.
+Expiry is exclusive at redemption; an old redeemed certificate remains valid after expiry.
 Only enroll/recovery grants may have `expires_at=null`.
 
-A fresh client seeing revoked historical issuers needs a trusted prior snapshot;
-it must fail closed rather than guess which descendants predate revocation.
-Pins detect conflicts against *observed* history. No protocol without a shared
+A fresh client fetches each unknown history once, checks the bytes against the
+root, and caches the list. It does not guess which descendants predate a
+revocation. Pins detect conflicts against *observed* history. No protocol without a shared
 witness can discover a revocation nobody has seen or reconcile isolated clients'
 divergent first snapshots automatically. Cross-client exchange of trusted pins
 would expose equivocation; this prototype does not add a transparency service.
@@ -205,7 +219,9 @@ Earlier prototype peers are rejected at the protocol header. Old membership reco
 mandatory field/signature domain; recreate development spaces with upgraded
 components. The host cannot migrate signatures and no legacy verification exists.
 `VerifiedDirectory::certificate(id)` exposes authenticated ownership even after
-revocation; it grants no active authorization. `trust_bundle()` exports verified
+revocation; it grants no active authorization. `VerifiedDevice::active()` is the
+authorization bit for wrapping and for treating the signer as current.
+`trust_bundle()` exports verified
 merged evidence for locally pinning a newly signed revocation before publication.
 
 The protocol header follows workspace Semver major (0 for 0.1.0), independently

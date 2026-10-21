@@ -16,7 +16,9 @@ preimages and derivations are in `../phi-crypto/README.md`.
 | GET /grants/{gid} | — | GetGrantResponse |
 | POST /grants/{gid}/redeem | RedeemGrantRequest | RedeemGrantResponse |
 | GET /spaces/{sid}/devices | — | ListDevicesResponse |
+| POST /spaces/{sid}/revocations/prepare | PrepareRevocationRequest | HistoryResponse |
 | POST /spaces/{sid}/revocations | CreateRevocationRequest | CreateRevocationResponse |
+| GET /spaces/{sid}/histories/{root} | — | HistoryResponse |
 | POST /spaces/{sid}/channels | CreateChannelRequest | CreateChannelResponse |
 | GET /spaces/{sid}/channels | — | ListChannelsResponse |
 | PATCH /channels/{cid} | UpdateChannelRequest | UpdateChannelResponse |
@@ -35,7 +37,15 @@ preimages and derivations are in `../phi-crypto/README.md`.
 | POST /blobs | UploadBlobRequest | UploadBlobResponse |
 | GET /blobs/{id} | — | DownloadBlobResponse |
 
-Paths above are prefixed `/v1`. GET grant retrieval and PATCH channel membership
+Paths above are prefixed `/v1`. Prepare takes `{target}` and returns
+`HistoryResponse.signatures`, strictly ascending by signature bytes. The history
+GET returns that same stored list. `ListDevicesResponse.holds` is
+`{device_id, holder_device}` for the caller's space: the held device and the
+device that prepared. A hold has no expiry and is not a revocation. It is
+cleared when the target or the holder is revoked, and redeem rejects a grant
+whose issuer is held the same way it rejects a revoked issuer. A revocation
+signs the history root; the server keeps the prepared signature list and serves
+it by that root. GET grant retrieval and PATCH channel membership
 complete flows implicit in the spec's API sketch. Grant GET is public; it reveals
 only signed public data and ciphertext to someone who knows the opaque grant ID.
 The directory is one root plus all other certificates, grants and revocations;

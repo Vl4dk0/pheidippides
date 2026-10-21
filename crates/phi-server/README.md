@@ -113,7 +113,9 @@ This is process liveness, not a database/storage check.
 | GET `/grants/{grant_id}` | — | `GetGrantResponse` |
 | POST `/grants/{grant_id}/redeem` | `RedeemGrantRequest` | `RedeemGrantResponse` |
 | GET `/spaces/{sid}/devices` | — | `ListDevicesResponse` |
+| POST `/spaces/{sid}/revocations/prepare` | `PrepareRevocationRequest` | `HistoryResponse` |
 | POST `/spaces/{sid}/revocations` | `CreateRevocationRequest` | `CreateRevocationResponse` |
+| GET `/spaces/{sid}/histories/{root}` | — | `HistoryResponse` |
 | POST `/spaces/{sid}/channels` | `CreateChannelRequest` | `CreateChannelResponse` |
 | GET `/spaces/{sid}/channels` | — | `ListChannelsResponse` |
 | PATCH `/channels/{cid}` | `UpdateChannelRequest` | `UpdateChannelResponse` |
@@ -135,8 +137,21 @@ This is process liveness, not a database/storage check.
 `Authorization: Bearer <device_token>` is required except for space creation and
 grant GET/redeem. Space creation uses the **admin token** in that same header
 when configured `token`. Tokens are 32 random bytes, canonical base64url;
-only BLAKE3 hashes are stored. Revocation immediately invalidates all targeted
-device/person tokens, including active waits. Inaccessible scoped resources
+only BLAKE3 hashes are stored. Prepare records a hold
+(`revocation_holds`: held device, holder device) and returns the target's
+signature list. A hold rejects that device's token, including active waits, and
+redeem rejects grants it issued. It has no expiry and no release route, and it
+is not a revocation: nothing rotates, and the target's reactions stay until
+commit. `ListDevicesResponse.holds` lists the caller's space. A device stays
+rejected until every hold row is gone. Commit marks the target revoked, clears
+holds whose device or holder is in the target, stores the prepared list in
+`histories`, and inserts the revocation. Prepared rows of a holder outside the
+target stay, including the caller's, so a second signature of the same target
+still commits. A root the caller never prepared is 409
+`revocation was not prepared`. If the target has signed something the stored
+list does not cover, the commit is 409 `history changed` and the holds stay.
+Members fetch each list once. Revocation of the target invalidates its tokens.
+Inaccessible scoped resources
 return 404. Grant IDs are opaque 256-bit capabilities to signed public data and
 ciphertext, never the invite secret S. No endpoint lists spaces across tokens.
 
@@ -194,19 +209,24 @@ in seconds. Other operations do not consume message tokens.
 ## Verification and limits
 
 The server verifies root hash/self-signature; issuer-signed grant records;
-complete certificate/grant/revocation chains at redemption; current issuer status,
-expiry and atomic single use; signed revocations/settings/reactions and their
-authenticated identities; and message envelope signatures. Grant keys may cover
-only the issuer's permitted channels (#all for invites; all owned channels for
-enrollment), with current keys required. Revocation targets must exist in the
-same space. Clients remain the real verifiers: verify the complete directory,
-message signatures, revocations, and encrypted content independently. The host
-cannot detect rolled-back/omitted records or truthful summaries.
+complete certificate/grant/revocation chains at redemption; expiry and atomic
+single use; signed revocations/settings/reactions and their authenticated
+identities; and message envelope signatures. A held or revoked issuer cannot
+redeem. Grant keys may cover only the issuer's permitted channels (#all for
+invites; all owned channels for enrollment), with current keys required.
+Revocation targets must exist in the same space. Clients remain the real
+verifiers: verify the complete directory, the stored history lists, message
+signatures, revocations, and encrypted content independently. The host cannot
+detect truthful summaries. Omitting a history entry or a revocation fails closed
+for what that evidence covered; it cannot make a listed object verify as active.
 
 The server persists opaque cryptographically verified trust pins in SQLite and
-updates them in the same transaction as enrollment/revocation. Verification uses
-those prior pins, so rapid same-second enrollment/removal works without trusting
-backdated issuance. Invite person IDs are reserved uniquely, including unused
+updates them in the same transaction as enrollment/revocation. Pins merge
+revocations the host omits and reject conflicting certificates or grants. They
+do not exempt a certificate from a revoked issuer: that certificate verifies
+only when its signature is in every covering revocation history. Revocation is
+monotone; every valid signature takes effect, with no wall-clock ordering and
+no pin exception. Invite person IDs are reserved uniquely, including unused
 invites. Enrollment codes can be issued by any own device. The signed `from_gui`
 message flag is trusted like handles and imposes no authorization policy beyond
 the summary exemption.
@@ -235,10 +255,10 @@ Errors use `phi_proto::ErrorBody` (no plaintext or bearer tokens in logs):
 | HTTP | `error` | Meaning |
 |---|---|---|
 | 400 | `invalid` | precise schema, format, signature, or contextual validation failure |
-| 401 | `unauthorized` | missing, unknown, or revoked device token |
+| 401 | `unauthorized` | missing, unknown, revoked, or held device token |
 | 403 | `forbidden` | admin token, grant expiry, or ownership restriction |
 | 404 | `not_found` | nonexistent or inaccessible scoped resource |
-| 409 | `conflict` | duplicate ID/reaction, used grant, existing claim/wrap, invalid epoch progression |
+| 409 | `conflict` | duplicate ID/reaction, used grant, existing claim/wrap, invalid epoch progression, unprepared revocation, history no longer covers the target |
 | 413 | `too_large` | HTTP body, per-file limit, or space quota |
 | 426 | `upgrade` | missing/invalid/mismatching major; includes `required_major` |
 | 429 | `rate_limited` | token bucket empty; includes `retry_after` and `Retry-After` |
