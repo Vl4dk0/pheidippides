@@ -53,7 +53,7 @@ open it.
 | **Server** | one `phi-server` process + one data dir. "Iron": stores ciphertext + routing metadata. Can host many spaces. |
 | **Space** | the hard isolation boundary (e.g. "Company A", "Game with Alice"). Own keys, own members. Members of one space learn nothing about other spaces on the same server. |
 | **Person** | a human member of a space. Identity is **per space** (your identity in Company A is unlinkable to your identity in Company B, even on one server). |
-| **Device** | an enrolled credential + key set belonging to a person in a space. Kind `cli` (agents' machine) or `gui` (desktop app). All agents on one `cli` device act as that person's agents. |
+| **Device** | an enrolled credential + key set belonging to a person in a space: one per machine and person. The CLI and the desktop app are two front ends to that one device, and all agents on it act as that person's agents. |
 | **Handle** | free-text name an agent chooses for itself (`main`, `flawless-unicorn`, `codex`, `reviewer-for-idea-a`). Passed with `--as`. Shown as `vladko/flawless-unicorn`. Not authenticated — trusted. (changed in prototype review) |
 | **Channel** | where messages live: `#all` (whole space, auto-created), groups (`#backend`), DMs (`@bob`, a 2-person channel). |
 | **Thread** | a root message + its replies. Unit of work. Has a title and a rolling summary. |
@@ -126,7 +126,7 @@ HKDF-SHA256 → XChaCha20-Poly1305) addressed to one device's `kex` public key.
 The server stores `(channel, epoch, device) → wrapped_key`.
 
 Per-device keys (decided, D2B) so one leaked machine can be revoked alone. A
-person's GUI and each CLI machine are separate devices.
+person's machines are separate devices; the CLI and the GUI on one machine share a device.
 Each epoch key has a domain-separated commitment in the signed channel roster;
 clients verify its history, key bytes and encrypted peer metadata before accepting
 an unwrapped key (changed in prototype review).
@@ -143,7 +143,7 @@ compares codes.
 - **Space root** = the creator's first device. `space_id = base64url(blake3(root_sign_pub))[..22]`-ish
   (exact encoding: implementer's choice, document it). Anyone who knows the
   space id can verify the root key.
-- **Device certificate**: `{space_id, person_id, device_id, kind: cli|gui,
+- **Device certificate**: `{space_id, person_id, device_id,
   sign_pub, kex_pub, created_at, issuer: <invite_pub | device_id>}` + signature.
 - **Invite** (new person) and **enrollment** (new device of an existing person)
   use the same mechanism, a **grant**:
@@ -168,12 +168,10 @@ compares codes.
   5. Verifiers accept a device certificate signed by a grant key whose grant
      record is signed by a valid device, recursively to the root, and accept at
      most one certificate per grant.
-- Any active device may enroll any kind of device for its person using the normal
-  `phi device add` code. The redeeming client declares its kind in its signed
-  certificate; the grant does not bind it. GUI labels are trusted like handles,
-  not an enrollment authorization boundary (changed in prototype review).
-  Removing the target-kind field changes signed grant bytes; recreate spaces and
-  profiles from earlier prototype builds (changed in prototype review).
+- Any active device may enroll another machine for its person using the normal
+  `phi device add` code (changed in prototype review). Device certificates carry
+  no client kind, which changes their signed bytes; recreate spaces and profiles
+  from earlier prototype builds (changed in prototype review).
 - The host never sees `S` (only `grant_id`), so it cannot forge certificates.
 
 ### 4.3 Server authentication
@@ -203,18 +201,23 @@ are retried on open (changed in prototype review).
 
 ### 4.5 Key storage
 
-- CLI and GUI devices use the same phi-core `FileKeyStore`: one profile per
+- The CLI and the GUI open the same phi-core `FileKeyStore`: one profile per
   (server, space), with `profile.toml` + a private `keys` file mode 0600 under the
-  platform config dir (`directories`, e.g. `~/.config/pheidippides/`). GUI
-  config/cache roots keep their `/gui` suffix, so GUI and CLI remain separate
-  devices. No OS credential service is used (changed in prototype review).
-- The **"sent from GUI"** mark is a client-declared label trusted like handles;
-  local agents can read GUI credentials as the same OS user. It is not a security
-  guarantee or proof of human authorship (see 7.2). Earlier keychain-backed GUI
-  profiles without a `keys` file are ignored; re-enroll instead of migrating them
-  (changed in prototype review).
+  platform config dir (`directories`, e.g. `~/.config/pheidippides/`), plus one
+  cache database. Both are SQLite in WAL mode with a busy timeout, so the two
+  processes read and write concurrently; every GUI command opens a fresh client
+  and so sees CLI writes. No OS credential service is used (changed in prototype
+  review).
+- The GUI has no device of its own and enrolls nothing. Separate `gui/` profiles
+  from earlier builds are ignored, not migrated.
+- The **"sent from GUI"** mark is the signed envelope's `from_gui` flag. Only the
+  GUI entry point sets it; the CLI has no option for it. Like handles it is a
+  client-declared label: a custom client can forge it, and the signature only
+  stops the host and other members from changing it. It is not a security
+  guarantee or proof of human authorship (see 7.2); local agents run as the same
+  OS user and can read the same credentials.
 - Lost keys = unreadable history. Mitigation: any other own device can enroll a
-  new one; GUI offers "export recovery code" = an `enroll` grant without expiry,
+  new one; the GUI offers "export recovery code" = an `enroll` grant without expiry,
   shown once. (Prototype: implement the never-expiring enroll grant; UI copy
   only.)
 
@@ -241,7 +244,7 @@ integer assigned by the server (defines order; clocks don't matter).
 | `grants` | grant_id, space_id, record (signed), sealed_keys, used_at, expires_at |
 | `channels` | id, space_id, kind (`all`\|`group`\|`dm`\|`self`), meta_ciphertext (name etc., encrypted with channel key), members (person ids), current_epoch |
 | `wrapped_keys` | channel_id, epoch, device_id, sealed |
-| `messages` | id, space_id, channel_id, seq, thread_id (= root id; null for root), author_person, author_device, handle, mentions (person ids + optional handles), epoch, nonce, ciphertext, signature, created_at, has_summary, summary_covers_seq |
+| `messages` | id, space_id, channel_id, seq, thread_id (= root id; null for root), author_person, author_device, handle, from_gui, mentions (person ids + optional handles), epoch, nonce, ciphertext, signature, created_at, has_summary, summary_covers_seq |
 | `blobs` | id, space_id, size, created_at, path on disk (ciphertext only) |
 | `reactions` | message_id, person_id, handle, kind, created_at, signature. Unique (message, kind=claim) |
 | `read_cursors` | person_id, thread_id, last_read_seq |
@@ -249,7 +252,7 @@ integer assigned by the server (defines order; clocks don't matter).
 | `events` | derived feed for `wait`; eligible ack/claim/unclaim reactions return one-line notices (6.6); signed thread close/reopen and root-author deletion events propagate state (6.1) (changed in prototype review) |
 
 Plaintext-by-necessity (document in README as known metadata leak): handles,
-mentions, reaction kinds, timestamps, sizes, membership graph.
+the `from_gui` flag, mentions, reaction kinds, timestamps, sizes, membership graph.
 
 Encrypted content of a message (`MessageContent`, JSON before encryption):
 
@@ -264,8 +267,9 @@ Encrypted content of a message (`MessageContent`, JSON before encryption):
 }
 ```
 
-Signature covers `(space_id, channel_id, thread_id, epoch, handle, mentions,
-nonce, ciphertext)`. Readers verify signature against the author device's
+Signature covers `(space_id, channel_id, thread_id, epoch, handle, from_gui,
+mentions, nonce, ciphertext)`; `from_gui` sits in the envelope, not the encrypted
+content, so the server can exempt human messages from the summary requirement. Readers verify signature against the author device's
 verified certificate; failures are shown, never silently dropped.
 
 ---
@@ -319,7 +323,7 @@ to solve it").
 
 ### 6.4 Rolling summary (decided)
 
-- In spaces with `summary_mode = required`, a CLI `send`/`reply` requires a
+- In spaces with `summary_mode = required`, a `send`/`reply` not marked `from_gui` requires a
   summary only when there are **at least `summary_every` messages since the last
   summary, including the pending message**. This signed per-space setting defaults
   to **3**, accepts integers 1–4294967295, is set with
@@ -384,8 +388,8 @@ labels inside a mixed block (changed in prototype review). Each message is frame
 attachments: /Users/x/.cache/pheidippides/blobs/…/shot.png (image/png, 12 KB)
 ```
 
-GUI device messages get `(human · sent from GUI)` instead of `(agent)` as a
-client-declared label trusted like handles, not proof of human authorship. Own-person messages say
+Messages sent from the GUI get `(human · sent from GUI)` instead of `(agent)`,
+from the signed `from_gui` flag: a client-declared label trusted like handles, not proof of human authorship. Own-person messages say
 `you` or `your other session` (changed in prototype review).
 
 `<thread-id>#<n>` references are accepted everywhere a message/thread is used;
@@ -550,7 +554,7 @@ never GUI execution (changed in prototype review).
 | `phi space create <name> --server <url>` | create space, this machine = root device. Prints space name/id and init/invite hints (changed in prototype review). |
 | `phi invite [--note <text>]` | create invite grant, print link for the intended recipient. |
 | `phi join <link> --name <name>` | redeem invite or enroll code; sets up profile; asks display name via `--name`. |
-| `phi device add` | create an enrollment code for any kind of device; the redeeming client declares its kind (changed in prototype review). `phi device list`, `phi device revoke <id>`. |
+| `phi device add` | create an enrollment code for another machine (changed in prototype review). `phi device list`, `phi device revoke <id>`. |
 | `phi init [<space>]` | write `.phi` binding in cwd. Without an argument, use the sole local profile; otherwise list available names/IDs with exact `phi init <id>` commands (changed in prototype review). |
 | `phi who` | persons (display names), devices (kind, last seen, revocation), recent handles. Channel membership is shown by `channels`; `device list` uses the same last-seen format (changed in prototype review). |
 | `phi threads [--closed] [#channel\|@person]` | Every visible open thread (or closed threads with `--closed`), read or unread, newest activity first: stable id, channel, title, participants, message/unread counts, claims and relative activity. `@person` selects the DM/self channel. Reaction activity, including removals, affects ordering (changed in prototype review). |
@@ -610,9 +614,9 @@ served by the host (a host-served UI could be swapped to steal keys).
   `ArchiveRestore`) and root-author-only delete icon (`Trash2`, with confirm
   dialog) (changed in prototype review), summary card on top (with "covers up to #k"), messages,
   agent vs human styling, a small **"sent from GUI"** mark on messages whose
-  author device kind is `gui`, attachments preview (images inline), reactions
+  signed `from_gui` flag is set, attachments preview (images inline), reactions
   (click to react/claim). This mark is a trusted label like handles, not proof of
-  human authorship; GUI credentials use the same private file storage as the CLI
+  human authorship; the GUI opens the CLI's own profile and private file storage
   (changed in prototype review).
 - Composer: write as human (no summary required; runs local summarizer if
   configured).

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- The desktop app opens the same profile as `phi` instead of a separate `gui/`
+  profile: one device per machine and person, and both may run at once. "Sent
+  from GUI" is now a per-message flag in the signed message envelope, not a
+  device kind; device certificates no longer carry a kind. This changes message
+  and certificate signing bytes, so spaces and profiles from earlier builds must
+  be recreated. The app ignores profiles in the old `gui/` directory.
 - `phi wait` splits a long wait into polls of at most 45 s and retries a dropped
   connection, DNS/connect failure, or HTTP 502/503/504 with backoff until the
   wait's own deadline (1s, 2s, 4s, … at most 15s). A blip that lasts the whole

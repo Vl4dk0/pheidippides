@@ -20,7 +20,6 @@ pub struct Profile {
     pub device_id: DeviceId,
     pub device_name: String,
     pub display_name: String,
-    pub kind: DeviceKind,
     pub summarizer: Option<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -69,12 +68,6 @@ impl Store {
             let file = entry?.path().join("profile.toml");
             if file.is_file() {
                 let profile: Profile = toml::from_str(&fs::read_to_string(file)?)?;
-                // Earlier GUI prototypes kept keys outside the profile; they cannot be reopened.
-                if profile.kind == DeviceKind::Gui
-                    && !self.profile_dir(&profile).join("keys").is_file()
-                {
-                    continue;
-                }
                 result.push(profile);
             }
         }

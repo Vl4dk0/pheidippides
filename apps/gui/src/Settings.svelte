@@ -7,7 +7,6 @@
     SlidersHorizontal,
     Users,
     Monitor,
-    Terminal,
     KeyRound,
     UserPlus,
     Plus,
@@ -189,8 +188,8 @@
         {snapshot.profile.summarizer_configured
           ? 'Configured; human messages use it.'
           : 'Not configured; human messages need no summary.'} Configure the command
-        in this GUI profile’s profile.toml. It sends plaintext wherever the command
-        sends it.
+        in this profile’s profile.toml. It sends plaintext wherever the command sends
+        it.
       </p>
     </details>
     <p class="muted fine-print">
@@ -253,10 +252,8 @@
           <div class="device-identity">
             <span
               class="avatar"
-              title={`${snapshot.profile.display_name} · ${device.kind === 'gui' ? 'GUI' : 'CLI'} device`}
-              >{#if device.kind === 'gui'}<Monitor size={16} />{:else}<Terminal
-                  size={16}
-                />{/if}</span
+              title={`${snapshot.profile.display_name} · device`}
+              ><Monitor size={16} /></span
             >
             <div>
               <span class="mono">{device.id.slice(0, 8)}</span
@@ -300,8 +297,7 @@
               <span
                 >{snapshot.members[device.person_id] ?? device.person_id}</span
               ><small class="device-time muted"
-                >{device.kind} ·
-                <span class="mono">{device.id.slice(0, 8)}</span>
+                ><span class="mono">{device.id.slice(0, 8)}</span>
                 · {device.last_seen_at === null
                   ? 'never seen'
                   : `seen ${relativeTime(device.last_seen_at)} ago`}</small

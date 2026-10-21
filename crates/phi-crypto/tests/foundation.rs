@@ -36,7 +36,6 @@ impl Fixture {
                 space_id: space_id(&keys.sign_public()),
                 person_id: PersonId::from_bytes([1; 16]),
                 device_id,
-                kind: DeviceKind::Cli,
                 sign_pub: keys.sign_public(),
                 kex_pub: keys.kex_public(),
                 created_at: 10,
@@ -93,7 +92,6 @@ impl Fixture {
                 space_id: self.space(),
                 person_id: record.data.person_id,
                 device_id: DeviceId::from_bytes([2; 16]),
-                kind: DeviceKind::Gui,
                 sign_pub: keys.sign_public(),
                 kex_pub: keys.kex_public(),
                 created_at: 30,
@@ -123,6 +121,7 @@ fn metadata() -> Result<MessageMetadata, CryptoError> {
         summary_covers_seq: Some(0),
         thread_id: None,
         handle: "main".parse()?,
+        from_gui: false,
         mentions: vec![Mention {
             person_id: PersonId::from_bytes([2; 16]),
             handle: Some("reviewer".parse()?),
@@ -219,11 +218,12 @@ fn messages_roundtrip_and_authenticate_every_spec_field() -> Result<(), CryptoEr
         thread_id: None,
         epoch: 0,
         handle: "main".parse()?,
+        from_gui: false,
         mentions: vec![],
         nonce: Nonce::from_bytes([0; 24]),
         ciphertext: Base64Bytes::new(vec![0; 16]),
     };
-    assert_eq!(message_signing_bytes(&golden)?, br#"["phi message v1",["AAAAAAAAAAAAAAAAAAAAAA",0,"AAAAAAAAAAAAAAAAAAAAAA","AAAAAAAAAAAAAAAAAAAAAA",null,0,"main",[],"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","AAAAAAAAAAAAAAAAAAAAAA"]]"#);
+    assert_eq!(message_signing_bytes(&golden)?, br#"["phi message v2",["AAAAAAAAAAAAAAAAAAAAAA",0,"AAAAAAAAAAAAAAAAAAAAAA","AAAAAAAAAAAAAAAAAAAAAA",null,0,"main",false,[],"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","AAAAAAAAAAAAAAAAAAAAAA"]]"#);
     let mut variations = Vec::new();
     let mut e = envelope.clone();
     e.id = MessageId::from_bytes([9; 16]);
@@ -233,6 +233,9 @@ fn messages_roundtrip_and_authenticate_every_spec_field() -> Result<(), CryptoEr
     variations.push(e);
     let mut e = envelope.clone();
     e.summary_covers_seq = None;
+    variations.push(e);
+    let mut e = envelope.clone();
+    e.from_gui = !e.from_gui;
     variations.push(e);
 
     let mut e = envelope.clone();
@@ -586,7 +589,6 @@ fn trust_resolves_out_of_order_recursive_grants_to_the_root() -> Result<(), Cryp
             space_id: f.space(),
             person_id: record.data.person_id,
             device_id: DeviceId::from_bytes([3; 16]),
-            kind: DeviceKind::Cli,
             sign_pub: third.sign_public(),
             kex_pub: third.kex_public(),
             created_at: 50,
@@ -633,9 +635,6 @@ fn certificate_and_grant_tampering_never_become_verified_keys() -> Result<(), Cr
     assert!(verify_trust_bundle(f.space(), &hostile, 100, None).is_err());
     let mut forged = f.bundle.clone();
     forged.certificates[0].data.kex_pub = attacker.kex_public();
-    assert!(verify_trust_bundle(f.space(), &forged, 100, None).is_err());
-    forged = f.bundle.clone();
-    forged.certificates[0].data.kind = DeviceKind::Cli;
     assert!(verify_trust_bundle(f.space(), &forged, 100, None).is_err());
     forged = f.bundle.clone();
     forged.grants[0].data.grant_pub = attacker.sign_public();
@@ -717,10 +716,6 @@ fn grant_person_time_and_expiry_are_enforced_at_redemption() -> Result<(), Crypt
     let mut with_enrollment = f.bundle.clone();
     with_enrollment.grants.push(sign_grant(record, &f.keys)?);
     assert!(verify_trust_bundle(f.space(), &with_enrollment, 100, None).is_ok());
-    let mut cli_label = f.bundle.clone();
-    cli_label.certificates[0].data.kind = DeviceKind::Cli;
-    cli_label.certificates[0] = certify_with_grant(cli_label.certificates[0].data.clone(), &grant)?;
-    assert!(verify_trust_bundle(f.space(), &cli_label, 100, None).is_ok());
     let mut invalid = f.bundle.grants[0].data.clone();
     invalid.expires_at = None;
     assert!(sign_grant(invalid, &f.keys).is_err());

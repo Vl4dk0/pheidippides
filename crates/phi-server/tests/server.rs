@@ -175,7 +175,6 @@ impl Fixture {
                 space_id: sid,
                 person_id: pid,
                 device_id: did,
-                kind: DeviceKind::Cli,
                 sign_pub: key.sign_public(),
                 kex_pub: key.kex_public(),
                 created_at: timestamp() - 1000,
@@ -299,7 +298,6 @@ impl Fixture {
                 space_id: self.sid,
                 person_id: g.record.data.person_id,
                 device_id: DeviceId::from_bytes(bytes()),
-                kind: DeviceKind::Cli,
                 sign_pub: key.sign_public(),
                 kex_pub: key.kex_public(),
                 created_at: timestamp(),
@@ -343,6 +341,7 @@ impl Fixture {
             thread_id: thread,
             epoch: 0,
             handle: "main".parse()?,
+            from_gui: false,
             mentions,
             nonce: Nonce::from_bytes([1; 24]),
             ciphertext: Base64Bytes::new(vec![2; 16]),
@@ -661,13 +660,10 @@ async fn redeem_is_atomic_single_use_and_rejects_forged_certificates() -> TestRe
     forged.certificate.signature = Signature::from_bytes([0; 64]);
     let path = format!("/v1/grants/{}/redeem", k.id());
     assert_eq!(request(&f.app, "POST", &path, None, forged).await?.0, 400);
-    let mut declared_gui = r.clone();
-    declared_gui.certificate.data.kind = DeviceKind::Gui;
-    declared_gui.certificate = certify_with_grant(declared_gui.certificate.data, &k)?;
 
     let (a, b) = tokio::join!(
-        request(&f.app, "POST", &path, None, &declared_gui),
-        request(&f.app, "POST", &path, None, &declared_gui)
+        request(&f.app, "POST", &path, None, &r),
+        request(&f.app, "POST", &path, None, &r)
     );
     let mut status = [a?.0, b?.0];
     status.sort();

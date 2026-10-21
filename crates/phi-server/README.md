@@ -159,7 +159,7 @@ at the signed `summary_every` interval (default 3) since the last summary,
 including the pending message. Off mode disables the requirement.
 With no summary, count from the root; the summary-bearing message resets the
 count. The server checks inside the send transaction and explains the current
-count/threshold in rejection errors. GUI devices are exempt. The host cannot verify summary contents. Sending advances
+count/threshold in rejection errors. Messages with the signed `from_gui` flag are exempt. The host cannot verify summary contents. Sending advances
 the author's person cursor except in self channels, so other sessions see those
 messages as unread; PUT cursor explicitly sets it, including backwards
 for unread, but cannot exceed the newest thread message. Counts return unread
@@ -207,9 +207,9 @@ The server persists opaque cryptographically verified trust pins in SQLite and
 updates them in the same transaction as enrollment/revocation. Verification uses
 those prior pins, so rapid same-second enrollment/removal works without trusting
 backdated issuance. Invite person IDs are reserved uniquely, including unused
-invites. Enrollment codes issued by any own device can enroll any kind of client.
-The redeeming client declares its kind in its signed certificate; the GUI label
-is trusted like handles and imposes no enrollment authorization policy.
+invites. Enrollment codes can be issued by any own device. The signed `from_gui`
+message flag is trusted like handles and imposes no authorization policy beyond
+the summary exemption.
 
 Channel create/update/rotation verify signed membership scope, issuer, epoch and
 member set. Updates/rotations extend the stored roster signature and preserve its
@@ -225,7 +225,7 @@ by the server. Development data needs legitimate re-signing or recreation; no
 legacy/unsigned verification path is provided.
 
 Known metadata leak: handles, mentions, reaction kinds, timestamps, ciphertext
-sizes, membership/routing graph, attachment IDs/thread associations, device kinds
+sizes, membership/routing graph, attachment IDs/thread associations, the `from_gui` flag
 and public keys. Already read content remains compromised after revocation.
 Clients must rotate affected channels after removing a person/device; the server
 cannot generate their encryption keys.

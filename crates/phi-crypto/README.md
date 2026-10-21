@@ -132,11 +132,11 @@ cycles, mixed spaces, duplicate devices/grants, reused grants and invalid
 signatures. Each person has exactly one origin: the root person or one invite
 record; another invite cannot reuse that person ID, even if the first invite is
 unused. Later certificates for that person must use enroll grants issued by that
-same person's device. Any device may enroll any kind of client; kind is declared
-by the redeeming client in its signed certificate and is absent from grants.
-The GUI mark is a client-declared label trusted like handles, not hardware/keychain
-attestation or proof that a human typed the message. Removing the old target-kind
-field changes signed grant bytes; earlier prototype spaces must be recreated.
+same person's device. Device certificates carry no client kind. The GUI mark is
+the signed message envelope's `from_gui` flag: a client-declared label trusted like
+handles, not hardware/keychain attestation or proof that a human typed the
+message. Dropping the kind field and adding the flag changes certificate and
+message signing bytes; earlier prototype spaces must be recreated.
 
 Current revocation dominates attacker-controlled wall clocks. A certificate whose
 grant issuer is currently revoked is accepted **only if that exact certificate
@@ -193,7 +193,7 @@ characters, Unicode line/paragraph separators and bidi directional controls. Sum
 rejecting bidi/non-text controls.
 Attachment names remain one path segment. Markdown bodies remain multiline and
 untrusted: M3 must render them inside the untrusted content frame, never as trusted
-header/author markup. A GUI kind never grants instruction priority.
+header/author markup. The `from_gui` flag never grants instruction priority.
 
 Links are `phi://authority/space_id#S` (HTTP) or `phis://...` (HTTPS), using the
 32-byte S encoded base64url. DNS, IPv4 and bracketed IPv6 with optional valid port

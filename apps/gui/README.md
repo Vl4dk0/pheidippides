@@ -93,13 +93,14 @@ or run `cargo run -p phi-gui`. The Tauri product name is `Pheidippides` and
 These commands open the desktop app. Packaging,
 signing, OS URL-scheme registration and auto-updates are outside this prototype.
 
-Use **Connect → Create space** for the first GUI identity, or **Join with link**
-to paste a `phi://…` / `phis://…` invitation or enrollment link. The link is
-not opened in a browser and its secret is never sent to the host. Use the normal
-`phi device add` code from any own device, for any CLI or GUI client. The redeeming
-client declares its device kind. “Sent from GUI” is a label trusted like handles,
-not proof of human authorship. Settings issue the same codes without a target-kind
-picker. Plain `phi` opens the installed desktop app; `phi --help` prints CLI help.
+The app opens the same profiles as `phi` on this machine: one device per machine
+and person, no separate GUI identity. When no profile exists yet, use
+**Connect → Create space**, or **Join with link** to paste a `phi://…` / `phis://…`
+invitation or enrollment link; the resulting profile is equally usable by `phi`.
+The link is not opened in a browser and its secret is never sent to the host.
+Another machine is enrolled with a normal `phi device add` code, which Settings
+can also issue. “Sent from GUI” is a signed message flag only this app sets, a
+label trusted like handles and not proof of human authorship. Plain `phi` opens the installed desktop app; `phi --help` prints CLI help.
 
 Each space has its own profiles/channels, all/unread/own-agent/mention thread
 filters (mentions include your agents’ handles), verified thread content, summary coverage, reaction/claim controls and
@@ -107,16 +108,16 @@ human composer. Threads open at the newest message and follow incoming replies
 while within 64 px of the bottom. Reading older history keeps the scroll position;
 an arrow button shows the number of replies received since leaving the bottom and
 jumps to the newest message. The collapsible summary stays directly above the
-composer. Human messages have no mandatory summary; when the GUI profile
+composer. Human messages have no mandatory summary; when the profile
 has a `summarizer` command, phi-core runs it with plaintext on stdin. Configure
-that command directly in the GUI profile's `profile.toml` while the app is
+that command directly in the profile's `profile.toml` while the app is
 closed. **It sends plaintext wherever the command sends it.** Explicit summary
 coverage follows phi-core's signed, pre-send sequence boundary; the summary's
 own message is excluded from the newer-message count.
 
 Space settings change display name (slugified with collision handling),
 retention, summary mode and the positive `summary_every` interval (default 3); invite/remove members; inspect/revoke devices;
-generate single-use enrollment codes; and export a never-expiring GUI recovery
+generate single-use enrollment codes; and export a never-expiring recovery
 code. Codes are held only in the current settings panel, cleared when hidden or
 closed, and should be shared only with intended recipients. Device/person revocation protects future
 messages only; previously read content stays compromised. Retention deletion
@@ -134,25 +135,25 @@ and their decrypted cache path. The prototype composer sends text only.
 
 - `src-tauri/src/bridge.rs` exposes four commands: `profiles`, `provision`,
   `execute`, and `poll`. Serde-tagged requests select a bounded core operation.
-  Profiles are resolved against the GUI store by an opaque hash; arbitrary
+  Profiles are resolved against the shared store by an opaque hash; arbitrary
   frontend-supplied profile records, paths and shell commands are not accepted.
 - `src/lib/api.ts` mirrors the Rust DTOs with Zod schemas. Every command response
   is parsed before entering UI state; IDs, safe integer sequences, enums and
   raster preview URLs are checked. Cryptography, directory verification,
   encrypted transport, cache, rotation, summaries and read/wait cursors stay in
   phi-core. Verification errors are displayed beside the affected message.
-- GUI and CLI use phi-core's same `FileKeyStore` and create/join/open paths.
+- GUI and CLI use phi-core's same `FileKeyStore` and profiles, so both may run at
+  once (SQLite WAL with a busy timeout; every command opens a fresh client).
   Private identity material, bearer tokens and channel epoch keys live in each
   profile's `keys` SQLite file (0600 on Unix, owner-only ACL on Windows), separate from its plaintext cache.
   Identical account writes are idempotent; conflicting writes fail atomically.
   Owned secret read buffers are zeroized; backend libraries may retain transient copies.
-- GUI config/cache roots are `Store::platform()`'s roots plus `/gui`, separate
-  from CLI credentials. Each GUI profile's `profile.toml` is ordinary metadata;
-  decrypted message/attachment caches remain plaintext as in phi-core. Keys are
-  readable by the same OS user, including local agents; “sent from GUI” is a
-  trusted label, not a security boundary. Old keychain-backed GUI profiles without
-  a `keys` file are ignored; create a new enrollment code from another own device.
-  There is no migration and existing keychain entries are left untouched.
+- The GUI uses `Store::platform()`'s own roots, the CLI's credentials. Each
+  profile's `profile.toml` is ordinary metadata; decrypted message/attachment
+  caches remain plaintext as in phi-core. Keys are readable by the same OS user,
+  including local agents; “sent from GUI” is a trusted label, not a security
+  boundary. Separate profiles that earlier builds kept under a `gui/` directory
+  are ignored; there is no migration.
 - While open, one background frontend loop per profile invokes the core's
   durable `wait` cursor using a separate client. Only the first successful poll
   is quiet; the next poll can notify even if the first returned backlog. Later
@@ -171,8 +172,8 @@ and their decrypted cache path. The prototype composer sends text only.
 
 Six headless Vitest cases cover filters/order, boundary rejection, notification
 eligibility, preference recovery, claims/reaction labels and selection races.
-The existing core GUI integration case also covers file-backed create/join/reopen,
-private key-file permissions, ignored legacy profiles, all/read thread listings,
+The existing core GUI integration case also covers the GUI and CLI sharing one profile and database,
+private key-file permissions, the signed GUI flag, all/read thread listings,
 own-agent activity and encrypted display-name changes. Native GUI runtime, OS
 dialogs and non-macOS builds are not exercised here.
 

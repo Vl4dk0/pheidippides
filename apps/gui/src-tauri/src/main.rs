@@ -2,8 +2,8 @@
 mod bridge;
 
 fn main() -> Result<(), String> {
-    let platform = phi_core::Store::platform().map_err(|e| e.to_string())?;
-    let store = phi_core::Store::new(platform.root.join("gui"), platform.cache_root.join("gui"));
+    // The GUI is another front end to the CLI's profile, not a device of its own.
+    let store = phi_core::Store::platform().map_err(|e| e.to_string())?;
     tauri::Builder::default()
         .manage(bridge::AppState(store))
         .plugin(tauri_plugin_notification::init())

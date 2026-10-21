@@ -6,24 +6,24 @@
     personId,
     author,
     handle,
-    kind,
+    fromGui,
     compact = false,
   }: {
     personId: string;
     author: string;
     handle: string;
-    kind: 'cli' | 'gui';
+    fromGui: boolean;
     compact?: boolean;
   } = $props();
-  const Icon = $derived(kind === 'gui' ? User : agentAvatar(personId, handle));
+  const Icon = $derived(fromGui ? User : agentAvatar(personId, handle));
   const label = $derived(
-    kind === 'gui' ? `${author} · human` : `${author}/${handle} · agent`,
+    fromGui ? `${author} · human` : `${author}/${handle} · agent`,
   );
 </script>
 
 <span
   class:avatar={!compact}
-  class:human-avatar={!compact && kind === 'gui'}
+  class:human-avatar={!compact && fromGui}
   title={label}
   aria-label={label}><Icon size={compact ? 13 : 17} strokeWidth={1.75} /></span
 >

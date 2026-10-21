@@ -38,7 +38,7 @@ Setup
   join            Redeem an invite or enrollment link into a local profile
   init            Bind the current directory to one space (.phi)
   invite          Print a single-use link for a new person
-  device add      Print a link that enrolls another CLI or GUI device
+  device add      Print a link that enrolls another machine
   skill           Print the agent skill, or copy it into a directory
 
 Daily messaging
@@ -163,7 +163,7 @@ EXAMPLES:
     #[command(
         about = "Enroll, list, or revoke devices",
         long_about = "\
-A device is one CLI install or one GUI install for a person. add prints a 7-day enrollment link for any kind of device; the redeeming client declares cli or gui. list and revoke use device ids from list or who.",
+A device is one machine's profile for a person; the CLI and the desktop app on that machine share it. add prints a 7-day enrollment link for another machine. list and revoke use device ids from list or who.",
         after_long_help = "\
 EXAMPLES:
   phi device add
@@ -624,9 +624,9 @@ EXAMPLES:
 #[derive(Subcommand)]
 enum DeviceCommand {
     #[command(
-        about = "Print a link that enrolls another CLI or GUI device",
+        about = "Print a link that enrolls another machine",
         long_about = "\
-Print a 7-day, single-use enrollment link for this person. Redeem it with phi join on the other machine. That client chooses cli or gui; this command does not. Share the link only with yourself.",
+Print a 7-day, single-use enrollment link for this person. Redeem it with phi join on the other machine. Share the link only with yourself.",
         after_long_help = "\
 EXAMPLES:
   phi device add
@@ -637,7 +637,7 @@ EXAMPLES:
     #[command(
         about = "List devices, kinds, last seen, and revocations",
         long_about = "\
-One line per device: id, owner, kind (cli or gui), last-seen age or date, and revoked when it is revoked. Copy an id into phi device revoke.",
+One line per device: id, owner, last-seen age or date, and revoked when it is revoked. Copy an id into phi device revoke.",
         after_long_help = "\
 EXAMPLES:
   phi device list
@@ -1038,10 +1038,9 @@ async fn run(cli: Cli) -> Result<u8> {
                     DeviceCommand::List => {
                         for device in &client.devices {
                             println!(
-                                "{} · @{} · {:?} · last seen {}{}",
+                                "{} · @{} · last seen {}{}",
                                 device.cert.data.device_id,
                                 client.person_name(device.cert.data.person_id),
-                                device.cert.data.kind,
                                 device
                                     .last_seen_at
                                     .map(format_last_seen)

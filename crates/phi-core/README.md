@@ -7,19 +7,18 @@ No daemon, GUI, listener or server process is started by the library.
 - `Store::platform()` uses platform config/cache directories; `Store::new` accepts
   explicit roots for embedding/tests. Profile resolution and `.phi` binding live
   here so all frontends share the same isolation policy.
-- `Client::{create,join,open}` and `create_for_device`/`join_for_device` all use
-  the same `FileKeyStore`. `DeviceOptions` selects the device kind/name; GUI
-  callers use `kind=Gui` and separate config/cache roots via `Store::new`, keeping
-  distinct credentials for the same server/space. No OS credential service is used.
-  Earlier GUI profiles without a local `keys` file are ignored; re-enroll them
-  instead of migrating keychain entries. The client can move into a Send async task.
+- `Client::{create,join,open,open_gui}` all use the same `FileKeyStore`. The GUI
+  opens the CLI's own profile through `open_gui` (handle `gui`, `from_gui` set) with
+  the same `Store::platform()` roots: one device per machine and person. Both
+  front ends may use the profile's SQLite files concurrently (WAL, busy timeout).
+  No OS credential service is used. The client can move into a Send async task.
   `KeyStore` accounts atomically reject conflicting writes (identical writes are
   idempotent).
-- `invite` issues a code redeemable by any kind of client from any own device.
-  The redeeming client declares its kind; the GUI mark is a label trusted like
-  handles, not proof of human authorship. `invite(true, true)` issues a never-expiring enrollment/recovery code;
+- `invite` issues a code redeemable from any own device. The "sent from GUI" mark
+  is the signed `from_gui` envelope flag, set only by `open_gui` clients; it is a
+  label trusted like handles, not proof of human authorship. `invite(true, true)` issues a never-expiring enrollment/recovery code;
   invite grants always expire. The CLI exposes the default seven-day grants.
-- `send`/`reply` require summaries in CLI required mode at the signed `summary_every` interval (default 3)
+- `send`/`reply` require summaries outside `open_gui` clients in required mode at the signed `summary_every` interval (default 3)
   since the last summary, including the pending message (counting from the root
   when absent), encrypt attachments and populate blob routing
   references. `read` returns `ThreadView` with decrypted paths; `inbox`, `wait`,

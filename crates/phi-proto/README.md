@@ -86,8 +86,11 @@ epoch; PUT keys is only for same/historical-epoch enrollment self-rewraps.
 include the previous proof's signature, key commitment, scope, epoch, kind, members and issuer;
 updates/rotations must extend the stored proof. See phi-crypto's README for channel
 and directory pinning, #all expansion through signed invite origins, and bootstrap
-limits. Grants do not constrain device kind; the redeeming client declares it in
-its certificate. This replaces the earlier prototype's signed target-kind format.
+limits. Device certificates carry no client kind. "Sent from GUI" is the signed
+`MessageEnvelope.from_gui` flag, a label trusted like handles that a custom client
+can forge. It changes the message and certificate signing bytes (domain tags
+`phi message v2`, `phi device certificate v2`), so earlier prototype spaces must be
+recreated.
 Titles/names remain single-line; summaries allow bounded multiline text. Bidi and
 non-text controls remain forbidden.
 

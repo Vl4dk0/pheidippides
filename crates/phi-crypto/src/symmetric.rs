@@ -292,6 +292,7 @@ pub struct MessageMetadata {
     pub summary_covers_seq: Option<Seq>,
     pub thread_id: Option<MessageId>,
     pub handle: Handle,
+    pub from_gui: bool,
     pub mentions: Vec<Mention>,
 }
 fn message_aad(
@@ -316,7 +317,7 @@ pub fn message_signing_bytes(envelope: &MessageEnvelope) -> Result<Vec<u8>, Cryp
         .map(|m| (m.person_id, &m.handle))
         .collect();
     signing_bytes(
-        "phi message v1",
+        "phi message v2",
         &(
             envelope.id,
             envelope.summary_covers_seq,
@@ -325,6 +326,7 @@ pub fn message_signing_bytes(envelope: &MessageEnvelope) -> Result<Vec<u8>, Cryp
             envelope.thread_id,
             envelope.epoch,
             &envelope.handle,
+            envelope.from_gui,
             mentions,
             &envelope.nonce,
             &envelope.ciphertext,
@@ -391,6 +393,7 @@ pub fn encrypt_message(
         thread_id: metadata.thread_id,
         epoch: channel.epoch,
         handle: metadata.handle,
+        from_gui: metadata.from_gui,
         mentions: metadata.mentions,
         nonce: encrypted.nonce,
         ciphertext: encrypted.ciphertext,

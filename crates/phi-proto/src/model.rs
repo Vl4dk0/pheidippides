@@ -7,12 +7,6 @@ pub type Epoch = u64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum DeviceKind {
-    Cli,
-    Gui,
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum GrantKind {
     Invite,
     Enroll,
@@ -53,7 +47,6 @@ pub struct DeviceCertificateData {
     pub space_id: SpaceId,
     pub person_id: PersonId,
     pub device_id: DeviceId,
-    pub kind: DeviceKind,
     pub sign_pub: PublicKey,
     pub kex_pub: PublicKey,
     pub created_at: Timestamp,
@@ -139,6 +132,9 @@ pub struct MessageEnvelope {
     pub thread_id: Option<MessageId>,
     pub epoch: Epoch,
     pub handle: Handle,
+    /// Declared by the sending client and trusted like the handle: it marks a message typed by a
+    /// person in the GUI. A custom client can forge it; the signature only stops the host.
+    pub from_gui: bool,
     pub mentions: Vec<Mention>,
     pub nonce: Nonce,
     pub ciphertext: Base64Bytes,

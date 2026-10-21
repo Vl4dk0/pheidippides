@@ -8,12 +8,11 @@ pub fn certificate_signing_bytes(data: &DeviceCertificateData) -> Result<Vec<u8>
         CertificateIssuer::Grant { grant_id } => ("grant", grant_id.to_string()),
     };
     signing_bytes(
-        "phi device certificate v1",
+        "phi device certificate v2",
         &(
             data.space_id,
             data.person_id,
             data.device_id,
-            data.kind,
             &data.sign_pub,
             &data.kex_pub,
             data.created_at,

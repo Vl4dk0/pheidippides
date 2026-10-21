@@ -5,7 +5,6 @@ import { z } from 'zod';
 // tokens never cross this boundary; malformed native responses fail closed.
 export const id = z.string().regex(/^[A-Za-z0-9_-]{22}$/);
 const integer = z.number().int().nonnegative().safe();
-const kind = z.enum(['cli', 'gui']);
 export const reactionKind = z.enum(['up', 'down', 'ack', 'claim']);
 const summaryMode = z.enum(['required', 'off']);
 export const profileSchema = z.object({
@@ -77,7 +76,6 @@ export const snapshotSchema = z.object({
     z.object({
       id,
       person_id: id,
-      kind,
       revoked_at: integer.nullable(),
       last_seen_at: integer.nullable(),
     }),
@@ -101,7 +99,7 @@ export const threadSchema = z.object({
       author: z.string(),
       person_id: id,
       handle: z.string(),
-      kind,
+      from_gui: z.boolean(),
       created_at: integer,
       body: z.string(),
       verification_error: z.string().nullable(),

@@ -49,7 +49,7 @@ impl Db {
             };
             let settings = db.space(a.sid())?.settings;
             if settings.summary_mode == SummaryMode::Required
-                && a.cert.data.kind == DeviceKind::Cli
+                && !e.from_gui
                 && !r.has_summary
             {
                 // Count at commit so simultaneous replies cannot both bypass the threshold.

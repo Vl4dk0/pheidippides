@@ -103,7 +103,7 @@ describe('desktop state boundary', () => {
       author: 'a',
       person_id: id,
       handle: 'gui',
-      kind: 'gui',
+      from_gui: true,
       created_at: 1,
       body: '',
       verification_error: null,

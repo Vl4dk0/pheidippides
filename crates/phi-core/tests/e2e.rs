@@ -1955,82 +1955,58 @@ async fn tampered_message_attachment_and_sequence_are_rejected() -> Result<()> {
     Ok(())
 }
 
-fn gui_device() -> DeviceOptions {
-    DeviceOptions {
-        kind: DeviceKind::Gui,
-        name: "desktop".into(),
-    }
-}
 #[tokio::test]
-async fn gui_file_storage_and_self_declared_device_kind() -> Result<()> {
+async fn gui_and_cli_share_one_profile_and_database() -> Result<()> {
     let f = Fixture::new().await?;
-    let mut origin = Client::create_for_device(
-        f.store("origin"),
-        &f.url,
-        "gui-space",
-        "alice",
-        None,
-        gui_device(),
-    )
-    .await?;
-    let first = origin.invite(true, false).await?;
-    let competing = origin.invite(true, false).await?;
-    let mut gui = Client::join_for_device(f.store("gui"), &first, "alice", gui_device()).await?;
-    // A profile left by the external-key prototype must not block re-enrollment.
-    let legacy_store = f.store("competing-gui");
-    legacy_store.save_profile(&gui.profile)?;
-    ensure!(legacy_store.profiles()?.is_empty());
-    let competing_gui =
-        Client::join_for_device(legacy_store.clone(), &competing, "alice", gui_device()).await?;
-    ensure!(legacy_store.profiles()?.len() == 1);
-    ensure!(competing_gui.profile.kind == DeviceKind::Gui);
-    let keys_path = f.store("gui").profile_dir(&gui.profile).join("keys");
-    ensure!(keys_path.is_file());
-    ensure!(
-        f.store("origin")
-            .profile_dir(&origin.profile)
-            .join("keys")
-            .is_file()
-    );
+    let (alice, mut bob) = f.pair().await?;
+    let store = f.store("alice");
+    // Both front ends stay open at once on the same keys and cache, as the real apps do.
+    let mut cli = Client::open(store.clone(), alice.profile.clone(), None).await?;
+    let mut gui = Client::open_gui(store.clone(), alice.profile.clone()).await?;
+    ensure!(store.profiles()?.len() == 1 && gui.profile.device_id == cli.profile.device_id);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        ensure!(std::fs::metadata(&keys_path)?.permissions().mode() & 0o777 == 0o600);
+        let keys = store.profile_dir(&gui.profile).join("keys");
+        ensure!(std::fs::metadata(keys)?.permissions().mode() & 0o777 == 0o600);
     }
-    let link = gui.invite(true, false).await?;
-    let mut cli = Client::join(f.store("cli"), &link, "alice").await?;
     let root = gui
-        .send(
-            "#all",
-            "Human message",
-            SendOptions {
-                body: "from desktop".into(),
-                ..Default::default()
-            },
-        )
+        .send("#all", "Human message", {
+            // A person typing in the GUI is never asked for a thread summary.
+            let mut message = options("from desktop");
+            message.summary = None;
+            message
+        })
         .await?;
+    for n in 0..4 {
+        let mut message = options(&format!("human reply {n}"));
+        message.summary = None;
+        gui.reply(root.id, message).await?;
+    }
+    // The CLI sees the GUI's writes without reopening, labelled by the signed flag.
+    let view = cli.read(root.id, ReadOptions::default()).await?;
+    ensure!(view.text().contains("human · sent from GUI"));
     ensure!(
-        cli.read(root.id, ReadOptions::default())
+        bob.read(root.id, ReadOptions::default())
             .await?
             .text()
             .contains("human · sent from GUI")
     );
-    ensure!(cli.inbox().await?.is_empty());
     let threads = cli.threads().await?;
-    ensure!(
-        threads.len() == 1
-            && !threads[0].unread
-            && !threads[0].own_agent_activity
-            && !format_threads(&threads, &cli.names()).contains(UNTRUSTED_BANNER)
-    );
+    ensure!(threads.len() == 1 && !threads[0].own_agent_activity);
+    // Agents on the CLI still owe summaries once the threshold is reached.
+    let mut bare = options("agent follow-up");
+    bare.summary = None;
+    ensure!(matches!(
+        cli.reply(root.id, bare).await,
+        Err(Error::SummaryRequired(_))
+    ));
     cli.reply(root.id, options("Agent follow-up")).await?;
     ensure!(gui.threads().await?[0].own_agent_activity);
-    gui.set_display_name("Alice Desktop").await?;
-    cli.refresh().await?;
-    ensure!(cli.person_name(gui.profile.person_id) == "alice-desktop");
-    let mention = cli
+    // A mention of any handle reaches the person in the GUI, but only that handle's CLI session.
+    let mention = bob
         .send(
-            "@alice-desktop/reviewer",
+            "@alice/reviewer",
             "Agent mention",
             options("For your reviewer"),
         )
@@ -2041,34 +2017,15 @@ async fn gui_file_storage_and_self_declared_device_kind() -> Result<()> {
             .iter()
             .any(|entry| entry.id == mention.id && entry.mentioned)
     );
-    let cli_gui_enroll = cli.invite(true, false).await?;
-    let cli_enrolled_gui = Client::join_for_device(
-        f.store("cli-enrolled-gui"),
-        &cli_gui_enroll,
-        "alice",
-        gui_device(),
-    )
-    .await?;
-    ensure!(cli_enrolled_gui.profile.kind == DeviceKind::Gui);
-    let gui_code = gui.invite(true, true).await?;
-    let recovered_cli = Client::join(f.store("recovered-cli"), &gui_code, "alice").await?;
-    ensure!(recovered_cli.profile.kind == DeviceKind::Cli);
-    let gui_code = cli.invite(true, false).await?;
-    let gui2 = Client::join_for_device(f.store("gui2"), &gui_code, "alice", gui_device()).await?;
     ensure!(
-        gui2.profile.kind == DeviceKind::Gui && gui2.profile.person_id == gui.profile.person_id
-    );
-    let mut reopened = Client::open(f.store("gui"), gui.profile.clone(), None).await?;
-    ensure!(
-        reopened
-            .read(root.id, ReadOptions::default())
+        !cli.inbox()
             .await?
-            .text()
-            .contains("from desktop")
+            .iter()
+            .any(|entry| entry.id == mention.id && entry.mentioned)
     );
     // The shared core can be moved into a GUI async task without a local executor.
     tokio::spawn(async move {
-        let mut client = reopened;
+        let mut client = gui;
         client.counts().await
     })
     .await??;

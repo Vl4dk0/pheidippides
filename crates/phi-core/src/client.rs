@@ -70,24 +70,10 @@ pub struct SendOptions {
     pub summary: Option<String>,
     pub files: Vec<PathBuf>,
 }
-pub struct DeviceOptions {
-    pub kind: DeviceKind,
-    pub name: String,
-}
-impl Default for DeviceOptions {
-    fn default() -> Self {
-        Self {
-            kind: DeviceKind::Cli,
-            name: "cli".into(),
-        }
-    }
-}
-impl DeviceOptions {
-    fn validate(&self) -> Result<()> {
-        let _: Handle = self.name.parse()?;
-        Ok(())
-    }
-}
+/// Handle the GUI sends and reacts under.
+const GUI_HANDLE: &str = "gui";
+/// Default handle of every device: the CLI is the only client that enrolls devices.
+const DEVICE_NAME: &str = "cli";
 
 struct WaitBatch {
     events: Vec<WaitEntry>,
@@ -98,6 +84,9 @@ struct WaitBatch {
 pub struct Client {
     pub profile: Profile,
     pub handle: Handle,
+    /// Set only by the GUI entry point: a person is typing, so mentions of any handle reach them,
+    /// no summary is demanded, and sent messages carry the "sent from GUI" label.
+    pub from_gui: bool,
     pub channels: Vec<NamedChannel>,
     pub settings: SpaceSettings,
     pub devices: Vec<Device>,
@@ -119,25 +108,6 @@ impl Client {
         display_name: &str,
         admin_token: Option<String>,
     ) -> Result<Self> {
-        Self::create_for_device(
-            store,
-            server,
-            name,
-            display_name,
-            admin_token,
-            DeviceOptions::default(),
-        )
-        .await
-    }
-    pub async fn create_for_device(
-        store: Store,
-        server: &str,
-        name: &str,
-        display_name: &str,
-        admin_token: Option<String>,
-        device: DeviceOptions,
-    ) -> Result<Self> {
-        device.validate()?;
         validate_name(name)?;
         let keys = DeviceKeys::generate(&mut entropy)?;
         let sid = space_id(&keys.sign_public());
@@ -148,7 +118,6 @@ impl Client {
                 space_id: sid,
                 person_id: pid,
                 device_id: did,
-                kind: device.kind,
                 sign_pub: keys.sign_public(),
                 kex_pub: keys.kex_public(),
                 created_at: now(),
@@ -200,9 +169,8 @@ impl Client {
             space_id: sid,
             person_id: pid,
             device_id: did,
-            device_name: device.name.clone(),
+            device_name: DEVICE_NAME.into(),
             display_name: unique_slug(display_name, &BTreeMap::new()),
-            kind: device.kind,
             summarizer: None,
         };
         let (sign, kex) = keys.export_secrets();
@@ -221,18 +189,9 @@ impl Client {
         let mut cache = Cache::open(&store.cache_dir(&profile).join("cache.db"))?;
         cache.trust(sid, &bundle)?;
         store.save_profile(&profile)?;
-        Self::open_with_keystore(store, profile, None, key_store).await
+        Self::open_with_keystore(store, profile, None, false, key_store).await
     }
     pub async fn join(store: Store, encoded: &str, name: &str) -> Result<Self> {
-        Self::join_for_device(store, encoded, name, DeviceOptions::default()).await
-    }
-    pub async fn join_for_device(
-        store: Store,
-        encoded: &str,
-        name: &str,
-        device: DeviceOptions,
-    ) -> Result<Self> {
-        device.validate()?;
         let link = GrantLink::parse(encoded)?;
         if store
             .profiles()?
@@ -261,7 +220,6 @@ impl Client {
                 space_id: link.space_id(),
                 person_id: data.person_id,
                 device_id: did,
-                kind: device.kind,
                 sign_pub: keys.sign_public(),
                 kex_pub: keys.kex_public(),
                 created_at: now(),
@@ -294,9 +252,8 @@ impl Client {
             space_id: link.space_id(),
             person_id: data.person_id,
             device_id: did,
-            device_name: device.name.clone(),
+            device_name: DEVICE_NAME.into(),
             display_name: unique_slug(name, &BTreeMap::new()),
-            kind: device.kind,
             summarizer: None,
         };
         if store
@@ -382,7 +339,7 @@ impl Client {
             }
         }
         store.save_profile(&profile)?;
-        let mut client = Self::open_with_keystore(store, profile, None, key_store).await?;
+        let mut client = Self::open_with_keystore(store, profile, None, false, key_store).await?;
         client.register_name(name).await?;
         if !client
             .channels
@@ -401,12 +358,18 @@ impl Client {
     }
     pub async fn open(store: Store, profile: Profile, handle: Option<&str>) -> Result<Self> {
         let keys = FileKeyStore::open(&store.profile_dir(&profile).join("keys"))?;
-        Self::open_with_keystore(store, profile, handle, Box::new(keys)).await
+        Self::open_with_keystore(store, profile, handle, false, Box::new(keys)).await
+    }
+    /// Opens the person's own CLI profile on behalf of the GUI, where a human types.
+    pub async fn open_gui(store: Store, profile: Profile) -> Result<Self> {
+        let keys = FileKeyStore::open(&store.profile_dir(&profile).join("keys"))?;
+        Self::open_with_keystore(store, profile, Some(GUI_HANDLE), true, Box::new(keys)).await
     }
     async fn open_with_keystore(
         store: Store,
         profile: Profile,
         handle: Option<&str>,
+        from_gui: bool,
         keys: Box<dyn KeyStore>,
     ) -> Result<Self> {
         let identity: Identity = load_json(keys.as_ref(), "identity")?;
@@ -414,7 +377,6 @@ impl Client {
         if cert.space_id != profile.space_id
             || cert.person_id != profile.person_id
             || cert.device_id != profile.device_id
-            || cert.kind != profile.kind
             || cert.sign_pub != identity.keys().sign_public()
             || cert.kex_pub != identity.keys().kex_public()
         {
@@ -431,6 +393,7 @@ impl Client {
         let mut client = Self {
             profile,
             handle,
+            from_gui,
             channels: vec![],
             settings: SpaceSettings::default(),
             devices: devices.devices,
@@ -808,7 +771,7 @@ impl Client {
             .map_or(history.len(), |i| history.len() - i - 1)
             .saturating_add(1);
         SummaryPreflight {
-            required: self.profile.kind == DeviceKind::Cli
+            required: !self.from_gui
                 && self.settings.summary_mode == SummaryMode::Required
                 && u64::try_from(messages_since_summary).unwrap_or(u64::MAX)
                     >= u64::from(self.settings.summary_every),
@@ -946,6 +909,7 @@ impl Client {
                 summary_covers_seq: coverage,
                 thread_id: thread,
                 handle: self.handle.clone(),
+                from_gui: self.from_gui,
                 mentions,
             },
             &content,
@@ -1046,17 +1010,17 @@ impl Client {
                         &message.envelope,
                         &message.signature,
                     )?;
-                    Ok((author.certificate().data.kind, content))
+                    Ok(content)
                 })();
-                let (author_kind, content, verification_error) = match verified {
-                    Ok((kind, content)) => {
+                let (from_gui, content, verification_error) = match verified {
+                    Ok(content) => {
                         self.cache.message(&message, &content)?;
-                        (kind, content, None)
+                        (message.envelope.from_gui, content, None)
                     }
                     Err(error) => {
                         let description = error.to_string();
                         (
-                            DeviceKind::Cli,
+                            false,
                             MessageContent {
                                 title: message
                                     .envelope
@@ -1079,7 +1043,7 @@ impl Client {
                     content,
                     attachments: vec![],
                     reactions: vec![],
-                    author_kind,
+                    from_gui,
                     verification_error,
                 });
             }
@@ -1571,8 +1535,7 @@ impl Client {
     fn addressed_to_me(&self, mentions: &[Mention]) -> bool {
         mentions.iter().any(|m| {
             m.person_id == self.profile.person_id
-                && (self.profile.kind == DeviceKind::Gui
-                    || m.handle.as_ref().is_none_or(|h| h == &self.handle))
+                && (self.from_gui || m.handle.as_ref().is_none_or(|h| h == &self.handle))
         })
     }
     fn thread_root(&self, message: &Message) -> Result<Message> {
@@ -1658,7 +1621,7 @@ impl Client {
                 || thread.iter().filter(|m| m.message.seq > cursor).any(|m| {
                     m.message.envelope.mentions.iter().any(|mention| {
                         mention.person_id == self.profile.person_id
-                            && (self.profile.kind == DeviceKind::Gui
+                            && (self.from_gui
                                 || mention.handle.as_ref().is_none_or(|h| h == &self.handle))
                     })
                 });
@@ -1697,7 +1660,7 @@ impl Client {
                 unread: latest.message.seq > cursor,
                 own_agent_activity: thread.iter().any(|m| {
                     m.message.author_person == self.profile.person_id
-                        && m.author_kind == DeviceKind::Cli
+                        && !m.from_gui
                         && m.verification_error.is_none()
                 }),
                 reactions: thread.iter().flat_map(|m| m.reactions.clone()).collect(),
@@ -2273,7 +2236,7 @@ impl Client {
                     mentioned: self.addressed_to_me(&root.envelope.mentions),
                     unread: true,
                     own_agent_activity: message.author_person == self.profile.person_id
-                        && author.certificate().data.kind == DeviceKind::Cli,
+                        && !message.envelope.from_gui,
                     reactions: self.thread_reactions(root.id)?,
                     message_numbers: BTreeMap::new(),
                     latest_message: message.id,
@@ -2697,7 +2660,7 @@ impl Client {
             number: self.cached_reference(message.id)?.map_or(0, |r| r.number),
             perspective: self.perspective(&message),
             reactions: self.reactions(message.id)?,
-            author_kind: author.certificate().data.kind,
+            from_gui: message.envelope.from_gui,
             message,
             content,
             attachments: vec![],
@@ -2736,7 +2699,6 @@ impl Client {
                     .filter(|d| d.cert.data.person_id == id)
                     .map(|d| DeviceView {
                         id: d.cert.data.device_id,
-                        kind: d.cert.data.kind,
                         last_seen_at: d.last_seen_at,
                         last_seen: d
                             .last_seen_at

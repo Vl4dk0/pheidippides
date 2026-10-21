@@ -1,10 +1,6 @@
 use base64::{Engine, engine::general_purpose::STANDARD};
-use phi_core::{
-    Client, DeviceOptions, Profile, ReadOptions, SendOptions, Store, WaitEntry, reaction_summary,
-};
-use phi_proto::{
-    ChannelKind, DeviceKind, MessageId, ReactionKind, RevocationTarget, SpaceId, SummaryMode,
-};
+use phi_core::{Client, Profile, ReadOptions, SendOptions, Store, WaitEntry, reaction_summary};
+use phi_proto::{ChannelKind, MessageId, ReactionKind, RevocationTarget, SpaceId, SummaryMode};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use tauri::State;
@@ -61,7 +57,6 @@ struct ChannelView {
 struct DeviceView {
     id: phi_proto::DeviceId,
     person_id: phi_proto::PersonId,
-    kind: DeviceKind,
     revoked_at: Option<u64>,
     last_seen_at: Option<u64>,
 }
@@ -169,7 +164,7 @@ struct MessageView {
     author: String,
     person_id: phi_proto::PersonId,
     handle: String,
-    kind: DeviceKind,
+    from_gui: bool,
     created_at: u64,
     body: String,
     verification_error: Option<String>,
@@ -206,12 +201,6 @@ pub enum Provision {
         admin_token: Option<String>,
     },
 }
-fn device() -> DeviceOptions {
-    DeviceOptions {
-        kind: DeviceKind::Gui,
-        name: "gui".into(),
-    }
-}
 #[tauri::command]
 pub fn profiles(state: State<'_, AppState>) -> Result<Vec<ProfileView>, String> {
     Ok(state
@@ -219,7 +208,6 @@ pub fn profiles(state: State<'_, AppState>) -> Result<Vec<ProfileView>, String> 
         .profiles()
         .map_err(err)?
         .iter()
-        .filter(|p| p.kind == DeviceKind::Gui)
         .map(ProfileView::from)
         .collect())
 }
@@ -231,24 +219,14 @@ pub async fn provision(
     let store = state.0.clone();
     let client = match request {
         Provision::Join { link, display_name } => {
-            Client::join_for_device(store.clone(), &link, &display_name, device()).await
+            Client::join(store.clone(), &link, &display_name).await
         }
         Provision::Create {
             server,
             name,
             display_name,
             admin_token,
-        } => {
-            Client::create_for_device(
-                store.clone(),
-                &server,
-                &name,
-                &display_name,
-                admin_token,
-                device(),
-            )
-            .await
-        }
+        } => Client::create(store.clone(), &server, &name, &display_name, admin_token).await,
     }
     .map_err(err)?;
     Ok(ProfileView::from(&client.profile))
@@ -258,11 +236,9 @@ async fn open(store: &Store, id: &str) -> Result<Client, String> {
         .profiles()
         .map_err(err)?
         .into_iter()
-        .find(|p| p.kind == DeviceKind::Gui && profile_id(p) == id)
-        .ok_or("unknown GUI profile")?;
-    Client::open(store.clone(), profile, Some("gui"))
-        .await
-        .map_err(err)
+        .find(|p| profile_id(p) == id)
+        .ok_or("unknown profile")?;
+    Client::open_gui(store.clone(), profile).await.map_err(err)
 }
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -368,7 +344,6 @@ pub async fn execute(
                     .map(|d| DeviceView {
                         id: d.cert.data.device_id,
                         person_id: d.cert.data.person_id,
-                        kind: d.cert.data.kind,
                         revoked_at: d.revoked_at,
                         last_seen_at: d.last_seen_at,
                     })
@@ -426,7 +401,7 @@ pub async fn execute(
                     author: client.person_name(message.message.author_person),
                     person_id: message.message.author_person,
                     handle: message.message.envelope.handle.to_string(),
-                    kind: message.author_kind,
+                    from_gui: message.from_gui,
                     created_at: message.message.created_at,
                     body: message.content.body,
                     verification_error: message.verification_error,

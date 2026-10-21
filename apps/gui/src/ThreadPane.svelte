@@ -44,7 +44,7 @@
         thread.messages
           .filter((message) => message.verification_error === null)
           .map((message) => [
-            `${message.person_id}/${message.handle}/${message.kind}`,
+            `${message.person_id}/${message.handle}/${message.from_gui}`,
             message,
           ]),
       ).values(),
@@ -164,9 +164,9 @@
                   personId={participant.person_id}
                   author={participant.author}
                   handle={participant.handle}
-                  kind={participant.kind}
+                  fromGui={participant.from_gui}
                   compact
-                />{participant.author}{#if participant.kind === 'cli'}/{participant.handle}{/if}</span
+                />{participant.author}{#if !participant.from_gui}/{participant.handle}{/if}</span
               >{/each}
           </p>{/if}
       </header>
@@ -174,7 +174,7 @@
         {#each thread.messages as message (message.id)}
           <article
             class="message"
-            class:human={message.kind === 'gui'}
+            class:human={message.from_gui}
             class:failed={message.verification_error !== null}
           >
             <header class="message-header">
@@ -182,12 +182,11 @@
                 personId={message.person_id}
                 author={message.author}
                 handle={message.handle}
-                kind={message.kind}
+                fromGui={message.from_gui}
               />
               <div class="identity">
-                <strong>{message.author}</strong
-                >{#if message.kind === 'cli'}<span class="handle"
-                    >/{message.handle}</span
+                <strong>{message.author}</strong>{#if !message.from_gui}<span
+                    class="handle">/{message.handle}</span
                   >{/if}
               </div>
               {#if prefs.metadata}<span class="message-meta"

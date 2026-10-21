@@ -20,7 +20,7 @@ pub struct DecodedMessage {
     pub content: MessageContent,
     pub attachments: Vec<PathBuf>,
     pub reactions: Vec<Reaction>,
-    pub author_kind: DeviceKind,
+    pub from_gui: bool,
     pub verification_error: Option<String>,
 }
 #[derive(Clone, Copy, Default)]
@@ -446,9 +446,10 @@ fn format_addressed_message(
         .get(&m.author_person)
         .cloned()
         .unwrap_or_else(|| m.author_person.to_string());
-    let kind = match message.author_kind {
-        DeviceKind::Cli => "agent",
-        DeviceKind::Gui => "human · sent from GUI",
+    let kind = if message.from_gui {
+        "human · sent from GUI"
+    } else {
+        "agent"
     };
     let perspective = match message.perspective {
         MessagePerspective::You => format!("you · {kind}"),
@@ -628,7 +629,6 @@ pub(crate) fn reaction_notice_kind(reaction: &Reaction) -> &'static str {
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct DeviceView {
     pub id: DeviceId,
-    pub kind: DeviceKind,
     pub last_seen_at: Option<u64>,
     pub last_seen: String,
     pub revoked: bool,
@@ -651,9 +651,8 @@ impl DirectoryView {
             out.push_str(&format!("@{} ({})\n", person.name, person.id));
             for d in &person.devices {
                 out.push_str(&format!(
-                    "  {} · {:?} · last seen {}{}\n",
+                    "  {} · last seen {}{}\n",
                     d.id,
-                    d.kind,
                     d.last_seen,
                     if d.revoked { " · revoked" } else { "" }
                 ));
@@ -712,7 +711,7 @@ impl DecodedMessage {
             "seq": m.seq, "number": self.number, "reference": self.reference().to_string(),
             "author_person": m.author_person, "author_device": m.author_device,
             "author": names.get(&m.author_person).cloned().unwrap_or_else(|| m.author_person.to_string()),
-            "handle": m.envelope.handle, "author_kind": self.author_kind,
+            "handle": m.envelope.handle, "from_gui": self.from_gui,
             "perspective": match self.perspective { MessagePerspective::You => "you", MessagePerspective::YourOtherSession => "your_other_session", MessagePerspective::Other => "other" },
             "trusted": self.perspective != MessagePerspective::Other && self.verification_error.is_none(),
             "created_at": m.created_at, "created": timestamp(m.created_at),
