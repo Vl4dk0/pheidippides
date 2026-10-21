@@ -25,6 +25,8 @@ pub enum CryptoError {
     Epoch,
     #[error("invalid trust chain: {0}")]
     Trust(&'static str),
+    #[error("revoked device, or not covered by its issuer's revocation history")]
+    Revoked,
     #[error("invalid phi link: {0}")]
     Link(&'static str),
     #[error("serialization failed: {0}")]

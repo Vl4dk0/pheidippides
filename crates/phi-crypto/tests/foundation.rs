@@ -1,6 +1,7 @@
 use phi_crypto::*;
 use phi_proto::*;
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
 
 struct TestEntropy {
     seed: u8,
@@ -758,6 +759,7 @@ fn signed_revocations_exclude_devices_and_persons_and_reject_forgery() -> Result
         },
         issuer_device: f.root(),
         created_at: 30,
+        history: history_root(&[])?,
     };
     f.bundle
         .revocations
@@ -793,11 +795,182 @@ fn signed_revocations_exclude_devices_and_persons_and_reject_forgery() -> Result
     Ok(())
 }
 
+fn sorted(signatures: impl IntoIterator<Item = Signature>) -> Vec<Signature> {
+    signatures
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+fn assert_same(
+    space: SpaceId,
+    bundle: &TrustBundle,
+    pinned: &PinnedTrustState,
+    mut check: impl FnMut(&mut VerifiedDirectory) -> Result<(), CryptoError>,
+) -> Result<(), CryptoError> {
+    check(&mut verify_trust_bundle(space, bundle, 100, None)?)?;
+    check(&mut verify_trust_bundle(space, bundle, 100, Some(pinned))?)?;
+    Ok(())
+}
+fn enroll(
+    f: &mut Fixture,
+    device_id: DeviceId,
+    created_at: u64,
+) -> Result<DeviceCertificate, CryptoError> {
+    let grant = GrantSecret::generate(&mut f.entropy)?.derive()?;
+    let record = sign_grant(
+        GrantRecordData {
+            space_id: f.space(),
+            grant_id: grant.id(),
+            grant_pub: grant.public(),
+            kind: GrantKind::Enroll,
+            person_id: f.bundle.root.data.person_id,
+            created_at,
+            expires_at: None,
+            issuer_device: f.root(),
+        },
+        &f.keys,
+    )?;
+    let keys = DeviceKeys::generate(&mut f.entropy)?;
+    let cert = certify_with_grant(
+        DeviceCertificateData {
+            space_id: f.space(),
+            person_id: record.data.person_id,
+            device_id,
+            sign_pub: keys.sign_public(),
+            kex_pub: keys.kex_public(),
+            created_at: created_at + 1,
+            issuer: CertificateIssuer::Grant {
+                grant_id: grant.id(),
+            },
+        },
+        &grant,
+    )?;
+    f.bundle.grants.push(record);
+    f.bundle.certificates.push(cert.clone());
+    Ok(cert)
+}
+
 #[test]
-fn pinned_issuance_survives_revocation_but_backdated_successors_fail() -> Result<(), CryptoError> {
+fn revocation_history_is_the_only_evidence_for_a_revoked_signer() -> Result<(), CryptoError> {
     let mut f = Fixture::new()?;
-    let (_, grant) = f.member()?;
+    let (member_keys, _) = f.member()?;
+    let member = DeviceId::from_bytes([2; 16]);
+    let member_person = PersonId::from_bytes([2; 16]);
+    let enrolled = enroll(&mut f, DeviceId::from_bytes([3; 16]), 31)?;
+    let backdated = enroll(&mut f, DeviceId::from_bytes([9; 16]), 33)?;
     let pinned = f.directory()?.pinned_state();
+    let channel = f.channel()?;
+    let (envelope, signature) = encrypt_message(
+        &channel,
+        &member_keys,
+        metadata()?,
+        &content(),
+        &mut f.entropy,
+    )?;
+    let message = Message {
+        id: envelope.id,
+        author_person: member_person,
+        author_device: member,
+        signature,
+        seq: 1,
+        created_at: 40,
+        has_summary: envelope.summary_covers_seq.is_some(),
+        summary_covers_seq: envelope.summary_covers_seq,
+        envelope,
+    };
+    let mut fresh_meta = metadata()?;
+    fresh_meta.id = MessageId::from_bytes([8; 16]);
+    let (fresh_envelope, fresh_signature) = encrypt_message(
+        &channel,
+        &member_keys,
+        fresh_meta,
+        &content(),
+        &mut f.entropy,
+    )?;
+    let fresh = Message {
+        id: fresh_envelope.id,
+        signature: fresh_signature,
+        envelope: fresh_envelope,
+        ..message.clone()
+    };
+    let mut resigned_envelope = message.envelope.clone();
+    resigned_envelope.ciphertext = tamper(&resigned_envelope.ciphertext);
+    let resigned = Message {
+        signature: member_keys.sign(&message_signing_bytes(&resigned_envelope)?),
+        envelope: resigned_envelope,
+        ..message.clone()
+    };
+    let settings = sign_settings(
+        SettingsChangeData {
+            space_id: f.space(),
+            issuer_device: member,
+            created_at: 40,
+            settings: SpaceSettings::default(),
+        },
+        &member_keys,
+    )?;
+    let mut unlisted_settings = settings.data.clone();
+    unlisted_settings.created_at = 41;
+    unlisted_settings.settings.summary_every = 5;
+    let unlisted_settings = sign_settings(unlisted_settings, &member_keys)?;
+    let state = sign_thread_state(
+        ThreadStateData {
+            space_id: f.space(),
+            thread_id: MessageId::from_bytes([1; 16]),
+            person_id: member_person,
+            device_id: member,
+            handle: "main".parse()?,
+            closed: true,
+            created_at: 40,
+        },
+        &member_keys,
+    )?;
+    let mut unlisted_state = state.data.clone();
+    unlisted_state.created_at = 42;
+    let unlisted_state = sign_thread_state(unlisted_state, &member_keys)?;
+    let reaction = sign_reaction(
+        ReactionData {
+            space_id: f.space(),
+            message_id: MessageId::from_bytes([1; 16]),
+            person_id: member_person,
+            device_id: member,
+            handle: "reviewer".parse()?,
+            kind: ReactionKind::Claim,
+            created_at: 40,
+            remove: false,
+        },
+        &member_keys,
+    )?;
+    let mut bad_reaction = reaction.clone();
+    bad_reaction.data.remove = true;
+    let member_list = sorted([
+        message.signature.clone(),
+        settings.signature.clone(),
+        state.signature.clone(),
+    ]);
+    let member_root = history_root(&member_list)?;
+    let root_list = sorted([
+        enrolled.signature.clone(),
+        f.bundle
+            .certificates
+            .iter()
+            .find(|cert| cert.data.device_id == member)
+            .ok_or(CryptoError::Trust("member certificate missing"))?
+            .signature
+            .clone(),
+    ]);
+    let root_history = history_root(&root_list)?;
+    f.bundle.revocations.push(sign_revocation(
+        RevocationData {
+            space_id: f.space(),
+            target: RevocationTarget::Device { device_id: member },
+            issuer_device: f.root(),
+            created_at: 60,
+            history: member_root,
+        },
+        &f.keys,
+    )?);
     f.bundle.revocations.push(sign_revocation(
         RevocationData {
             space_id: f.space(),
@@ -805,46 +978,293 @@ fn pinned_issuance_survives_revocation_but_backdated_successors_fail() -> Result
                 device_id: f.root(),
             },
             issuer_device: f.root(),
-            created_at: 30,
+            created_at: 60,
+            history: root_history,
         },
         &f.keys,
     )?);
-    assert!(f.directory().is_err());
-    let verified = verify_trust_bundle(f.space(), &f.bundle, 100, Some(&pinned))?;
-    assert!(verified.device(f.root()).is_err());
-    assert!(verified.device(DeviceId::from_bytes([2; 16])).is_ok());
-    assert_eq!(
-        verified.grant_certificates().get(&grant.id()),
-        Some(&f.bundle.certificates[0])
-    );
-    let mut equivocation = f.bundle.clone();
-    equivocation.certificates[0].data.device_id = DeviceId::from_bytes([9; 16]);
-    equivocation.certificates[0] =
-        certify_with_grant(equivocation.certificates[0].data.clone(), &grant)?;
-    assert!(verify_trust_bundle(f.space(), &equivocation, 100, Some(&pinned)).is_err());
-    let mut missing = f.bundle.clone();
-    missing.certificates.clear();
-    assert!(verify_trust_bundle(f.space(), &missing, 100, Some(&pinned)).is_err());
-    let mut missing = f.bundle.clone();
-    missing.grants.clear();
-    assert!(verify_trust_bundle(f.space(), &missing, 100, Some(&pinned)).is_err());
-    let successor_grant = GrantSecret::from_bytes([99; 32]).derive()?;
-    let mut record = f.bundle.grants[0].data.clone();
-    record.grant_id = successor_grant.id();
-    record.grant_pub = successor_grant.public();
-    record.kind = GrantKind::Enroll;
-    record.person_id = f.bundle.root.data.person_id;
-    f.bundle.grants.push(sign_grant(record.clone(), &f.keys)?);
-    let mut cert = f.bundle.certificates[0].data.clone();
-    cert.device_id = DeviceId::from_bytes([9; 16]);
-    cert.person_id = record.person_id;
-    cert.issuer = CertificateIssuer::Grant {
-        grant_id: successor_grant.id(),
+    let superset = sorted([
+        message.signature.clone(),
+        settings.signature.clone(),
+        state.signature.clone(),
+        unlisted_settings.signature.clone(),
+    ]);
+    let superset_root = history_root(&superset)?;
+    let narrowed = vec![settings.signature.clone()];
+    let narrowed_root = history_root(&narrowed)?;
+    assert_same(f.space(), &f.bundle, &pinned, |directory| {
+        assert!(matches!(
+            directory.verify_message(&message),
+            Err(CryptoError::Revoked)
+        ));
+        assert!(matches!(
+            directory.verify_settings(&settings),
+            Err(CryptoError::Revoked)
+        ));
+        assert!(matches!(
+            directory.verify_thread_state(&state),
+            Err(CryptoError::Revoked)
+        ));
+        assert!(matches!(
+            directory.device(member),
+            Err(CryptoError::Revoked)
+        ));
+        assert!(matches!(
+            directory.device(f.root()),
+            Err(CryptoError::Revoked)
+        ));
+        assert!(matches!(
+            directory.device(enrolled.data.device_id),
+            Err(CryptoError::Revoked)
+        ));
+        assert!(directory.attach_history(member_root, &[]).is_err());
+        assert!(directory.attach_history(member_root, &root_list).is_err());
+        directory.attach_history(member_root, &member_list)?;
+        directory.attach_history(root_history, &root_list)?;
+        let verified = directory.verify_message(&message)?;
+        assert!(!verified.active());
+        assert!(matches!(
+            directory.verify_message(&fresh),
+            Err(CryptoError::Revoked)
+        ));
+        assert!(matches!(
+            directory.verify_message(&resigned),
+            Err(CryptoError::Revoked)
+        ));
+        directory.verify_settings(&settings)?;
+        assert!(matches!(
+            directory.verify_settings(&unlisted_settings),
+            Err(CryptoError::Revoked)
+        ));
+        directory.verify_thread_state(&state)?;
+        assert!(matches!(
+            directory.verify_thread_state(&unlisted_state),
+            Err(CryptoError::Revoked)
+        ));
+        assert!(!directory.reaction_counts(&reaction)?);
+        assert!(directory.reaction_counts(&bad_reaction).is_err());
+        assert!(directory.device(enrolled.data.device_id)?.active());
+        assert!(matches!(
+            directory.device(backdated.data.device_id),
+            Err(CryptoError::Revoked)
+        ));
+        let active: BTreeSet<_> = directory
+            .active_devices()
+            .map(|device| device.certificate().data.device_id)
+            .collect();
+        assert!(active.contains(&enrolled.data.device_id));
+        assert!(!active.contains(&backdated.data.device_id));
+        assert!(!active.contains(&member));
+        assert!(!active.contains(&f.root()));
+        Ok(())
+    })?;
+    f.bundle.revocations.push(sign_revocation(
+        RevocationData {
+            space_id: f.space(),
+            target: RevocationTarget::Device { device_id: member },
+            issuer_device: f.root(),
+            created_at: 61,
+            history: superset_root,
+        },
+        &f.keys,
+    )?);
+    assert_same(f.space(), &f.bundle, &pinned, |directory| {
+        directory.attach_history(member_root, &member_list)?;
+        directory.attach_history(root_history, &root_list)?;
+        directory.attach_history(superset_root, &superset)?;
+        assert!(!directory.verify_message(&message)?.active());
+        assert!(matches!(
+            directory.verify_settings(&unlisted_settings),
+            Err(CryptoError::Revoked)
+        ));
+        Ok(())
+    })?;
+    f.bundle.revocations.push(sign_revocation(
+        RevocationData {
+            space_id: f.space(),
+            target: RevocationTarget::Person {
+                person_id: member_person,
+            },
+            issuer_device: f.root(),
+            created_at: 62,
+            history: narrowed_root,
+        },
+        &f.keys,
+    )?);
+    assert_same(f.space(), &f.bundle, &pinned, |directory| {
+        directory.attach_history(member_root, &member_list)?;
+        directory.attach_history(root_history, &root_list)?;
+        directory.attach_history(superset_root, &superset)?;
+        directory.attach_history(narrowed_root, &narrowed)?;
+        assert!(matches!(
+            directory.verify_message(&message),
+            Err(CryptoError::Revoked)
+        ));
+        directory.verify_settings(&settings)?;
+        Ok(())
+    })?;
+    let mut descending = member_list.clone();
+    descending.reverse();
+    assert!(matches!(
+        history_root(&descending),
+        Err(CryptoError::Trust("history must be strictly ascending"))
+    ));
+    assert!(history_root(&[message.signature.clone(), message.signature.clone()]).is_err());
+    Ok(())
+}
+
+#[test]
+fn revocations_always_bind_and_roster_heads_need_an_endorser() -> Result<(), CryptoError> {
+    let mut f = Fixture::new()?;
+    let (member_keys, _) = f.member()?;
+    let pinned = f.directory()?.pinned_state();
+    let member = DeviceId::from_bytes([2; 16]);
+    let empty = history_root(&[])?;
+    let revoke_member = sign_revocation(
+        RevocationData {
+            space_id: f.space(),
+            target: RevocationTarget::Device { device_id: member },
+            issuer_device: f.root(),
+            created_at: 40,
+            history: empty,
+        },
+        &f.keys,
+    )?;
+    let revoke_root = sign_revocation(
+        RevocationData {
+            space_id: f.space(),
+            target: RevocationTarget::Device {
+                device_id: f.root(),
+            },
+            issuer_device: member,
+            created_at: 40,
+            history: empty,
+        },
+        &member_keys,
+    )?;
+    for order in [
+        vec![revoke_member.clone(), revoke_root.clone()],
+        vec![revoke_root.clone(), revoke_member.clone()],
+    ] {
+        let mut bundle = f.bundle.clone();
+        bundle.revocations = order;
+        assert_same(f.space(), &bundle, &pinned, |directory| {
+            assert!(matches!(
+                directory.device(f.root()),
+                Err(CryptoError::Revoked)
+            ));
+            assert!(matches!(
+                directory.device(member),
+                Err(CryptoError::Revoked)
+            ));
+            Ok(())
+        })?;
+    }
+    let mut changed = revoke_member.clone();
+    changed.data.history = history_root(std::slice::from_ref(&revoke_member.signature))?;
+    let mut broken = f.bundle.clone();
+    broken.revocations = vec![changed];
+    assert!(verify_trust_bundle(f.space(), &broken, 100, None).is_err());
+    assert!(verify_trust_bundle(f.space(), &broken, 100, Some(&pinned)).is_err());
+
+    let old = f.channel()?;
+    let next = old.rotate(&mut f.entropy)?;
+    let people = vec![f.bundle.root.data.person_id, PersonId::from_bytes([2; 16])];
+    let genesis = sign_membership(
+        ChannelMembershipData {
+            previous: None,
+            space_id: f.space(),
+            channel_id: old.channel_id(),
+            key_commitment: old.commitment(),
+            epoch: 0,
+            kind: ChannelKind::Group,
+            members: people.clone(),
+            issuer_device: member,
+        },
+        &member_keys,
+    )?;
+    let rotation = sign_membership(
+        ChannelMembershipData {
+            previous: Some(genesis.signature.clone()),
+            key_commitment: next.commitment(),
+            epoch: 1,
+            issuer_device: member,
+            ..genesis.data.clone()
+        },
+        &member_keys,
+    )?;
+    let endorsed = sign_membership(
+        ChannelMembershipData {
+            previous: Some(genesis.signature.clone()),
+            key_commitment: next.commitment(),
+            epoch: 1,
+            issuer_device: f.root(),
+            ..genesis.data.clone()
+        },
+        &f.keys,
+    )?;
+    let channel_for = |head: &ChannelMembership, history: Vec<ChannelMembership>| Channel {
+        membership: head.clone(),
+        membership_history: history,
+        id: head.data.channel_id,
+        space_id: head.data.space_id,
+        kind: head.data.kind,
+        meta: Ciphertext {
+            nonce: Nonce::from_bytes([0; 24]),
+            ciphertext: Base64Bytes::new(vec![0; 16]),
+        },
+        members: head.data.members.clone(),
+        current_epoch: head.data.epoch,
     };
-    f.bundle
-        .certificates
-        .push(certify_with_grant(cert, &successor_grant)?);
-    assert!(verify_trust_bundle(f.space(), &f.bundle, 100, Some(&pinned)).is_err());
+    let with_list = |list: &[Signature]| -> Result<TrustBundle, CryptoError> {
+        let mut bundle = f.bundle.clone();
+        bundle.revocations = vec![sign_revocation(
+            RevocationData {
+                space_id: f.space(),
+                target: RevocationTarget::Device { device_id: member },
+                issuer_device: f.root(),
+                created_at: 70,
+                history: history_root(list)?,
+            },
+            &f.keys,
+        )?];
+        Ok(bundle)
+    };
+    let both = sorted([genesis.signature.clone(), rotation.signature.clone()]);
+    let head_only = vec![rotation.signature.clone()];
+    let genesis_only = vec![genesis.signature.clone()];
+    let listed_head = channel_for(&genesis, vec![]);
+    let chain = channel_for(&rotation, vec![genesis.clone()]);
+    let extended = channel_for(&endorsed, vec![genesis.clone()]);
+    assert_same(
+        f.space(),
+        &with_list(&genesis_only)?,
+        &pinned,
+        |directory| {
+            directory.attach_history(history_root(&genesis_only)?, &genesis_only)?;
+            directory.verify_channel(&listed_head, None)?;
+            directory.verify_channel(&listed_head, Some(&listed_head.membership))?;
+            Ok(())
+        },
+    )?;
+    assert_same(f.space(), &with_list(&[])?, &pinned, |directory| {
+        directory.attach_history(empty, &[])?;
+        assert!(directory.verify_channel(&listed_head, None).is_err());
+        assert!(directory.verify_channel(&chain, None).is_err());
+        directory.verify_channel(&extended, None)?;
+        Ok(())
+    })?;
+    assert_same(f.space(), &with_list(&both)?, &pinned, |directory| {
+        directory.attach_history(history_root(&both)?, &both)?;
+        directory.verify_channel(&chain, None)?;
+        directory.verify_channel(&chain, Some(&chain.membership))?;
+        Ok(())
+    })?;
+    assert_same(f.space(), &with_list(&head_only)?, &pinned, |directory| {
+        directory.attach_history(history_root(&head_only)?, &head_only)?;
+        assert!(directory.verify_channel(&chain, None).is_err());
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -865,14 +1285,14 @@ fn reactions_and_settings_authenticate_identity_and_removal() -> Result<(), Cryp
         },
         &f.keys,
     )?;
-    directory.verify_reaction(&reaction)?;
+    assert!(directory.reaction_counts(&reaction)?);
     let mut bad = reaction.clone();
     bad.data.remove = true;
-    assert!(directory.verify_reaction(&bad).is_err());
+    assert!(directory.reaction_counts(&bad).is_err());
     bad = reaction;
     bad.data.person_id = PersonId::from_bytes([8; 16]);
     bad = sign_reaction(bad.data, &f.keys)?;
-    assert!(directory.verify_reaction(&bad).is_err());
+    assert!(directory.reaction_counts(&bad).is_err());
     let mut settings = sign_settings(
         SettingsChangeData {
             space_id: f.space(),

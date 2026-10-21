@@ -236,7 +236,8 @@ impl Cache {
         CREATE TABLE IF NOT EXISTS observations(evidence TEXT PRIMARY KEY,thread TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS wait_outcomes(handle TEXT NOT NULL,seq INTEGER NOT NULL,digest TEXT NOT NULL,error TEXT,PRIMARY KEY(handle,seq));
         CREATE TABLE IF NOT EXISTS pending_revocations(signature TEXT PRIMARY KEY,raw TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS cursors(thread TEXT PRIMARY KEY,seq INTEGER NOT NULL);")?;
+        CREATE TABLE IF NOT EXISTS cursors(thread TEXT PRIMARY KEY,seq INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS histories(root TEXT PRIMARY KEY, json TEXT NOT NULL);")?;
         if db.query_row("PRAGMA user_version", [], |r| r.get::<_, u32>(0))? < 2 {
             let tx = db.unchecked_transaction()?;
             tx.execute(
@@ -285,10 +286,36 @@ impl Cache {
             .optional()?;
         let prior: Option<PinnedTrustState> =
             prior.map(|s| serde_json::from_str(&s)).transpose()?;
-        let verified = verify_trust_bundle(sid, bundle, crate::now(), prior.as_ref())?;
+        let mut verified = verify_trust_bundle(sid, bundle, crate::now(), prior.as_ref())?;
         tx.execute("INSERT INTO state VALUES('trust',?) ON CONFLICT(name) DO UPDATE SET value=excluded.value", [serde_json::to_string(&verified.pinned_state())?])?;
         tx.commit()?;
+        self.attach_histories(&mut verified)?;
         Ok(verified)
+    }
+    pub fn save_history(&self, root: &HistoryRoot, signatures: &[Signature]) -> Result<()> {
+        self.db.execute(
+            "INSERT OR IGNORE INTO histories(root, json) VALUES(?,?)",
+            params![root.to_string(), serde_json::to_string(signatures)?],
+        )?;
+        Ok(())
+    }
+    /// Cached lists are not part of the trust pin. Attach every one this directory is missing.
+    pub fn attach_histories(&self, directory: &mut VerifiedDirectory) -> Result<()> {
+        for root in directory.missing_histories() {
+            let json: Option<String> = self
+                .db
+                .query_row(
+                    "SELECT json FROM histories WHERE root=?",
+                    [root.to_string()],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(json) = json {
+                let list: Vec<Signature> = serde_json::from_str(&json)?;
+                directory.attach_history(root, &list)?;
+            }
+        }
+        Ok(())
     }
     pub fn record_revocation(
         &mut self,
@@ -307,7 +334,7 @@ impl Cache {
         if !bundle.revocations.contains(revocation) {
             bundle.revocations.push(revocation.clone());
         }
-        let verified =
+        let mut verified =
             verify_trust_bundle(directory.space_id(), &bundle, crate::now(), Some(&prior))?;
         tx.execute(
             "UPDATE state SET value=? WHERE name='trust'",
@@ -321,6 +348,7 @@ impl Cache {
             ],
         )?;
         tx.commit()?;
+        self.attach_histories(&mut verified)?;
         Ok(verified)
     }
     pub fn accept_settings(
@@ -338,10 +366,11 @@ impl Cache {
             .optional()?;
         let previous: Option<SettingsChange> =
             previous.map(|v| serde_json::from_str(&v)).transpose()?;
+        // The cached copy must not accept a change the directory now rejects.
+        directory.verify_settings(change)?;
         if previous.as_ref() == Some(change) {
             return Ok(change.data.settings.clone());
         }
-        directory.verify_settings(change)?;
         tx.execute("INSERT INTO state VALUES('settings',?) ON CONFLICT(name) DO UPDATE SET value=excluded.value", [serde_json::to_string(change)?])?;
         tx.commit()?;
         Ok(change.data.settings.clone())

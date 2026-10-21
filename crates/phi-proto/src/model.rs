@@ -85,6 +85,8 @@ pub struct RevocationData {
     pub target: RevocationTarget,
     pub issuer_device: DeviceId,
     pub created_at: Timestamp,
+    /// Root over the signatures of everything the target had signed when the server froze it.
+    pub history: HistoryRoot,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Revocation {

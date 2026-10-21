@@ -14,6 +14,21 @@ use std::{
 };
 use zeroize::Zeroizing;
 
+async fn fetch_histories(
+    http: &Http,
+    sid: SpaceId,
+    directory: &mut VerifiedDirectory,
+) -> Result<Vec<(HistoryRoot, Vec<Signature>)>> {
+    let mut lists = Vec::new();
+    for root in directory.missing_histories() {
+        let response: GetHistoryResponse =
+            http.get(&format!("/spaces/{sid}/histories/{root}")).await?;
+        directory.attach_history(root, &response.signatures)?;
+        lists.push((root, response.signatures));
+    }
+    Ok(lists)
+}
+
 /// Longest single long-poll `wait` issues; stays under common proxy idle limits.
 const LONG_POLL_CHUNK_SECS: u64 = 45;
 /// A blip must not outlive the wait the caller asked for, and must not burn the cursor.
@@ -90,6 +105,7 @@ pub struct Client {
     pub channels: Vec<NamedChannel>,
     pub settings: SpaceSettings,
     pub devices: Vec<Device>,
+    holds: Vec<DeviceHold>,
     pub limits: ServerLimits,
     store: Store,
     keys: Box<dyn KeyStore>,
@@ -243,12 +259,14 @@ impl Client {
         {
             return Err(user("redemption changed the signed grant or certificate"));
         }
-        let directory = verify_trust_bundle(link.space_id(), &response.directory, now(), None)?;
+        let mut directory = verify_trust_bundle(link.space_id(), &response.directory, now(), None)?;
+        let http = Http::new(&http.base, Some(token_string(&response.device_token)?))?;
+        let histories = fetch_histories(&http, link.space_id(), &mut directory).await?;
         directory.device(did)?;
         let (sign, kex) = keys.export_secrets();
         let mut profile = Profile {
             name: link.space_id().to_string(),
-            server: http.base,
+            server: http.base.clone(),
             space_id: link.space_id(),
             person_id: data.person_id,
             device_id: did,
@@ -276,8 +294,10 @@ impl Client {
         };
         store_json(key_store.as_ref(), "identity", &identity)?;
         let mut cache = Cache::open(&store.cache_dir(&profile).join("cache.db"))?;
+        for (root, signatures) in &histories {
+            cache.save_history(root, signatures)?;
+        }
         cache.trust(profile.space_id, &response.directory)?;
-        let http = Http::new(&profile.server, Some(token_string(&identity.token)?))?;
         let channels: ListChannelsResponse = http
             .get(&format!("/spaces/{}/channels", profile.space_id))
             .await?;
@@ -295,22 +315,12 @@ impl Client {
                 .ok_or_else(|| user("grant channel missing"))?;
             let epochs = cache.channel_epochs(&directory, channel)?;
             validate_key(key, &epochs)?;
-            let membership = directory.verify_channel(channel, None)?;
-            let membership = if key.epoch() == channel.current_epoch {
-                membership
-            } else {
-                let records: Vec<_> = channel
-                    .membership_history
-                    .iter()
-                    .chain(std::iter::once(&channel.membership))
-                    .collect();
-                let index = records
-                    .iter()
-                    .rposition(|r| r.data.epoch == key.epoch())
-                    .ok_or_else(|| user("historical epoch has no authenticated roster"))?;
-                directory
-                    .verify_membership(records[index], index.checked_sub(1).map(|i| records[i]))?
-            };
+            let chain = directory.verify_channel_history(channel, None)?;
+            let membership = chain
+                .iter()
+                .rev()
+                .find(|membership| membership.data().epoch == key.epoch())
+                .ok_or_else(|| user("historical epoch has no authenticated roster"))?;
             // Read and check encrypted peer context before giving a device any key.
             let meta_key = grant_keys
                 .iter()
@@ -321,7 +331,7 @@ impl Client {
                 serde_json::from_slice(&decrypt_channel_metadata(meta_key, &channel.meta)?)?;
             validate_meta(channel, &meta, profile.person_id)?;
             let recipient = directory.device(did)?;
-            let wrapped = wrap_channel_key(key, &recipient, &membership, &mut entropy)?;
+            let wrapped = wrap_channel_key(key, &recipient, membership, &mut entropy)?;
             let _: GetKeysResponse = http
                 .send(
                     Method::PUT,
@@ -387,7 +397,11 @@ impl Client {
         let devices: ListDevicesResponse = http
             .get(&format!("/spaces/{}/devices", profile.space_id))
             .await?;
-        let directory = cache.trust(profile.space_id, &devices.directory)?;
+        let mut directory = cache.trust(profile.space_id, &devices.directory)?;
+        let histories = fetch_histories(&http, profile.space_id, &mut directory).await?;
+        for (root, signatures) in &histories {
+            cache.save_history(root, signatures)?;
+        }
         directory.device(profile.device_id)?;
         let handle = handle.unwrap_or(&profile.device_name).parse()?;
         let mut client = Self {
@@ -397,6 +411,7 @@ impl Client {
             channels: vec![],
             settings: SpaceSettings::default(),
             devices: devices.devices,
+            holds: devices.holds,
             limits: ServerLimits::default(),
             store,
             keys,
@@ -419,8 +434,13 @@ impl Client {
         let sid = self.profile.space_id;
         let devices: ListDevicesResponse = self.http.get(&format!("/spaces/{sid}/devices")).await?;
         self.directory = self.cache.trust(sid, &devices.directory)?;
+        let histories = fetch_histories(&self.http, sid, &mut self.directory).await?;
+        for (root, signatures) in &histories {
+            self.cache.save_history(root, signatures)?;
+        }
         self.directory.device(self.profile.device_id)?;
         self.devices = devices.devices;
+        self.holds = devices.holds;
         self.refresh_channels().await
     }
     async fn begin_operation(&mut self) -> Result<()> {
@@ -1087,8 +1107,9 @@ impl Client {
                 {
                     return Err(user("reaction outside message page"));
                 }
-                self.directory.verify_reaction(&reaction)?;
-                self.save_reaction(&reaction)?;
+                if self.directory.reaction_counts(&reaction)? {
+                    self.save_reaction(&reaction)?;
+                }
             }
             if count < 1000 {
                 break;
@@ -1128,7 +1149,7 @@ impl Client {
             Some(message) => message,
             None => self.http.get(&format!("/messages/{thread}")).await?,
         };
-        if self.directory.device(root.author_device).is_err()
+        if self.directory.certificate(root.author_device).is_err()
             || self
                 .keys
                 .get(&format!(
@@ -1710,13 +1731,14 @@ impl Client {
         let raws = stmt
             .query_map([thread.to_string()], |r| r.get::<_, String>(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        raws.into_iter()
-            .map(|raw| {
-                let reaction: Reaction = serde_json::from_str(&raw)?;
-                self.directory.verify_reaction(&reaction)?;
-                Ok(reaction)
-            })
-            .collect()
+        let mut reactions = Vec::new();
+        for raw in raws {
+            let reaction: Reaction = serde_json::from_str(&raw)?;
+            if self.directory.reaction_counts(&reaction)? {
+                reactions.push(reaction);
+            }
+        }
+        Ok(reactions)
     }
     fn reactions(&self, message: MessageId) -> Result<Vec<Reaction>> {
         let mut stmt = self
@@ -1726,13 +1748,14 @@ impl Client {
         let raws = stmt
             .query_map([message.to_string()], |r| r.get::<_, String>(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        raws.into_iter()
-            .map(|s| {
-                let reaction: Reaction = serde_json::from_str(&s)?;
-                self.directory.verify_reaction(&reaction)?;
-                Ok(reaction)
-            })
-            .collect()
+        let mut reactions = Vec::new();
+        for raw in raws {
+            let reaction: Reaction = serde_json::from_str(&raw)?;
+            if self.directory.reaction_counts(&reaction)? {
+                reactions.push(reaction);
+            }
+        }
+        Ok(reactions)
     }
     fn save_reaction(&mut self, reaction: &Reaction) -> Result<()> {
         let d = &reaction.data;
@@ -1819,7 +1842,9 @@ impl Client {
                 if self.directory.certificate(claim.data.device_id).is_err() {
                     self.refresh().await?;
                 }
-                self.directory.verify_reaction(&claim)?;
+                if !self.directory.reaction_counts(&claim)? {
+                    return Err(user("server returned a claim from a revoked device"));
+                }
                 if claim.data.message_id != message
                     || claim.data.kind != ReactionKind::Claim
                     || claim.data.remove
@@ -1835,7 +1860,9 @@ impl Client {
             }
             result => result?,
         };
-        self.directory.verify_reaction(&response)?;
+        if !self.directory.reaction_counts(&response)? {
+            return Err(user("server returned a claim from a revoked device"));
+        }
         if response != reaction {
             return Err(user("server changed reaction"));
         }
@@ -2254,7 +2281,9 @@ impl Client {
                 })
             }
             EventData::Reaction(reaction) => {
-                self.directory.verify_reaction(&reaction)?;
+                if !self.directory.reaction_counts(&reaction)? {
+                    return Ok(None);
+                }
                 self.save_reaction(&reaction)?;
                 if reaction.data.person_id == self.profile.person_id
                     || !matches!(
@@ -2570,6 +2599,51 @@ impl Client {
         self.mark_protected(channel.id)?;
         Ok(())
     }
+    /// Labels of the devices holding `device_id`, each `person/device` when the holder is known.
+    pub fn held_by(&self, device_id: DeviceId) -> Vec<String> {
+        self.holds
+            .iter()
+            .filter(|hold| hold.device_id == device_id)
+            .map(|hold| {
+                match self
+                    .devices
+                    .iter()
+                    .find(|device| device.cert.data.device_id == hold.holder_device)
+                {
+                    Some(device) => format!(
+                        "{}/{}",
+                        self.person_name(device.cert.data.person_id),
+                        hold.holder_device
+                    ),
+                    None => hold.holder_device.to_string(),
+                }
+            })
+            .collect()
+    }
+    async fn prepared_revocation(&mut self, target: &RevocationTarget) -> Result<Revocation> {
+        let prepared: PrepareRevocationResponse = self
+            .http
+            .send(
+                Method::POST,
+                &format!("/spaces/{}/revocations/prepare", self.profile.space_id),
+                &PrepareRevocationRequest {
+                    target: target.clone(),
+                },
+            )
+            .await?;
+        let history = history_root(&prepared.signatures)?;
+        self.cache.save_history(&history, &prepared.signatures)?;
+        Ok(sign_revocation(
+            RevocationData {
+                space_id: self.profile.space_id,
+                target: target.clone(),
+                issuer_device: self.profile.device_id,
+                created_at: now(),
+                history,
+            },
+            &self.identity.keys(),
+        )?)
+    }
     pub async fn revoke(&mut self, target: RevocationTarget) -> Result<()> {
         self.begin_operation().await?;
         self.revoked_person(&target)?;
@@ -2580,15 +2654,7 @@ impl Client {
                 "use another device/person to revoke this device so it can finish key rotation",
             ));
         }
-        let revocation = sign_revocation(
-            RevocationData {
-                space_id: self.profile.space_id,
-                target: target.clone(),
-                issuer_device: self.profile.device_id,
-                created_at: now(),
-            },
-            &self.identity.keys(),
-        )?;
+        let revocation = self.prepared_revocation(&target).await?;
         self.directory = self.cache.record_revocation(&self.directory, &revocation)?;
         self.publish_pending_revocations().await?;
         self.refresh().await?;
@@ -2669,18 +2735,29 @@ impl Client {
     }
     pub async fn search(&mut self, text: &str) -> Result<Vec<DecodedMessage>> {
         self.opening_snapshot = false;
-        self.directory = self
+        let mut directory = self
             .cache
             .get::<PinnedTrustState>("trust")?
             .ok_or_else(|| user("local trust state missing"))?
             .verify(self.profile.space_id, now())?;
+        self.cache.attach_histories(&mut directory)?;
+        let histories = fetch_histories(&self.http, self.profile.space_id, &mut directory).await?;
+        for (root, signatures) in &histories {
+            self.cache.save_history(root, signatures)?;
+        }
+        self.cache.attach_histories(&mut directory)?;
+        self.directory = directory;
         let mut stmt = self.cache.db.prepare("SELECT raw FROM messages WHERE instr(lower(COALESCE(json_extract(content,'$.title'),'') || char(10) || json_extract(content,'$.body') || char(10) || COALESCE(json_extract(content,'$.summary'),'')),lower(?))>0 ORDER BY seq")?;
         let rows = stmt
             .query_map([text], |r| r.get::<_, String>(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         let mut result = Vec::new();
         for raw in rows {
-            result.push(self.decode_cached_message(serde_json::from_str(&raw)?)?);
+            match self.decode_cached_message(serde_json::from_str(&raw)?) {
+                Ok(message) => result.push(message),
+                Err(Error::Crypto(CryptoError::Revoked)) => {}
+                Err(error) => return Err(error),
+            }
         }
         Ok(result)
     }
@@ -2705,6 +2782,7 @@ impl Client {
                             .map(format_last_seen)
                             .unwrap_or_else(|| "never".into()),
                         revoked: d.revoked_at.is_some(),
+                        held_by: self.held_by(d.cert.data.device_id),
                     })
                     .collect(),
             })

@@ -41,9 +41,26 @@ pub fn revocation_signing_bytes(data: &RevocationData) -> Result<Vec<u8>, Crypto
         RevocationTarget::Person { person_id } => ("person", person_id.to_string()),
     };
     signing_bytes(
-        "phi revocation v1",
-        &(data.space_id, target, data.issuer_device, data.created_at),
+        "phi revocation v2",
+        &(
+            data.space_id,
+            target,
+            data.issuer_device,
+            data.created_at,
+            &data.history,
+        ),
     )
+}
+/// BLAKE3 of the signature set. The empty list has one fixed root.
+pub fn history_root(signatures: &[Signature]) -> Result<HistoryRoot, CryptoError> {
+    if signatures.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(CryptoError::Trust("history must be strictly ascending"));
+    }
+    let mut hasher = blake3::Hasher::new_derive_key("phi revocation history v1");
+    for signature in signatures {
+        hasher.update(signature.as_bytes());
+    }
+    Ok(HistoryRoot::from_bytes(*hasher.finalize().as_bytes()))
 }
 pub fn reaction_signing_bytes(data: &ReactionData) -> Result<Vec<u8>, CryptoError> {
     signing_bytes(
@@ -204,11 +221,16 @@ pub fn sign_settings(
 #[derive(Clone, Debug)]
 pub struct VerifiedDevice {
     pub(crate) context: [u8; 32],
+    /// False when the device is revoked and this object is listed in every covering history.
+    pub(crate) active: bool,
     certificate: DeviceCertificate,
 }
 impl VerifiedDevice {
     pub fn certificate(&self) -> &DeviceCertificate {
         &self.certificate
+    }
+    pub fn active(&self) -> bool {
+        self.active
     }
 }
 /// Opaque local cache state. Deserialize only from the profile's trusted storage.
@@ -232,6 +254,7 @@ pub struct VerifiedDirectory {
     grants: BTreeMap<GrantId, GrantRecord>,
     grant_certificates: BTreeMap<GrantId, DeviceCertificate>,
     revocations: Vec<Revocation>,
+    histories: BTreeMap<HistoryRoot, BTreeSet<Signature>>,
 }
 impl VerifiedDirectory {
     pub fn space_id(&self) -> SpaceId {
@@ -268,33 +291,52 @@ impl VerifiedDirectory {
     pub fn trust_bundle(&self) -> TrustBundle {
         self.pinned_state().bundle
     }
+    pub fn missing_histories(&self) -> Vec<HistoryRoot> {
+        let mut missing = BTreeSet::new();
+        for revocation in &self.revocations {
+            if !self.histories.contains_key(&revocation.data.history) {
+                missing.insert(revocation.data.history);
+            }
+        }
+        missing.into_iter().collect()
+    }
+    pub fn attach_history(
+        &mut self,
+        root: HistoryRoot,
+        list: &[Signature],
+    ) -> Result<(), CryptoError> {
+        if history_root(list)? != root {
+            return Err(CryptoError::Trust("history root mismatch"));
+        }
+        self.histories.insert(root, list.iter().cloned().collect());
+        Ok(())
+    }
     pub fn device(&self, id: DeviceId) -> Result<VerifiedDevice, CryptoError> {
-        let cert = self
-            .certificates
-            .get(&id)
-            .ok_or(CryptoError::Trust("unknown device"))?;
-        if revoked_at(&self.revocations, &cert.data, u64::MAX) {
-            return Err(CryptoError::Trust("revoked device"));
+        let certificate = self.certificate(id)?.clone();
+        if !self.active_device(id) {
+            return Err(CryptoError::Revoked);
         }
         Ok(VerifiedDevice {
             context: self.context,
-            certificate: cert.clone(),
+            active: true,
+            certificate,
         })
     }
     pub fn active_devices(&self) -> impl Iterator<Item = VerifiedDevice> + '_ {
         self.certificates
             .values()
-            .filter(|c| !revoked_at(&self.revocations, &c.data, u64::MAX))
+            .filter(|c| self.active_device(c.data.device_id))
             .cloned()
             .map(|certificate| VerifiedDevice {
                 context: self.context,
+                active: true,
                 certificate,
             })
     }
     pub fn verify_message(&self, message: &Message) -> Result<VerifiedDevice, CryptoError> {
-        let author = self.device(message.author_device)?;
+        let certificate = self.certificate(message.author_device)?.clone();
         if message.envelope.space_id != self.space_id
-            || message.author_person != author.certificate.data.person_id
+            || message.author_person != certificate.data.person_id
             || message.id != message.envelope.id
             || message.has_summary != message.envelope.summary_covers_seq.is_some()
             || message.summary_covers_seq != message.envelope.summary_covers_seq
@@ -302,72 +344,140 @@ impl VerifiedDirectory {
             return Err(CryptoError::Trust("message identity mismatch"));
         }
         crate::verify_message_signature(
-            &author.certificate.data.sign_pub,
+            &certificate.data.sign_pub,
             &message.envelope,
             &message.signature,
         )?;
-        Ok(author)
+        let active = self.authorize(message.author_device, &message.signature)?;
+        Ok(VerifiedDevice {
+            context: self.context,
+            active,
+            certificate,
+        })
     }
-    pub fn verify_reaction(&self, reaction: &Reaction) -> Result<(), CryptoError> {
-        let author = self.device(reaction.data.device_id)?;
+    /// Revoked reactions never count. A bad signature is an error; absence from a history is not.
+    pub fn reaction_counts(&self, reaction: &Reaction) -> Result<bool, CryptoError> {
+        let author = self.certificate(reaction.data.device_id)?;
         if reaction.data.space_id != self.space_id
-            || reaction.data.person_id != author.certificate.data.person_id
+            || reaction.data.person_id != author.data.person_id
         {
             return Err(CryptoError::Trust("reaction identity mismatch"));
         }
         verify_signature(
-            &author.certificate.data.sign_pub,
+            &author.data.sign_pub,
             &reaction_signing_bytes(&reaction.data)?,
             &reaction.signature,
-        )
+        )?;
+        Ok(self.active_device(reaction.data.device_id))
     }
     pub fn verify_thread_state(&self, state: &ThreadState) -> Result<(), CryptoError> {
-        let author = self.device(state.data.device_id)?;
-        if state.data.space_id != self.space_id
-            || state.data.person_id != author.certificate.data.person_id
-        {
+        let author = self.certificate(state.data.device_id)?;
+        if state.data.space_id != self.space_id || state.data.person_id != author.data.person_id {
             return Err(CryptoError::Trust("thread state identity mismatch"));
         }
         verify_signature(
-            &author.certificate.data.sign_pub,
+            &author.data.sign_pub,
             &thread_state_signing_bytes(&state.data)?,
             &state.signature,
-        )
+        )?;
+        self.authorize(state.data.device_id, &state.signature)?;
+        Ok(())
     }
     pub fn verify_thread_deletion(&self, deletion: &ThreadDeletion) -> Result<(), CryptoError> {
-        let author = self.device(deletion.data.device_id)?;
+        let author = self.certificate(deletion.data.device_id)?;
         if deletion.data.space_id != self.space_id
-            || deletion.data.person_id != author.certificate.data.person_id
+            || deletion.data.person_id != author.data.person_id
         {
             return Err(CryptoError::Trust("thread deletion identity mismatch"));
         }
         verify_signature(
-            &author.certificate.data.sign_pub,
+            &author.data.sign_pub,
             &thread_deletion_signing_bytes(&deletion.data)?,
             &deletion.signature,
-        )
+        )?;
+        self.authorize(deletion.data.device_id, &deletion.signature)?;
+        Ok(())
     }
     pub fn verify_settings(&self, change: &SettingsChange) -> Result<(), CryptoError> {
         change.validate()?;
         if change.data.space_id != self.space_id {
             return Err(CryptoError::Trust("settings space mismatch"));
         }
-        let author = self.device(change.data.issuer_device)?;
+        let author = self.certificate(change.data.issuer_device)?;
         verify_signature(
-            &author.certificate.data.sign_pub,
+            &author.data.sign_pub,
             &settings_signing_bytes(&change.data)?,
             &change.signature,
-        )
+        )?;
+        self.authorize(change.data.issuer_device, &change.signature)?;
+        Ok(())
     }
-}
-fn revoked_at(revocations: &[Revocation], cert: &DeviceCertificateData, at: Timestamp) -> bool {
-    revocations.iter().any(|r| {
-        r.data.created_at <= at
-            && match r.data.target {
-                RevocationTarget::Device { device_id } => device_id == cert.device_id,
-                RevocationTarget::Person { person_id } => person_id == cert.person_id,
+    fn covers(revocation: &Revocation, cert: &DeviceCertificateData) -> bool {
+        match revocation.data.target {
+            RevocationTarget::Device { device_id } => device_id == cert.device_id,
+            RevocationTarget::Person { person_id } => person_id == cert.person_id,
+        }
+    }
+    fn revoked_cert(&self, cert: &DeviceCertificateData) -> bool {
+        self.revocations
+            .iter()
+            .any(|revocation| Self::covers(revocation, cert))
+    }
+    /// A missing list is the empty set, so an unfetched history authorizes nothing.
+    fn listed(&self, cert: &DeviceCertificateData, signature: &Signature) -> bool {
+        self.revocations
+            .iter()
+            .filter(|revocation| Self::covers(revocation, cert))
+            .all(|revocation| {
+                self.histories
+                    .get(&revocation.data.history)
+                    .is_some_and(|set| set.contains(signature))
+            })
+    }
+    fn chain_ok(&self, mut id: DeviceId) -> bool {
+        // A missing certificate or grant fails closed. The length bound stops a cycle
+        // the bundle verifier should already have rejected.
+        for _ in 0..self.certificates.len().saturating_add(1) {
+            let Some(cert) = self.certificates.get(&id) else {
+                return false;
+            };
+            let CertificateIssuer::Grant { grant_id } = cert.data.issuer else {
+                return true;
+            };
+            let signature = cert.signature.clone();
+            let Some(grant) = self.grants.get(&grant_id) else {
+                return false;
+            };
+            let issuer_id = grant.data.issuer_device;
+            let Some(issuer) = self.certificates.get(&issuer_id).map(|c| c.data.clone()) else {
+                return false;
+            };
+            if self.revoked_cert(&issuer) && !self.listed(&issuer, &signature) {
+                return false;
             }
-    })
+            id = issuer_id;
+        }
+        false
+    }
+    fn active_device(&self, id: DeviceId) -> bool {
+        self.certificates
+            .get(&id)
+            .is_some_and(|cert| self.chain_ok(id) && !self.revoked_cert(&cert.data))
+    }
+    fn authorize(&self, id: DeviceId, signature: &Signature) -> Result<bool, CryptoError> {
+        if !self.chain_ok(id) {
+            return Err(CryptoError::Revoked);
+        }
+        let cert = self.certificate(id)?;
+        if !self.revoked_cert(&cert.data) {
+            return Ok(true);
+        }
+        if self.listed(&cert.data, signature) {
+            Ok(false)
+        } else {
+            Err(CryptoError::Revoked)
+        }
+    }
 }
 fn verify_cert(cert: &DeviceCertificate, issuer: &PublicKey) -> Result<(), CryptoError> {
     verify_signature(
@@ -541,36 +651,8 @@ pub fn verify_trust_bundle(
             &revocation.signature,
         )?;
     }
-    // Signed wall clocks cannot establish ordering. Current revocation dominates;
-    // exact previously pinned evidence is the only historical-issuance exception.
-    for cert in grant_certificates.values() {
-        let CertificateIssuer::Grant { grant_id } = cert.data.issuer else {
-            return Err(CryptoError::Trust("non-root device issuer"));
-        };
-        let issuer = &certificates[&grants[&grant_id].data.issuer_device];
-        if revoked_at(&revocations, &issuer.data, now)
-            && !pinned.is_some_and(|prior| prior.bundle.certificates.contains(cert))
-        {
-            return Err(CryptoError::Trust(
-                "unpinned certificate from a revoked issuer",
-            ));
-        }
-    }
-    for revocation in &revocations {
-        let issuer = &certificates[&revocation.data.issuer_device];
-        let self_revocation = match revocation.data.target {
-            RevocationTarget::Device { device_id } => device_id == issuer.data.device_id,
-            RevocationTarget::Person { person_id } => person_id == issuer.data.person_id,
-        };
-        if revoked_at(&revocations, &issuer.data, now)
-            && !self_revocation
-            && !pinned.is_some_and(|prior| prior.bundle.revocations.contains(revocation))
-        {
-            return Err(CryptoError::Trust(
-                "unpinned revocation from a revoked issuer",
-            ));
-        }
-    }
+    // Every valid signature takes effect. Whether a revoked key may authorize a
+    // particular object is decided later, from the history that signature committed to.
     let context = *blake3::hash(&serde_json::to_vec(&(
         &root,
         &certificates,
@@ -586,6 +668,7 @@ pub fn verify_trust_bundle(
         grants,
         grant_certificates,
         revocations,
+        histories: BTreeMap::new(),
     })
 }
 
@@ -630,7 +713,9 @@ impl VerifiedMembership {
     }
 }
 impl VerifiedDirectory {
-    pub fn verify_membership(
+    /// Roster link checks. The issuer certificate may belong to a revoked device;
+    /// authorization of that signature is decided by the channel walk.
+    pub fn check_membership(
         &self,
         membership: &ChannelMembership,
         pinned: Option<&ChannelMembership>,
@@ -639,20 +724,10 @@ impl VerifiedDirectory {
         if membership.data.space_id != self.space_id {
             return Err(CryptoError::Trust("membership space mismatch"));
         }
-        let issuer = if pinned == Some(membership) {
-            VerifiedDevice {
-                context: self.context,
-                certificate: self
-                    .certificates
-                    .get(&membership.data.issuer_device)
-                    .ok_or(CryptoError::Trust("unknown membership issuer"))?
-                    .clone(),
-            }
-        } else {
-            self.device(membership.data.issuer_device)?
-        };
+        let issuer = self.certificate(membership.data.issuer_device)?;
         if let Some(prior) = pinned {
             // The prior roster must come from local accepted state, never this response.
+            // The pinned record itself has no link to itself.
             let old = &prior.data;
             if old.space_id != membership.data.space_id
                 || old.channel_id != membership.data.channel_id
@@ -662,8 +737,7 @@ impl VerifiedDirectory {
                 || old.epoch > membership.data.epoch
                 || (membership != prior
                     && membership.data.previous.as_ref() != Some(&prior.signature))
-                || (old.kind != ChannelKind::All
-                    && !old.members.contains(&issuer.certificate.data.person_id))
+                || (old.kind != ChannelKind::All && !old.members.contains(&issuer.data.person_id))
             {
                 return Err(CryptoError::Trust(
                     "membership conflicts with pinned channel authority",
@@ -683,15 +757,11 @@ impl VerifiedDirectory {
                 "membership requires its previous authenticated roster",
             ));
         }
-        if !membership
-            .data
-            .members
-            .contains(&issuer.certificate.data.person_id)
-        {
+        if !membership.data.members.contains(&issuer.data.person_id) {
             return Err(CryptoError::Trust("membership issuer is not a member"));
         }
         verify_signature(
-            &issuer.certificate.data.sign_pub,
+            &issuer.data.sign_pub,
             &membership_signing_bytes(&membership.data)?,
             &membership.signature,
         )?;
@@ -714,11 +784,22 @@ impl VerifiedDirectory {
             members,
         })
     }
-    pub fn verify_channel(
+    /// A locally proposed roster record must be signed by a device that is still active.
+    pub fn verify_membership(
+        &self,
+        membership: &ChannelMembership,
+        pinned: Option<&ChannelMembership>,
+    ) -> Result<VerifiedMembership, CryptoError> {
+        self.device(membership.data.issuer_device)?;
+        self.check_membership(membership, pinned)
+    }
+    /// A revoked signer's roster record stands when an active signer extended it,
+    /// or when every covering revocation lists that record's signature.
+    pub fn verify_channel_history(
         &self,
         channel: &Channel,
         pinned: Option<&ChannelMembership>,
-    ) -> Result<VerifiedMembership, CryptoError> {
+    ) -> Result<Vec<VerifiedMembership>, CryptoError> {
         let records: Vec<_> = channel
             .membership_history
             .iter()
@@ -736,23 +817,44 @@ impl VerifiedDirectory {
             None => 0,
         };
         let mut previous = pinned;
-        let mut verified = None;
+        let mut chain = Vec::new();
+        let mut unendorsed = Vec::new();
         for record in &records[start..] {
-            verified = Some(self.verify_membership(record, previous)?);
+            let record = *record;
+            chain.push(self.check_membership(record, previous)?);
+            if self.active_device(record.data.issuer_device) {
+                unendorsed.clear();
+            } else {
+                unendorsed.push(record);
+            }
             previous = Some(record);
         }
-        let verified = verified.ok_or(CryptoError::Trust("empty membership history"))?;
-        if channel.space_id != verified.data.space_id
-            || channel.id != verified.data.channel_id
-            || channel.kind != verified.data.kind
-            || channel.current_epoch != verified.data.epoch
-            || channel.members.iter().copied().collect::<BTreeSet<_>>() != verified.members
-            || channel.members.len() != verified.members.len()
+        for record in unendorsed {
+            self.authorize(record.data.issuer_device, &record.signature)?;
+        }
+        let head = chain
+            .last()
+            .ok_or(CryptoError::Trust("empty membership history"))?;
+        if channel.space_id != head.data.space_id
+            || channel.id != head.data.channel_id
+            || channel.kind != head.data.kind
+            || channel.current_epoch != head.data.epoch
+            || channel.members.iter().copied().collect::<BTreeSet<_>>() != head.members
+            || channel.members.len() != head.members.len()
         {
             return Err(CryptoError::Trust(
                 "unsigned channel fields differ from authenticated membership",
             ));
         }
-        Ok(verified)
+        Ok(chain)
+    }
+    pub fn verify_channel(
+        &self,
+        channel: &Channel,
+        pinned: Option<&ChannelMembership>,
+    ) -> Result<VerifiedMembership, CryptoError> {
+        self.verify_channel_history(channel, pinned)?
+            .pop()
+            .ok_or(CryptoError::Trust("empty membership history"))
     }
 }

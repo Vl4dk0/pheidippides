@@ -63,6 +63,11 @@ pub(super) fn router(server: Server) -> Router {
         .route("/spaces/{sid}/grants", post(grant))
         .route("/spaces/{sid}/devices", get(devices))
         .route("/spaces/{sid}/revocations", post(revoke))
+        .route(
+            "/spaces/{sid}/revocations/prepare",
+            post(prepare_revocation),
+        )
+        .route("/spaces/{sid}/histories/{root}", get(history))
         .route("/spaces/{sid}/channels", get(channels).post(create_channel))
         .route("/spaces/{sid}/counts", get(counts))
         .route("/spaces/{sid}/events", get(events))
@@ -275,6 +280,31 @@ async fn grant(
         })
         .await
 }
+async fn prepare_revocation(
+    State(server): State<Server>,
+    Extension(token): Extension<Bearer>,
+    Id(id): Id<SpaceId>,
+    Input(input): Input<PrepareRevocationRequest>,
+) -> Result<Json<PrepareRevocationResponse>> {
+    server
+        .authorized(token, move |db, auth| {
+            auth.space(id)?;
+            db.prepare_revocation(auth, input)
+        })
+        .await
+}
+async fn history(
+    State(server): State<Server>,
+    Extension(token): Extension<Bearer>,
+    Id((id, root)): Id<(SpaceId, HistoryRoot)>,
+) -> Result<Json<GetHistoryResponse>> {
+    server
+        .authorized(token, move |db, auth| {
+            auth.space(id)?;
+            db.history(id, root)
+        })
+        .await
+}
 async fn revoke(
     State(server): State<Server>,
     Extension(token): Extension<Bearer>,
@@ -306,6 +336,7 @@ async fn devices(
                     [id.to_string()],
                 )?,
                 directory: db.directory(id)?,
+                holds: db.holds(id)?,
             })
         })
         .await

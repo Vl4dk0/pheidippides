@@ -370,6 +370,33 @@ impl Fixture {
         )
         .await
     }
+    async fn revocation(
+        &self,
+        issuer: &Actor,
+        target: RevocationTarget,
+        created_at: u64,
+    ) -> TestResult<Revocation> {
+        let prepared: HistoryResponse = ok(
+            &self.app,
+            "POST",
+            &self.space("/revocations/prepare"),
+            Some(&issuer.token),
+            PrepareRevocationRequest {
+                target: target.clone(),
+            },
+        )
+        .await?;
+        Ok(sign_revocation(
+            RevocationData {
+                space_id: self.sid,
+                target,
+                issuer_device: issuer.cert.data.device_id,
+                created_at,
+                history: history_root(&prepared.signatures)?,
+            },
+            &issuer.key,
+        )?)
+    }
     fn reaction(
         &self,
         a: &Actor,
@@ -709,17 +736,15 @@ async fn expired_grants_and_revoked_issuers_cannot_redeem() -> TestResult {
         .grant(&child, GrantKind::Invite, Some(timestamp() + 100))
         .await?;
     let (_, r) = f.redeem_request(&g, &k)?;
-    let rev = sign_revocation(
-        RevocationData {
-            space_id: f.sid,
-            target: RevocationTarget::Device {
+    let rev = f
+        .revocation(
+            &f.root,
+            RevocationTarget::Device {
                 device_id: child.cert.data.device_id,
             },
-            issuer_device: f.root.cert.data.device_id,
-            created_at: timestamp(),
-        },
-        &f.root.key,
-    )?;
+            timestamp(),
+        )
+        .await?;
     let _: Revocation = ok(
         &f.app,
         "POST",
@@ -747,17 +772,15 @@ async fn person_revocation_rejects_all_tokens_and_forgery() -> TestResult {
     let f = Fixture::new().await?;
     let person = f.join(&f.root, GrantKind::Invite).await?;
     let other = f.join(&person, GrantKind::Enroll).await?;
-    let mut rev = sign_revocation(
-        RevocationData {
-            space_id: f.sid,
-            target: RevocationTarget::Person {
+    let mut rev = f
+        .revocation(
+            &f.root,
+            RevocationTarget::Person {
                 person_id: person.cert.data.person_id,
             },
-            issuer_device: f.root.cert.data.device_id,
-            created_at: person.cert.data.created_at,
-        },
-        &f.root.key,
-    )?;
+            person.cert.data.created_at,
+        )
+        .await?;
     rev.signature = Signature::from_bytes([0; 64]);
     assert_eq!(
         request(
@@ -1517,17 +1540,15 @@ async fn multiple_long_polls_wake_and_revocation_interrupts_waiters() -> TestRes
     let wait =
         tokio::spawn(async move { request(&app, "GET", &path, Some(&t), json!(null)).await });
     tokio::time::sleep(Duration::from_millis(30)).await;
-    let rev = sign_revocation(
-        RevocationData {
-            space_id: f.sid,
-            target: RevocationTarget::Device {
+    let rev = f
+        .revocation(
+            &f.root,
+            RevocationTarget::Device {
                 device_id: p.cert.data.device_id,
             },
-            issuer_device: f.root.cert.data.device_id,
-            created_at: timestamp(),
-        },
-        &f.root.key,
-    )?;
+            timestamp(),
+        )
+        .await?;
     let _: Revocation = ok(
         &f.app,
         "POST",
@@ -2148,17 +2169,15 @@ async fn upload_admission_precedes_body_reads_and_rechecks_revocation() -> TestR
         ),
     )
     .await??;
-    let rev = sign_revocation(
-        RevocationData {
-            space_id: f.sid,
-            target: RevocationTarget::Device {
+    let rev = f
+        .revocation(
+            &f.root,
+            RevocationTarget::Device {
                 device_id: person.cert.data.device_id,
             },
-            issuer_device: f.root.cert.data.device_id,
-            created_at: timestamp(),
-        },
-        &f.root.key,
-    )?;
+            timestamp(),
+        )
+        .await?;
     let _: Revocation = ok(
         &f.app,
         "POST",
@@ -2186,5 +2205,526 @@ async fn upload_admission_precedes_body_reads_and_rechecks_revocation() -> TestR
         },
     )
     .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn revocation_freezes_the_target_and_commits_its_stored_history() -> TestResult {
+    // Device freeze: the stored list is what the commit checks, not a fresh equality.
+    let f = Fixture::new().await?;
+    let bob = f.join(&f.root, GrantKind::Invite).await?;
+    let (sibling_grant, sibling_keys) = f
+        .grant(&bob, GrantKind::Enroll, Some(timestamp() + 10_000))
+        .await?;
+    let (sibling_key, sibling_redeem) = f.redeem_request(&sibling_grant, &sibling_keys)?;
+    let sibling_cert = sibling_redeem.certificate.clone();
+    let sibling_redeemed: RedeemGrantResponse = ok(
+        &f.app,
+        "POST",
+        &format!("/v1/grants/{}/redeem", sibling_keys.id()),
+        None,
+        sibling_redeem,
+    )
+    .await?;
+    let sibling = Actor {
+        key: sibling_key,
+        cert: sibling_cert,
+        token: token(&sibling_redeemed.device_token)?,
+    };
+    let carol = f.join(&f.root, GrantKind::Invite).await?;
+    let root = f.send(&f.root, f.all, None).await?;
+    let reply = f.send(&bob, f.all, Some(root.id)).await?;
+    let claimed = f.send(&f.root, f.all, None).await?;
+    let sibling_message = f.send(&f.root, f.all, None).await?;
+    let _: Reaction = ok(
+        &f.app,
+        "POST",
+        &format!("/v1/messages/{}/reactions", claimed.id),
+        Some(&bob.token),
+        f.reaction(&bob, claimed.id, ReactionKind::Claim, "main", false)?,
+    )
+    .await?;
+    let _: Reaction = ok(
+        &f.app,
+        "POST",
+        &format!("/v1/messages/{}/reactions", claimed.id),
+        Some(&bob.token),
+        f.reaction(&bob, claimed.id, ReactionKind::Ack, "main", false)?,
+    )
+    .await?;
+    let _: Reaction = ok(
+        &f.app,
+        "POST",
+        &format!("/v1/messages/{}/reactions", sibling_message.id),
+        Some(&sibling.token),
+        f.reaction(
+            &sibling,
+            sibling_message.id,
+            ReactionKind::Claim,
+            "main",
+            false,
+        )?,
+    )
+    .await?;
+    let (enroll, enroll_keys) = f
+        .grant(&bob, GrantKind::Enroll, Some(timestamp() + 10_000))
+        .await?;
+    let (invite, invite_keys) = f
+        .grant(&bob, GrantKind::Invite, Some(timestamp() + 10_000))
+        .await?;
+    let target = RevocationTarget::Device {
+        device_id: bob.cert.data.device_id,
+    };
+    let prepared: HistoryResponse = ok(
+        &f.app,
+        "POST",
+        &f.space("/revocations/prepare"),
+        Some(&f.root.token),
+        PrepareRevocationRequest {
+            target: target.clone(),
+        },
+    )
+    .await?;
+    assert!(prepared.signatures.contains(&reply.signature));
+    let again: HistoryResponse = ok(
+        &f.app,
+        "POST",
+        &f.space("/revocations/prepare"),
+        Some(&f.root.token),
+        PrepareRevocationRequest {
+            target: target.clone(),
+        },
+    )
+    .await?;
+    assert_eq!(again.signatures, prepared.signatures);
+    for actor in [&f.root, &sibling, &carol] {
+        assert_eq!(
+            request(&f.app, "GET", &f.space(""), Some(&actor.token), json!(null))
+                .await?
+                .0,
+            StatusCode::OK
+        );
+    }
+    assert_eq!(
+        request(&f.app, "GET", &f.space(""), Some(&bob.token), json!(null))
+            .await?
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    let (self_status, self_body, _) = request(
+        &f.app,
+        "POST",
+        &f.space("/revocations/prepare"),
+        Some(&f.root.token),
+        PrepareRevocationRequest {
+            target: RevocationTarget::Device {
+                device_id: f.root.cert.data.device_id,
+            },
+        },
+    )
+    .await?;
+    assert_eq!(self_status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        self_body["message"],
+        "a device cannot revoke itself or its own person"
+    );
+    let (_, enroll_redeem) = f.redeem_request(&enroll, &enroll_keys)?;
+    let (_, invite_redeem) = f.redeem_request(&invite, &invite_keys)?;
+    for (keys, body) in [(enroll_keys, enroll_redeem), (invite_keys, invite_redeem)] {
+        assert_eq!(
+            request(
+                &f.app,
+                "POST",
+                &format!("/v1/grants/{}/redeem", keys.id()),
+                None,
+                body
+            )
+            .await?
+            .0,
+            StatusCode::NOT_FOUND
+        );
+    }
+    let rev = sign_revocation(
+        RevocationData {
+            space_id: f.sid,
+            target: target.clone(),
+            issuer_device: f.root.cert.data.device_id,
+            created_at: timestamp(),
+            history: history_root(&prepared.signatures)?,
+        },
+        &f.root.key,
+    )?;
+    let unprepared = sign_revocation(
+        RevocationData {
+            history: HistoryRoot::from_bytes([9; 32]),
+            ..rev.data.clone()
+        },
+        &f.root.key,
+    )?;
+    let (unprepared_status, unprepared_body, _) = request(
+        &f.app,
+        "POST",
+        &f.space("/revocations"),
+        Some(&f.root.token),
+        CreateRevocationRequest {
+            revocation: unprepared,
+        },
+    )
+    .await?;
+    assert_eq!(unprepared_status, StatusCode::CONFLICT);
+    assert_eq!(unprepared_body["message"], "revocation was not prepared");
+    assert_eq!(
+        request(&f.app, "GET", &f.space(""), Some(&bob.token), json!(null))
+            .await?
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    let mut raw = serde_json::to_value(CreateRevocationRequest {
+        revocation: rev.clone(),
+    })?;
+    raw.get_mut("revocation")
+        .and_then(|value| value.get_mut("data"))
+        .and_then(|value| value.as_object_mut())
+        .ok_or_else(|| anyhow::anyhow!("revocation json"))?
+        .remove("history");
+    assert_eq!(
+        request(
+            &f.app,
+            "POST",
+            &f.space("/revocations"),
+            Some(&f.root.token),
+            raw
+        )
+        .await?
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    let (wrong_caller, wrong_body, _) = request(
+        &f.app,
+        "POST",
+        &f.space("/revocations"),
+        Some(&carol.token),
+        CreateRevocationRequest {
+            revocation: rev.clone(),
+        },
+    )
+    .await?;
+    assert_eq!(wrong_caller, StatusCode::BAD_REQUEST);
+    assert_eq!(wrong_body["message"], "revocation issuer/time mismatch");
+    let deletion = sign_thread_deletion(
+        ThreadDeletionData {
+            space_id: f.sid,
+            thread_id: root.id,
+            person_id: f.root.cert.data.person_id,
+            device_id: f.root.cert.data.device_id,
+            handle: "main".parse()?,
+            created_at: timestamp(),
+        },
+        &f.root.key,
+    )?;
+    let _: ThreadDeletion = ok(
+        &f.app,
+        "DELETE",
+        &format!("/v1/threads/{}", root.id),
+        Some(&f.root.token),
+        DeleteThreadRequest { deletion },
+    )
+    .await?;
+    let _: Revocation = ok(
+        &f.app,
+        "POST",
+        &f.space("/revocations"),
+        Some(&f.root.token),
+        CreateRevocationRequest {
+            revocation: rev.clone(),
+        },
+    )
+    .await?;
+    let _: Revocation = ok(
+        &f.app,
+        "POST",
+        &f.space("/revocations"),
+        Some(&f.root.token),
+        CreateRevocationRequest {
+            revocation: rev.clone(),
+        },
+    )
+    .await?;
+    let stored: HistoryResponse = ok(
+        &f.app,
+        "GET",
+        &f.space(&format!("/histories/{}", rev.data.history)),
+        Some(&f.root.token),
+        json!(null),
+    )
+    .await?;
+    assert_eq!(stored.signatures, prepared.signatures);
+    let conn = rusqlite::Connection::open(f.dir.path().join("phi.db"))?;
+    let bob_reactions: u64 = conn.query_row(
+        "SELECT COUNT(*) FROM reactions WHERE json_extract(json,'$.data.device_id')=?",
+        [bob.cert.data.device_id.to_string()],
+        |row| row.get(0),
+    )?;
+    let sibling_claims: u64 = conn.query_row(
+        "SELECT COUNT(*) FROM reactions WHERE kind='claim' AND json_extract(json,'$.data.device_id')=?",
+        [sibling.cert.data.device_id.to_string()],
+        |row| row.get(0),
+    )?;
+    assert_eq!(bob_reactions, 0);
+    assert_eq!(sibling_claims, 1);
+    let _: Reaction = ok(
+        &f.app,
+        "POST",
+        &format!("/v1/messages/{}/reactions", claimed.id),
+        Some(&carol.token),
+        f.reaction(&carol, claimed.id, ReactionKind::Claim, "main", false)?,
+    )
+    .await?;
+
+    // A person and that person's only device share one root. A different target does not.
+    let f = Fixture::new().await?;
+    let bob = f.join(&f.root, GrantKind::Invite).await?;
+    let other = f.join(&f.root, GrantKind::Invite).await?;
+    let device_target = RevocationTarget::Device {
+        device_id: bob.cert.data.device_id,
+    };
+    let person_target = RevocationTarget::Person {
+        person_id: bob.cert.data.person_id,
+    };
+    let device_list: HistoryResponse = ok(
+        &f.app,
+        "POST",
+        &f.space("/revocations/prepare"),
+        Some(&f.root.token),
+        PrepareRevocationRequest {
+            target: device_target,
+        },
+    )
+    .await?;
+    let person_list: HistoryResponse = ok(
+        &f.app,
+        "POST",
+        &f.space("/revocations/prepare"),
+        Some(&f.root.token),
+        PrepareRevocationRequest {
+            target: person_target.clone(),
+        },
+    )
+    .await?;
+    assert_eq!(
+        history_root(&device_list.signatures)?,
+        history_root(&person_list.signatures)?
+    );
+    let person_rev = sign_revocation(
+        RevocationData {
+            space_id: f.sid,
+            target: person_target,
+            issuer_device: f.root.cert.data.device_id,
+            created_at: timestamp(),
+            history: history_root(&person_list.signatures)?,
+        },
+        &f.root.key,
+    )?;
+    let _: Revocation = ok(
+        &f.app,
+        "POST",
+        &f.space("/revocations"),
+        Some(&f.root.token),
+        CreateRevocationRequest {
+            revocation: person_rev.clone(),
+        },
+    )
+    .await?;
+    let unused = sign_revocation(
+        RevocationData {
+            target: RevocationTarget::Person {
+                person_id: other.cert.data.person_id,
+            },
+            ..person_rev.data.clone()
+        },
+        &f.root.key,
+    )?;
+    let (unused_status, unused_body, _) = request(
+        &f.app,
+        "POST",
+        &f.space("/revocations"),
+        Some(&f.root.token),
+        CreateRevocationRequest { revocation: unused },
+    )
+    .await?;
+    assert_eq!(unused_status, StatusCode::CONFLICT);
+    assert_eq!(unused_body["message"], "revocation was not prepared");
+
+    // Two signatures of one prepared target both commit. The caller's prepared row stays,
+    // which is the server-observable half of publishing the second while it is still pending.
+    // Client::open of that pending row cannot live here: phi-core already depends on this crate.
+    let f = Fixture::new().await?;
+    let bob = f.join(&f.root, GrantKind::Invite).await?;
+    let target = RevocationTarget::Device {
+        device_id: bob.cert.data.device_id,
+    };
+    let prepared: HistoryResponse = ok(
+        &f.app,
+        "POST",
+        &f.space("/revocations/prepare"),
+        Some(&f.root.token),
+        PrepareRevocationRequest {
+            target: target.clone(),
+        },
+    )
+    .await?;
+    let history = history_root(&prepared.signatures)?;
+    let first = sign_revocation(
+        RevocationData {
+            space_id: f.sid,
+            target: target.clone(),
+            issuer_device: f.root.cert.data.device_id,
+            created_at: timestamp().saturating_sub(2),
+            history,
+        },
+        &f.root.key,
+    )?;
+    let second = sign_revocation(
+        RevocationData {
+            created_at: timestamp(),
+            ..first.data.clone()
+        },
+        &f.root.key,
+    )?;
+    let _: Revocation = ok(
+        &f.app,
+        "POST",
+        &f.space("/revocations"),
+        Some(&f.root.token),
+        CreateRevocationRequest { revocation: first },
+    )
+    .await?;
+    let conn = rusqlite::Connection::open(f.dir.path().join("phi.db"))?;
+    let prepared_rows: u64 = conn.query_row(
+        "SELECT COUNT(*) FROM revocation_prepared WHERE holder_device=?",
+        [f.root.cert.data.device_id.to_string()],
+        |row| row.get(0),
+    )?;
+    assert_eq!(prepared_rows, 1);
+    drop(conn);
+    let _: Revocation = ok(
+        &f.app,
+        "POST",
+        &f.space("/revocations"),
+        Some(&f.root.token),
+        CreateRevocationRequest { revocation: second },
+    )
+    .await?;
+
+    // Every hold is visible, and the target stays locked until every holder is revoked.
+    let f = Fixture::new().await?;
+    let bob = f.join(&f.root, GrantKind::Invite).await?;
+    let m1 = f.join(&f.root, GrantKind::Invite).await?;
+    let m2 = f.join(&f.root, GrantKind::Invite).await?;
+    let target = RevocationTarget::Device {
+        device_id: bob.cert.data.device_id,
+    };
+    for holder in [&m1, &m2] {
+        let _: HistoryResponse = ok(
+            &f.app,
+            "POST",
+            &f.space("/revocations/prepare"),
+            Some(&holder.token),
+            PrepareRevocationRequest {
+                target: target.clone(),
+            },
+        )
+        .await?;
+    }
+    let listed: ListDevicesResponse = ok(
+        &f.app,
+        "GET",
+        &f.space("/devices"),
+        Some(&f.root.token),
+        json!(null),
+    )
+    .await?;
+    assert_eq!(listed.holds.len(), 2);
+    assert!(listed.holds.iter().any(|hold| {
+        hold.device_id == bob.cert.data.device_id && hold.holder_device == m1.cert.data.device_id
+    }));
+    assert!(listed.holds.iter().any(|hold| {
+        hold.device_id == bob.cert.data.device_id && hold.holder_device == m2.cert.data.device_id
+    }));
+    assert_eq!(
+        request(&f.app, "GET", &f.space(""), Some(&bob.token), json!(null))
+            .await?
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    let revoke_m1 = f
+        .revocation(
+            &f.root,
+            RevocationTarget::Device {
+                device_id: m1.cert.data.device_id,
+            },
+            timestamp(),
+        )
+        .await?;
+    let _: Revocation = ok(
+        &f.app,
+        "POST",
+        &f.space("/revocations"),
+        Some(&f.root.token),
+        CreateRevocationRequest {
+            revocation: revoke_m1,
+        },
+    )
+    .await?;
+    assert_eq!(
+        request(&f.app, "GET", &f.space(""), Some(&bob.token), json!(null))
+            .await?
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    let after_m1: ListDevicesResponse = ok(
+        &f.app,
+        "GET",
+        &f.space("/devices"),
+        Some(&f.root.token),
+        json!(null),
+    )
+    .await?;
+    assert_eq!(after_m1.holds.len(), 1);
+    assert_eq!(after_m1.holds[0].holder_device, m2.cert.data.device_id);
+    let revoke_m2 = f
+        .revocation(
+            &f.root,
+            RevocationTarget::Device {
+                device_id: m2.cert.data.device_id,
+            },
+            timestamp(),
+        )
+        .await?;
+    let _: Revocation = ok(
+        &f.app,
+        "POST",
+        &f.space("/revocations"),
+        Some(&f.root.token),
+        CreateRevocationRequest {
+            revocation: revoke_m2,
+        },
+    )
+    .await?;
+    assert_eq!(
+        request(&f.app, "GET", &f.space(""), Some(&bob.token), json!(null))
+            .await?
+            .0,
+        StatusCode::OK
+    );
+    let cleared: ListDevicesResponse = ok(
+        &f.app,
+        "GET",
+        &f.space("/devices"),
+        Some(&f.root.token),
+        json!(null),
+    )
+    .await?;
+    assert!(cleared.holds.is_empty());
     Ok(())
 }

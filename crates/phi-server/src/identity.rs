@@ -3,7 +3,8 @@ use crate::{
     error::{ApiError, Result},
 };
 use phi_proto::*;
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
+use std::collections::BTreeSet;
 
 impl Db {
     pub fn add_device(&self, cert: DeviceCertificate) -> Result<Base64<32>> {
@@ -189,7 +190,7 @@ impl Db {
                 return Err(ApiError::forbidden());
             }
             let issuer: Device = db.one(
-                "SELECT json FROM devices WHERE id=? AND revoked_at IS NULL",
+                "SELECT json FROM devices WHERE id=? AND revoked_at IS NULL AND NOT EXISTS(SELECT 1 FROM revocation_holds h WHERE h.device_id=devices.id)",
                 [data.issuer_device.to_string()],
             )?;
             if issuer.cert.data.space_id != data.space_id {
@@ -238,6 +239,159 @@ impl Db {
             })
         })
     }
+    fn target_devices(&self, sid: SpaceId, target: &RevocationTarget) -> Result<Vec<Device>> {
+        match target {
+            RevocationTarget::Device { device_id } => Ok(vec![self.one(
+                "SELECT json FROM devices WHERE id=? AND space_id=?",
+                params![device_id.to_string(), sid.to_string()],
+            )?]),
+            RevocationTarget::Person { person_id } => {
+                let _: Person = self.one(
+                    "SELECT json FROM persons WHERE id=? AND space_id=?",
+                    params![person_id.to_string(), sid.to_string()],
+                )?;
+                self.list(
+                    "SELECT json FROM devices WHERE person_id=? AND space_id=?",
+                    params![person_id.to_string(), sid.to_string()],
+                )
+            }
+        }
+    }
+    /// Signatures of everything T has stored. A later commit accepts only a subset of this set.
+    fn target_history(&self, sid: SpaceId, devices: &[Device]) -> Result<Vec<Signature>> {
+        let device_ids: BTreeSet<_> = devices
+            .iter()
+            .map(|device| device.cert.data.device_id)
+            .collect();
+        let mut persons = BTreeSet::new();
+        for device in devices {
+            persons.insert(device.cert.data.person_id);
+        }
+        let mut signatures = BTreeSet::new();
+        for person in persons {
+            let messages: Vec<Message> = self.list(
+                "SELECT json FROM messages WHERE space_id=? AND author_person=?",
+                params![sid.to_string(), person.to_string()],
+            )?;
+            for message in messages {
+                if device_ids.contains(&message.author_device) {
+                    signatures.insert(message.signature);
+                }
+            }
+        }
+        let channels: Vec<Channel> = self.list(
+            "SELECT json FROM channels WHERE space_id=?",
+            [sid.to_string()],
+        )?;
+        for channel in channels {
+            for membership in channel
+                .membership_history
+                .iter()
+                .chain(std::iter::once(&channel.membership))
+            {
+                if device_ids.contains(&membership.data.issuer_device) {
+                    signatures.insert(membership.signature.clone());
+                }
+            }
+        }
+        let directory = self.directory(sid)?;
+        for cert in &directory.certificates {
+            let CertificateIssuer::Grant { grant_id } = cert.data.issuer else {
+                continue;
+            };
+            let issued_by_target = directory.grants.iter().any(|grant| {
+                grant.data.grant_id == grant_id && device_ids.contains(&grant.data.issuer_device)
+            });
+            if issued_by_target {
+                signatures.insert(cert.signature.clone());
+            }
+        }
+        let events: Vec<Event> = self.list(
+            "SELECT json FROM events WHERE space_id=? AND json_extract(json,'$.event.kind') IN ('settings','thread_state','thread_deleted')",
+            [sid.to_string()],
+        )?;
+        for event in events {
+            match event.event {
+                EventData::Settings(change) if device_ids.contains(&change.data.issuer_device) => {
+                    signatures.insert(change.signature);
+                }
+                EventData::ThreadState(state) if device_ids.contains(&state.data.device_id) => {
+                    signatures.insert(state.signature);
+                }
+                EventData::ThreadDeleted(deletion)
+                    if device_ids.contains(&deletion.data.device_id) =>
+                {
+                    signatures.insert(deletion.signature);
+                }
+                _ => {}
+            }
+        }
+        Ok(signatures.into_iter().collect())
+    }
+    pub fn holds(&self, sid: SpaceId) -> Result<Vec<DeviceHold>> {
+        let mut statement = self.conn.prepare(
+            "SELECT h.device_id, h.holder_device FROM revocation_holds h JOIN devices d ON d.id=h.device_id WHERE d.space_id=? ORDER BY h.device_id, h.holder_device",
+        )?;
+        let rows = statement.query_map([sid.to_string()], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut holds = Vec::new();
+        for row in rows {
+            let (device_id, holder_device) = row?;
+            holds.push(DeviceHold {
+                device_id: device_id.parse().map_err(ApiError::invalid)?,
+                holder_device: holder_device.parse().map_err(ApiError::invalid)?,
+            });
+        }
+        Ok(holds)
+    }
+    pub fn prepare_revocation(
+        &mut self,
+        a: &Auth,
+        req: PrepareRevocationRequest,
+    ) -> Result<HistoryResponse> {
+        req.validate()?;
+        self.transaction(|db| {
+            let devices = db.target_devices(a.sid(), &req.target)?;
+            if devices
+                .iter()
+                .any(|device| device.cert.data.device_id == a.device())
+            {
+                return Err(ApiError::invalid(
+                    "a device cannot revoke itself or its own person",
+                ));
+            }
+            for device in &devices {
+                db.conn.execute(
+                    "INSERT OR IGNORE INTO revocation_holds(device_id, holder_device) VALUES(?,?)",
+                    params![
+                        device.cert.data.device_id.to_string(),
+                        a.device().to_string()
+                    ],
+                )?;
+            }
+            let signatures = db.target_history(a.sid(), &devices)?;
+            let root = phi_crypto::history_root(&signatures)?;
+            db.conn.execute(
+                "INSERT OR IGNORE INTO revocation_prepared(holder_device, target, root, json) VALUES(?,?,?,?)",
+                params![
+                    a.device().to_string(),
+                    json(&req.target)?,
+                    root.to_string(),
+                    json(&signatures)?
+                ],
+            )?;
+            Ok(HistoryResponse { signatures })
+        })
+    }
+    pub fn history(&self, sid: SpaceId, root: HistoryRoot) -> Result<HistoryResponse> {
+        Ok(HistoryResponse {
+            signatures: self.one(
+                "SELECT json FROM histories WHERE space_id=? AND root=?",
+                params![sid.to_string(), root.to_string()],
+            )?,
+        })
+    }
     pub fn revoke(&mut self, a: &Auth, r: CreateRevocationRequest) -> Result<Revocation> {
         r.validate()?;
         let rev = r.revocation;
@@ -256,30 +410,46 @@ impl Db {
             if bundle.revocations.contains(&rev) {
                 return Ok(rev);
             }
+            let stored_json: Option<String> = db
+                .conn
+                .query_row(
+                    "SELECT json FROM revocation_prepared WHERE holder_device=? AND root=? AND target=?",
+                    params![
+                        a.device().to_string(),
+                        rev.data.history.to_string(),
+                        json(&rev.data.target)?
+                    ],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let Some(stored_json) = stored_json else {
+                return Err(ApiError::conflict("revocation was not prepared"));
+            };
+            let stored_list: Vec<Signature> = serde_json::from_str(&stored_json)?;
+            let devices = db.target_devices(a.sid(), &rev.data.target)?;
+            let current: BTreeSet<_> = db.target_history(a.sid(), &devices)?.into_iter().collect();
+            let prepared: BTreeSet<_> = stored_list.into_iter().collect();
+            if !current.is_subset(&prepared) {
+                return Err(ApiError::conflict("history changed"));
+            }
             bundle.revocations.push(rev.clone());
             let verified = phi_crypto::verify_trust_bundle(a.sid(), &bundle, now(), Some(&pinned))?;
             db.pin_trust(a.sid(), &verified)?;
-            let devices: Vec<Device> = match rev.data.target {
-                RevocationTarget::Device { device_id } => vec![db.one(
-                    "SELECT json FROM devices WHERE id=? AND space_id=?",
-                    params![device_id.to_string(), a.sid().to_string()],
-                )?],
-                RevocationTarget::Person { person_id } => {
-                    let mut person: Person = db.one(
-                        "SELECT json FROM persons WHERE id=? AND space_id=?",
-                        params![person_id.to_string(), a.sid().to_string()],
-                    )?;
-                    person.removed_at = Some(now());
-                    db.conn.execute(
-                        "UPDATE persons SET removed_at=?,json=? WHERE id=?",
-                        params![person.removed_at, json(&person)?, person_id.to_string()],
-                    )?;
-                    db.list(
-                        "SELECT json FROM devices WHERE person_id=?",
-                        [person_id.to_string()],
-                    )?
-                }
-            };
+            if let RevocationTarget::Person { person_id } = rev.data.target {
+                let mut person: Person = db.one(
+                    "SELECT json FROM persons WHERE id=? AND space_id=?",
+                    params![person_id.to_string(), a.sid().to_string()],
+                )?;
+                person.removed_at = Some(now());
+                db.conn.execute(
+                    "UPDATE persons SET removed_at=?,json=? WHERE id=?",
+                    params![person.removed_at, json(&person)?, person_id.to_string()],
+                )?;
+            }
+            let covered: Vec<_> = devices
+                .iter()
+                .map(|device| (device.cert.data.device_id, device.cert.data.person_id))
+                .collect();
             for mut device in devices {
                 device.revoked_at = Some(now());
                 db.conn.execute(
@@ -291,6 +461,24 @@ impl Db {
                     ],
                 )?;
             }
+            for (device_id, person_id) in covered {
+                db.conn.execute(
+                    "DELETE FROM revocation_holds WHERE device_id=? OR holder_device=?",
+                    params![device_id.to_string(), device_id.to_string()],
+                )?;
+                db.conn.execute(
+                    "DELETE FROM revocation_prepared WHERE holder_device=?",
+                    [device_id.to_string()],
+                )?;
+                db.conn.execute(
+                    "DELETE FROM reactions WHERE person_id=? AND json_extract(json,'$.data.device_id')=?",
+                    params![person_id.to_string(), device_id.to_string()],
+                )?;
+            }
+            db.conn.execute(
+                "INSERT OR IGNORE INTO histories(space_id, root, json) VALUES(?,?,?)",
+                params![a.sid().to_string(), rev.data.history.to_string(), stored_json],
+            )?;
             db.conn.execute(
                 "INSERT INTO revocations(space_id,json) VALUES(?,?)",
                 params![a.sid().to_string(), json(&rev)?],

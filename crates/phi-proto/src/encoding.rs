@@ -71,6 +71,7 @@ id!(ChannelId, 16);
 id!(MessageId, 16);
 id!(BlobId, 16);
 id!(GrantId, 32);
+id!(HistoryRoot, 32);
 
 /// Fixed-size binary fields cannot bypass length checks through deserialization.
 /// All copies zeroize on drop, including attachment keys carried inside content.

@@ -342,6 +342,11 @@ impl Validate for CreateRevocationRequest {
         self.revocation.validate()
     }
 }
+impl Validate for PrepareRevocationRequest {
+    fn validate(&self) -> Result<(), ValidationError> {
+        Ok(())
+    }
+}
 impl Validate for CreateChannelRequest {
     fn validate(&self) -> Result<(), ValidationError> {
         self.meta.validate()?;

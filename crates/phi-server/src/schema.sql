@@ -41,3 +41,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS one_invite_person ON grants(space_id,json_extr
 CREATE TABLE IF NOT EXISTS message_mentions(message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE, person_id TEXT NOT NULL, handle TEXT NOT NULL, PRIMARY KEY(message_id,person_id,handle));
 CREATE INDEX IF NOT EXISTS mentions_person ON message_mentions(person_id,handle,message_id);
 CREATE INDEX IF NOT EXISTS devices_person ON devices(person_id,space_id);
+CREATE TABLE IF NOT EXISTS revocation_holds(device_id TEXT NOT NULL REFERENCES devices(id), holder_device TEXT NOT NULL REFERENCES devices(id), PRIMARY KEY(device_id,holder_device));
+CREATE TABLE IF NOT EXISTS revocation_prepared(holder_device TEXT NOT NULL REFERENCES devices(id), target TEXT NOT NULL, root TEXT NOT NULL, json TEXT NOT NULL, PRIMARY KEY(holder_device,target,root));
+CREATE TABLE IF NOT EXISTS histories(space_id TEXT NOT NULL REFERENCES spaces(id), root TEXT NOT NULL, json TEXT NOT NULL, PRIMARY KEY(space_id,root));
+CREATE INDEX IF NOT EXISTS messages_author ON messages(space_id,author_person);
+CREATE INDEX IF NOT EXISTS events_kind ON events(space_id,json_extract(json,'$.event.kind'));

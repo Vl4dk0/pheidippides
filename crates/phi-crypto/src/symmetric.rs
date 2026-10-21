@@ -195,6 +195,9 @@ pub fn wrap_channel_key(
     entropy: &mut impl Entropy,
 ) -> Result<WrappedKey, CryptoError> {
     let cert = recipient.certificate();
+    if !recipient.active {
+        return Err(CryptoError::Trust("key recipient is not an active device"));
+    }
     if key.commitment() != membership.data.key_commitment {
         return Err(CryptoError::Trust(
             "channel key differs from signed commitment",

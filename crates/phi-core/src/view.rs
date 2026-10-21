@@ -632,6 +632,7 @@ pub struct DeviceView {
     pub last_seen_at: Option<u64>,
     pub last_seen: String,
     pub revoked: bool,
+    pub held_by: Vec<String>,
 }
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct PersonView {
@@ -650,11 +651,17 @@ impl DirectoryView {
         for person in &self.people {
             out.push_str(&format!("@{} ({})\n", person.name, person.id));
             for d in &person.devices {
+                let held = if d.held_by.is_empty() {
+                    String::new()
+                } else {
+                    format!(" · held by {}", d.held_by.join(", "))
+                };
                 out.push_str(&format!(
-                    "  {} · last seen {}{}\n",
+                    "  {} · last seen {}{}{}\n",
                     d.id,
                     d.last_seen,
-                    if d.revoked { " · revoked" } else { "" }
+                    if d.revoked { " · revoked" } else { "" },
+                    held
                 ));
             }
         }

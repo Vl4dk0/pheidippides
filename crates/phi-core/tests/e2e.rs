@@ -339,6 +339,29 @@ fn options(body: &str) -> SendOptions {
         files: vec![],
     }
 }
+fn stored_device_keys(store: &Store, profile: &Profile) -> Result<phi_crypto::DeviceKeys> {
+    let keys = FileKeyStore::open(&store.profile_dir(profile).join("keys"))?;
+    let raw = keys
+        .get("identity")?
+        .ok_or_else(|| anyhow::anyhow!("missing identity"))?;
+    let value: serde_json::Value = serde_json::from_slice(&raw)?;
+    let sign: KeyBytes = serde_json::from_value(
+        value
+            .get("sign")
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("missing sign key"))?,
+    )?;
+    let kex: KeyBytes = serde_json::from_value(
+        value
+            .get("kex")
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("missing kex key"))?,
+    )?;
+    Ok(phi_crypto::DeviceKeys::from_secrets(
+        *sign.as_bytes(),
+        *kex.as_bytes(),
+    ))
+}
 
 #[tokio::test]
 async fn create_invite_join_attachment_fetch_read_reply() -> Result<()> {
@@ -2131,5 +2154,405 @@ async fn wait_survives_transient_gateway_errors() -> Result<()> {
         .await
         .map_err(|error| anyhow::anyhow!("wait task: {error}"))??;
     ensure!(waited.contains("Server came back."));
+    Ok(())
+}
+
+#[tokio::test]
+async fn revoking_the_root_keeps_history_invites_and_devices_working() -> Result<()> {
+    let f = Fixture::new().await?;
+    let mut alice = f.alice().await?;
+    let link = alice.invite(false, false).await?;
+    let mut bob = Client::join(f.store("bob"), &link, "bob").await?;
+    alice.refresh().await?;
+    let root = alice
+        .send("#all", "Root history", options("clear history"))
+        .await?;
+    alice.set_settings("summary_every", "7").await?;
+    alice.close_thread(root.id).await?;
+    bob.react(root.id, ReactionKind::Ack, false).await?;
+    bob.revoke(RevocationTarget::Person {
+        person_id: alice.profile.person_id,
+    })
+    .await?;
+    let invite = bob.invite(false, false).await?;
+    let mut carol = Client::join(f.store("carol"), &invite, "carol").await?;
+    ensure!(carol.settings.summary_every == 7);
+    let text = carol.read(root.id, ReadOptions::default()).await?.text();
+    ensure!(
+        text.contains("clear history")
+            && text.contains("status: closed")
+            && !text.contains("VERIFICATION FAILED")
+    );
+    let closed = carol.discover_threads_filtered(Some("#all"), true).await?;
+    ensure!(
+        closed
+            .iter()
+            .any(|thread| thread.id == root.id && thread.closed)
+    );
+    ensure!(!carol.wait_text(0).await?.contains("VERIFICATION FAILED"));
+    let laptop_link = carol.invite(true, true).await?;
+    let mut laptop = Client::join(f.store("laptop"), &laptop_link, "carol").await?;
+    let laptop_text = laptop.read(root.id, ReadOptions::default()).await?.text();
+    ensure!(
+        laptop_text.contains("clear history")
+            && laptop_text.contains("status: closed")
+            && !laptop_text.contains("VERIFICATION FAILED")
+    );
+    let reopened = Client::open(f.store("carol"), carol.profile.clone(), None).await?;
+    ensure!(reopened.settings.summary_every == 7);
+    Ok(())
+}
+
+#[tokio::test]
+async fn revoked_device_and_colluding_host_cannot_extend_history() -> Result<()> {
+    let f = Fixture::new().await?;
+    let mut alice = f.alice().await?;
+    let bob_link = alice.invite(false, false).await?;
+    let mut bob = Client::join(f.store("bob"), &bob_link, "bob").await?;
+    alice.refresh().await?;
+    let carol_link = alice.invite(false, false).await?;
+    let mut carol = Client::join(f.store("carol"), &carol_link, "carol").await?;
+    alice.refresh().await?;
+    bob.refresh().await?;
+    let root = alice
+        .send("#all", "Visible root", options("root body"))
+        .await?;
+    let reply = bob.reply(root.id, options("listed secret")).await?;
+    bob.group_create("quiet", &["@carol".into()]).await?;
+    alice
+        .revoke(RevocationTarget::Device {
+            device_id: bob.profile.device_id,
+        })
+        .await?;
+    carol.refresh().await?;
+    let honest = carol.read(root.id, ReadOptions::default()).await?.text();
+    ensure!(honest.contains("listed secret") && !honest.contains("VERIFICATION FAILED"));
+    let dave_link = alice.invite(false, false).await?;
+    let mut dave = Client::join(f.store("dave"), &dave_link, "dave").await?;
+    let bob_keys = stored_device_keys(&f.store("bob"), &bob.profile)?;
+    let db_path = f.dir.path().join("server/phi.db");
+    let (original_reply, copy_id) = {
+        let conn = rusqlite::Connection::open(&db_path)?;
+        let original_reply: String = conn.query_row(
+            "SELECT json FROM messages WHERE id=?",
+            [reply.id.to_string()],
+            |row| row.get(0),
+        )?;
+        let mut copy: Message = serde_json::from_str(&original_reply)?;
+        copy_id_of(&mut copy, &bob_keys)?;
+        let seq: u64 = conn.query_row(
+            "UPDATE spaces SET seq=seq+1 WHERE id=? RETURNING seq",
+            [alice.profile.space_id.to_string()],
+            |row| row.get(0),
+        )?;
+        copy.seq = seq;
+        conn.execute(
+            "INSERT INTO messages(id, space_id, channel_id, thread_id, seq, author_person, json) VALUES(?,?,?,?,?,?,?)",
+            rusqlite::params![
+                copy.id.to_string(),
+                copy.envelope.space_id.to_string(),
+                copy.envelope.channel_id.to_string(),
+                root.id.to_string(),
+                seq,
+                copy.author_person.to_string(),
+                serde_json::to_string(&copy)?
+            ],
+        )?;
+        let mut changed: Message = serde_json::from_str(&original_reply)?;
+        changed.envelope.handle = "forged".parse()?;
+        changed.signature = bob_keys.sign(&phi_crypto::message_signing_bytes(&changed.envelope)?);
+        conn.execute(
+            "UPDATE messages SET json=? WHERE id=?",
+            rusqlite::params![serde_json::to_string(&changed)?, reply.id.to_string()],
+        )?;
+        (original_reply, copy.id)
+    };
+    for reader in [&mut carol, &mut dave] {
+        let text = reader.read(root.id, ReadOptions::default()).await?.text();
+        ensure!(
+            text.matches("VERIFICATION FAILED").count() >= 2
+                && text
+                    .contains("revoked device, or not covered by its issuer's revocation history")
+                && text.contains("root body")
+                && !text.contains("listed secret")
+        );
+    }
+    {
+        let conn = rusqlite::Connection::open(&db_path)?;
+        conn.execute(
+            "UPDATE messages SET json=? WHERE id=?",
+            rusqlite::params![original_reply, reply.id.to_string()],
+        )?;
+        conn.execute("DELETE FROM messages WHERE id=?", [copy_id.to_string()])?;
+        // read() advances the cursor to the forged seq. The server rejects a cursor past the
+        // messages that remain, and the next sync would copy that cursor back into the cache.
+        conn.execute(
+            "UPDATE cursors SET seq=? WHERE thread_id=?",
+            rusqlite::params![reply.seq, root.id.to_string()],
+        )?;
+    }
+    let restored = carol.read(root.id, ReadOptions::default()).await?.text();
+    ensure!(restored.contains("listed secret") && !restored.contains("VERIFICATION FAILED"));
+
+    let original_channel = {
+        let conn = rusqlite::Connection::open(&db_path)?;
+        let group_id: String = conn.query_row(
+            "SELECT id FROM channels WHERE kind='group' AND json_extract(json,'$.members') LIKE ?",
+            [format!("%{}%", carol.profile.person_id)],
+            |row| row.get(0),
+        )?;
+        let original: String =
+            conn.query_row("SELECT json FROM channels WHERE id=?", [group_id], |row| {
+                row.get(0)
+            })?;
+        let mut channel: Channel = serde_json::from_str(&original)?;
+        let mut data = channel.membership.data.clone();
+        data.issuer_device = bob.profile.device_id;
+        data.previous = Some(channel.membership.signature.clone());
+        let signed = phi_crypto::sign_membership(data, &bob_keys)?;
+        channel.membership_history.push(channel.membership.clone());
+        channel.membership = signed;
+        conn.execute(
+            "UPDATE channels SET json=? WHERE id=?",
+            rusqlite::params![serde_json::to_string(&channel)?, channel.id.to_string()],
+        )?;
+        original
+    };
+    ensure!(matches!(
+        carol.refresh().await,
+        Err(Error::Crypto(phi_crypto::CryptoError::Revoked))
+    ));
+    ensure!(dave.refresh().await.is_ok());
+    {
+        let conn = rusqlite::Connection::open(&db_path)?;
+        let group_id: String =
+            conn.query_row("SELECT id FROM channels WHERE kind='group'", [], |row| {
+                row.get(0)
+            })?;
+        conn.execute(
+            "UPDATE channels SET json=? WHERE id=?",
+            rusqlite::params![original_channel, group_id],
+        )?;
+    }
+    carol.refresh().await?;
+
+    let original_space = {
+        let conn = rusqlite::Connection::open(&db_path)?;
+        let original: String = conn.query_row(
+            "SELECT json FROM spaces WHERE id=?",
+            [alice.profile.space_id.to_string()],
+            |row| row.get(0),
+        )?;
+        let mut space: Space = serde_json::from_str(&original)?;
+        let mut settings = space.settings.clone();
+        settings.summary_every = settings.summary_every.saturating_add(1);
+        space.settings_change = Some(phi_crypto::sign_settings(
+            SettingsChangeData {
+                space_id: alice.profile.space_id,
+                issuer_device: bob.profile.device_id,
+                created_at: 50,
+                settings: settings.clone(),
+            },
+            &bob_keys,
+        )?);
+        space.settings = settings;
+        conn.execute(
+            "UPDATE spaces SET json=? WHERE id=?",
+            rusqlite::params![
+                serde_json::to_string(&space)?,
+                alice.profile.space_id.to_string()
+            ],
+        )?;
+        original
+    };
+    ensure!(matches!(
+        carol.refresh().await,
+        Err(Error::Crypto(phi_crypto::CryptoError::Revoked))
+    ));
+    {
+        let conn = rusqlite::Connection::open(&db_path)?;
+        conn.execute(
+            "UPDATE spaces SET json=? WHERE id=?",
+            rusqlite::params![original_space, alice.profile.space_id.to_string()],
+        )?;
+    }
+    carol.refresh().await?;
+
+    {
+        let conn = rusqlite::Connection::open(&db_path)?;
+        let reaction = phi_crypto::sign_reaction(
+            ReactionData {
+                space_id: alice.profile.space_id,
+                message_id: root.id,
+                person_id: bob.profile.person_id,
+                device_id: bob.profile.device_id,
+                handle: "forged".parse()?,
+                kind: ReactionKind::Claim,
+                created_at: 50,
+                remove: false,
+            },
+            &bob_keys,
+        )?;
+        conn.execute(
+            "INSERT INTO reactions(message_id, person_id, handle, kind, json) VALUES(?,?,?,?,?)",
+            rusqlite::params![
+                root.id.to_string(),
+                bob.profile.person_id.to_string(),
+                "forged",
+                "claim",
+                serde_json::to_string(&reaction)?
+            ],
+        )?;
+    }
+    let claimed = carol.read(root.id, ReadOptions::default()).await?.text();
+    ensure!(
+        claimed.contains("listed secret")
+            && claimed.contains("reactions: none")
+            && !claimed.contains("claimed by")
+            && !claimed.contains("forged")
+    );
+    {
+        let conn = rusqlite::Connection::open(&db_path)?;
+        conn.execute("DELETE FROM reactions WHERE handle='forged'", [])?;
+    }
+    let clean = carol.read(root.id, ReadOptions::default()).await?.text();
+    ensure!(clean.contains("listed secret") && !clean.contains("VERIFICATION FAILED"));
+    dave.refresh().await?;
+    Ok(())
+}
+
+fn copy_id_of(message: &mut Message, keys: &phi_crypto::DeviceKeys) -> Result<()> {
+    let id = MessageId::from_bytes([0xab; 16]);
+    message.id = id;
+    message.envelope.id = id;
+    message.signature = keys.sign(&phi_crypto::message_signing_bytes(&message.envelope)?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn private_channels_the_revoker_cannot_see_survive_revocation() -> Result<()> {
+    let f = Fixture::new().await?;
+    let mut alice = f.alice().await?;
+    let bob_link = alice.invite(false, false).await?;
+    let mut bob = Client::join(f.store("bob"), &bob_link, "bob").await?;
+    alice.refresh().await?;
+    let carol_link = alice.invite(false, false).await?;
+    let carol = Client::join(f.store("carol"), &carol_link, "carol").await?;
+    alice.refresh().await?;
+    bob.refresh().await?;
+    let carol_profile = carol.profile.clone();
+    bob.group_create("secret", &["@carol".into()]).await?;
+    bob.group_member("secret", "@carol", false).await?;
+    let group = bob
+        .channels
+        .iter()
+        .find(|channel| channel.meta.name == "secret")
+        .ok_or_else(|| anyhow::anyhow!("secret group missing"))?;
+    ensure!(
+        group.channel.membership_history.len() == 1
+            && group.channel.membership.data.issuer_device == bob.profile.device_id
+            && group.channel.membership_history[0].data.issuer_device == bob.profile.device_id
+            && group.channel.current_epoch == group.channel.membership_history[0].data.epoch
+    );
+    let group_id = group.channel.id;
+    let group_message = bob
+        .send("#secret", "Group", options("group history"))
+        .await?;
+    let dm_message = bob.send("@carol", "DM", options("dm history")).await?;
+    let dm_id = dm_message.envelope.channel_id;
+    // Open resumes rotations, so Carol may already have dropped Bob before she sends.
+    // Compare with the epochs from before the revocation either way.
+    let group_epoch = bob
+        .channels
+        .iter()
+        .find(|channel| channel.channel.id == group_id)
+        .map(|channel| channel.channel.current_epoch)
+        .ok_or_else(|| anyhow::anyhow!("group missing before revocation"))?;
+    let dm_epoch = bob
+        .channels
+        .iter()
+        .find(|channel| channel.channel.id == dm_id)
+        .map(|channel| channel.channel.current_epoch)
+        .ok_or_else(|| anyhow::anyhow!("dm missing before revocation"))?;
+    alice
+        .revoke(RevocationTarget::Person {
+            person_id: bob.profile.person_id,
+        })
+        .await?;
+    ensure!(
+        !alice
+            .channels
+            .iter()
+            .any(|channel| { channel.channel.id == group_id || channel.channel.id == dm_id })
+    );
+    let cache =
+        rusqlite::Connection::open(f.store("alice").cache_dir(&alice.profile).join("cache.db"))?;
+    let pending: u64 = cache.query_row("SELECT COUNT(*) FROM pending_revocations", [], |row| {
+        row.get(0)
+    })?;
+    ensure!(pending == 0);
+    drop(cache);
+    let server = rusqlite::Connection::open(f.dir.path().join("server/phi.db"))?;
+    let revocations: u64 =
+        server.query_row("SELECT COUNT(*) FROM revocations", [], |row| row.get(0))?;
+    ensure!(revocations == 1);
+    drop(server);
+    let mut carol = Client::open(f.store("carol"), carol_profile, None).await?;
+    let group_text = carol
+        .read(group_message.id, ReadOptions::default())
+        .await?
+        .text();
+    let dm_text = carol
+        .read(dm_message.id, ReadOptions::default())
+        .await?
+        .text();
+    ensure!(
+        group_text.contains("group history")
+            && dm_text.contains("dm history")
+            && !group_text.contains("VERIFICATION FAILED")
+            && !dm_text.contains("VERIFICATION FAILED")
+    );
+    carol
+        .send("#secret", "After", options("rotated group"))
+        .await?;
+    carol
+        .send("@bob", "After dm", options("rotated dm"))
+        .await?;
+    let group = carol
+        .channels
+        .iter()
+        .find(|channel| channel.channel.id == group_id)
+        .ok_or_else(|| anyhow::anyhow!("group missing after send"))?;
+    ensure!(
+        group.channel.current_epoch > group_epoch
+            && !group.channel.members.contains(&bob.profile.person_id)
+            && group.channel.members.contains(&carol.profile.person_id)
+    );
+    let dm = carol
+        .channels
+        .iter()
+        .find(|channel| channel.channel.id == dm_id)
+        .ok_or_else(|| anyhow::anyhow!("dm missing after send"))?;
+    ensure!(
+        dm.channel.current_epoch > dm_epoch
+            && dm.channel.members.contains(&bob.profile.person_id)
+            && dm.channel.members.contains(&carol.profile.person_id)
+    );
+    let laptop_link = carol.invite(true, true).await?;
+    let mut laptop = Client::join(f.store("laptop"), &laptop_link, "carol").await?;
+    let laptop_group = laptop
+        .read(group_message.id, ReadOptions::default())
+        .await?
+        .text();
+    let laptop_dm = laptop
+        .read(dm_message.id, ReadOptions::default())
+        .await?
+        .text();
+    ensure!(
+        laptop_group.contains("group history")
+            && laptop_dm.contains("dm history")
+            && !laptop_group.contains("VERIFICATION FAILED")
+            && !laptop_dm.contains("VERIFICATION FAILED")
+    );
     Ok(())
 }

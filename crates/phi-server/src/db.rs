@@ -114,7 +114,7 @@ impl Db {
         let device: Device = self
             .optional(
                 "
-            SELECT json FROM devices WHERE token_hash=? AND revoked_at IS NULL
+            SELECT json FROM devices WHERE token_hash=? AND revoked_at IS NULL AND NOT EXISTS(SELECT 1 FROM revocation_holds h WHERE h.device_id=devices.id)
         ",
                 [token_hash(token.ok_or_else(ApiError::unauthorized)?)],
             )?

@@ -49,11 +49,28 @@ pub struct RedeemGrantResponse {
     pub directory: TrustBundle,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DeviceHold {
+    pub device_id: DeviceId,
+    pub holder_device: DeviceId,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ListDevicesResponse {
     pub persons: Vec<Person>,
     pub devices: Vec<Device>,
     pub directory: TrustBundle,
+    pub holds: Vec<DeviceHold>,
 }
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrepareRevocationRequest {
+    pub target: RevocationTarget,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HistoryResponse {
+    pub signatures: Vec<Signature>,
+}
+pub type PrepareRevocationResponse = HistoryResponse;
+pub type GetHistoryResponse = HistoryResponse;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateRevocationRequest {

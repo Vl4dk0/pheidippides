@@ -883,9 +883,12 @@ async fn run(cli: Cli) -> Result<u8> {
                 | Command::Who
                 | Command::Send { .. }
                 | Command::Reply { .. }
+                | Command::Device {
+                    command: DeviceCommand::List,
+                }
         )
     {
-        return Err(Error::User("--json supports fetch, inbox, read, wait, threads, channels, spaces, who, send and reply".into()));
+        return Err(Error::User("--json supports fetch, inbox, read, wait, threads, channels, spaces, who, device list, send and reply".into()));
     }
     if let Command::Skill { install } = &cli.command {
         if let Some(dir) = install {
@@ -1036,21 +1039,45 @@ async fn run(cli: Cli) -> Result<u8> {
                         println!("{}", client.invite(true, false).await?.as_str())
                     }
                     DeviceCommand::List => {
-                        for device in &client.devices {
-                            println!(
-                                "{} · @{} · last seen {}{}",
-                                device.cert.data.device_id,
-                                client.person_name(device.cert.data.person_id),
-                                device
-                                    .last_seen_at
-                                    .map(format_last_seen)
-                                    .unwrap_or_else(|| "never".into()),
-                                if device.revoked_at.is_some() {
-                                    " · revoked"
+                        if cli.json {
+                            let devices: Vec<_> = client
+                                .devices
+                                .iter()
+                                .map(|device| {
+                                    serde_json::json!({
+                                        "id": device.cert.data.device_id,
+                                        "person": client.person_name(device.cert.data.person_id),
+                                        "last_seen_at": device.last_seen_at,
+                                        "revoked": device.revoked_at.is_some(),
+                                        "held_by": client.held_by(device.cert.data.device_id),
+                                    })
+                                })
+                                .collect();
+                            output::print("device list", serde_json::json!({"devices": devices}))?;
+                        } else {
+                            for device in &client.devices {
+                                let held = client.held_by(device.cert.data.device_id);
+                                let held = if held.is_empty() {
+                                    String::new()
                                 } else {
-                                    ""
-                                }
-                            );
+                                    format!(" · held by {}", held.join(", "))
+                                };
+                                println!(
+                                    "{} · @{} · last seen {}{}{}",
+                                    device.cert.data.device_id,
+                                    client.person_name(device.cert.data.person_id),
+                                    device
+                                        .last_seen_at
+                                        .map(format_last_seen)
+                                        .unwrap_or_else(|| "never".into()),
+                                    if device.revoked_at.is_some() {
+                                        " · revoked"
+                                    } else {
+                                        ""
+                                    },
+                                    held
+                                );
+                            }
                         }
                     }
                     DeviceCommand::Revoke { id } => {
