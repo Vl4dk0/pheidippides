@@ -46,8 +46,8 @@ ambiguity. Mention lists preserve order and encode each mention as
 
 | Domain | Ordered fields |
 |---|---|
-| `phi message v1` | id, summary_covers_seq, space_id, channel_id, thread_id, epoch, handle, mentions, nonce, ciphertext |
-| `phi device certificate v1` | space_id, person_id, device_id, kind, sign_pub, kex_pub, created_at, issuer |
+| `phi message v2` | id, summary_covers_seq, space_id, channel_id, thread_id, epoch, handle, from_gui, mentions, nonce, ciphertext |
+| `phi device certificate v2` | space_id, person_id, device_id, sign_pub, kex_pub, created_at, issuer |
 | `phi grant record v1` | space_id, grant_id, grant_pub, kind, person_id, created_at, expires_at, issuer_device |
 | `phi revocation v1` | space_id, target, issuer_device, created_at |
 | `phi reaction v1` | space_id, message_id, person_id, device_id, handle, kind, created_at, remove |

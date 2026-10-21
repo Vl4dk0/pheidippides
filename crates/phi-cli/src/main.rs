@@ -66,7 +66,7 @@ Admin
   space set       Change retention_days, summary_mode, or summary_every
   group           Create a group or add or remove a member
   remove          Remove a person, revoke their devices, and rotate channels
-  device list     List devices, kinds, last seen, and revocations
+  device list     List devices, last seen, and revocations
   device revoke   Revoke one device and rotate channels it could read
 
 phi help <command> prints the same help as phi <command> --help.",
@@ -195,7 +195,7 @@ EXAMPLES:
     #[command(
         about = "List people, devices, and recent handles",
         long_about = "\
-Use this to see what to pass to --as, @person, and device revoke. Shows each person's name and id, each device's kind, last-seen age, and revoked mark, plus handles seen in the last 7 days. Channel membership is phi channels, not here.",
+Use this to see what to pass to --as, @person, and device revoke. Shows each person's name and id, each device's last-seen age, and revoked mark, plus handles seen in the last 7 days. Channel membership is phi channels, not here.",
         after_long_help = "\
 EXAMPLES:
   phi who
@@ -635,7 +635,7 @@ EXAMPLES:
     )]
     Add,
     #[command(
-        about = "List devices, kinds, last seen, and revocations",
+        about = "List devices, last seen, and revocations",
         long_about = "\
 One line per device: id, owner, last-seen age or date, and revoked when it is revoked. Copy an id into phi device revoke.",
         after_long_help = "\

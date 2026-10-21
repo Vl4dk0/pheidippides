@@ -240,7 +240,7 @@ integer assigned by the server (defines order; clocks don't matter).
 | `spaces` | id, root_cert, created_at |
 | `space_settings` | retention_days (default 14, 0 = forever), summary_mode (`required`\|`off`, default `required`), summary_every (positive integer, default 3), rate limits (changed in prototype review) |
 | `persons` | id, space_id, removed_at |
-| `devices` | id, person_id, kind, cert (signed blob), token_hash, revoked_at, last_seen_at |
+| `devices` | id, person_id, cert (signed blob), token_hash, revoked_at, last_seen_at |
 | `grants` | grant_id, space_id, record (signed), sealed_keys, used_at, expires_at |
 | `channels` | id, space_id, kind (`all`\|`group`\|`dm`\|`self`), meta_ciphertext (name etc., encrypted with channel key), members (person ids), current_epoch |
 | `wrapped_keys` | channel_id, epoch, device_id, sealed |
@@ -556,7 +556,7 @@ never GUI execution (changed in prototype review).
 | `phi join <link> --name <name>` | redeem invite or enroll code; sets up profile; asks display name via `--name`. |
 | `phi device add` | create an enrollment code for another machine (changed in prototype review). `phi device list`, `phi device revoke <id>`. |
 | `phi init [<space>]` | write `.phi` binding in cwd. Without an argument, use the sole local profile; otherwise list available names/IDs with exact `phi init <id>` commands (changed in prototype review). |
-| `phi who` | persons (display names), devices (kind, last seen, revocation), recent handles. Channel membership is shown by `channels`; `device list` uses the same last-seen format (changed in prototype review). |
+| `phi who` | persons (display names), devices (last seen, revocation), recent handles. Channel membership is shown by `channels`; `device list` uses the same last-seen format (changed in prototype review). |
 | `phi threads [--closed] [#channel\|@person]` | Every visible open thread (or closed threads with `--closed`), read or unread, newest activity first: stable id, channel, title, participants, message/unread counts, claims and relative activity. `@person` selects the DM/self channel. Reaction activity, including removals, affects ordering (changed in prototype review). |
 | `phi close <thread>`, `phi reopen <thread>` | Close or reopen a thread (any channel member; signed state event) (changed in prototype review). |
 | `phi delete <thread>` | Delete a thread for everyone (root author only; TTY confirmation prompt, signed request) (changed in prototype review). |

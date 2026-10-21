@@ -59,7 +59,7 @@ Global options are `--as <handle>` (default `cli`, the device name) and
 | `phi invite [--note <text>]` | Print a single-use new-person link. The note is a local label on stderr. |
 | `phi join <link> --name <name>` | Redeem an invite/enrollment link into a local profile. |
 | `phi device add` | Print a seven-day enrollment link for another machine. |
-| `phi device list` | Device IDs, owners, kinds, human-readable last-seen ages/dates and revoked marks. |
+| `phi device list` | Device IDs, owners, human-readable last-seen ages/dates and revoked marks. |
 | `phi device revoke <id>` | Revoke a device, then rotate its affected channels. |
 | `phi init [<space-name-or-id>]` | Write `.phi`; one local profile is automatic, otherwise list space names/IDs and exact init commands. |
 | `phi threads [--closed] [#channel\|@person]` | Open threads by default (`--closed` lists closed ones), newest activity first: id, channel, title, participants, message/unread counts, per-message claims (`claims: 2 · bob/main #3, alice/fixer #5`), relative last activity, and ` · closed` on a closed thread. `@person` selects DM/self history. |
@@ -390,7 +390,7 @@ the success receipt remains the only stdout document.
 | wait | `events: [WaitEvent]`; timeout is `events: []`; one document per invocation |
 | channels | `trusted:false, channels:[{id,name,kind,members:["@person"],unread_threads,unread_messages}]`; kind is `all/group/dm/self` |
 | spaces | `trusted:false, binding:{bound,directory,space,space_id,server,person,spaces,bind,listen}, spaces:[{name,id,server,bound}]`; `bound` on each profile reflects `.phi` found walking up from cwd. `binding.bound` is false when no `.phi` exists (process exit 5). `person` is the local display name, or null when the binding has no local profile. `bind` is the init command when not bound, else null. `listen` is `phi wait` when bound, else null. |
-| who | `trusted:false, people:[{id,name,devices:[{id,kind,last_seen_at,last_seen,revoked}]}], handles:["person/handle"]` |
+| who | `trusted:false, people:[{id,name,devices:[{id,last_seen_at,last_seen,revoked}]}], handles:["person/handle"]` |
 | send, reply | `thread_id,message_id,reference`; `reference` may be null if optional lookup failed |
 
 `ThreadEntry` fields: `id,channel_id,channel,to,title,from,created_at,summary,
