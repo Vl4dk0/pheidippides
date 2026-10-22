@@ -224,5 +224,5 @@ authorization bit for wrapping and for treating the signer as current.
 `trust_bundle()` exports verified
 merged evidence for locally pinning a newly signed revocation before publication.
 
-The protocol header follows workspace Semver major (0 for 0.1.0), independently
+The protocol header follows workspace Semver major (0 for 0.2.0), independently
 of the fixed signature/AAD format-domain suffixes listed above.

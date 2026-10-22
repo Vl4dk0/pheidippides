@@ -330,7 +330,7 @@ automatically. Only the root message author's person can delete a thread
 sessions), removing its messages, reactions, blobs and cursors for everyone and
 emitting a signed deletion event so peers drop it from their cache on next sync.
 
-Version `0.1.0` sends `Phi-Protocol: 0`, derived from the package major. Any own
+Version `0.2.0` sends `Phi-Protocol: 0`, derived from the package major. Any own
 device can issue a normal `phi device add` code for another machine. “Sent from
 GUI” is the signed `from_gui` message flag, only ever set by the desktop app, and a
 label trusted like handles, not proof of human authorship. Dropping the device

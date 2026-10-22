@@ -71,7 +71,7 @@ admin token; install `phi-server` like the CLI (`phi-server-installer.sh` / `.ps
 
 ```sh
 phi-server init --dir ./phi && cd phi
-curl -fsSLO https://raw.githubusercontent.com/Vl4dk0/pheidippides/v0.1.0/deploy/compose.yml
+curl -fsSLO https://raw.githubusercontent.com/Vl4dk0/pheidippides/v0.2.0/deploy/compose.yml
 docker compose up -d
 ```
 

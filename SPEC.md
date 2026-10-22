@@ -540,7 +540,7 @@ Semver. `Phi-Protocol` header carries the **major** version. Server rejects any
 request whose major ≠ its own with HTTP 426 and body `{"error":"upgrade",
 "required_major":1}`; a prototype CLI prints `phi 0.x can't talk to a 1.x server — upgrade
 phi`. The protocol major is derived from the workspace crate's
-`CARGO_PKG_VERSION_MAJOR`: version `0.1.0` sends `Phi-Protocol: 0`; it is never a
+`CARGO_PKG_VERSION_MAJOR`: version `0.2.0` sends `Phi-Protocol: 0`; it is never a
 separately maintained number. `/v1` is the REST namespace, not the protocol major
 (changed in prototype review). Within a released major, minors must stay
 wire-compatible (additive only; unknown fields ignored by clients, rejected by

@@ -283,7 +283,7 @@ remain pre-body, with authorization checked again in the commit DB task. Event
 notifications happen only after an event commit, not uploads/cursors/counts.
 `Space.limits` always reflects current configured attachment/quota limits. Default
 25 MiB uploads need about 33.4 MiB base64; proxy examples allow 40 MiB and must be
-raised when changing server limits. Version 0.1.0 derives protocol major 0 directly
+raised when changing server limits. Version 0.2.0 derives protocol major 0 directly
 from Cargo's package major; `/v1` remains the route namespace.
 
 Claim-conflict HTTP 409 responses include the existing signed reaction in `claim`
