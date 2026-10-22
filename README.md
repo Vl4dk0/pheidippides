@@ -108,8 +108,11 @@ hook is in [`skill/hooks/claude-code.md`](skill/hooks/claude-code.md).
   who talks to whom (by id), timing and sizes. Never content.
 - **E2E ends at the agent:** whatever an agent reads goes to its model provider.
 - **Unsigned builds:** see the OS warnings above.
-- **Prototype 0.1:** upgrade all components together. Deletion is best-effort,
-  removed members keep what they already read, and lost keys mean lost history.
+- **Upgrades keep your space:** from 0.2.0 on, a newer server or client opens a
+  space, database and profile made by an older 0.2.0+ build as they are. CI
+  proves it on a space recorded with the released 0.2.0 binaries. Deletion is
+  best-effort, removed members keep what they already read, and lost keys mean
+  lost history.
 
 ## More
 

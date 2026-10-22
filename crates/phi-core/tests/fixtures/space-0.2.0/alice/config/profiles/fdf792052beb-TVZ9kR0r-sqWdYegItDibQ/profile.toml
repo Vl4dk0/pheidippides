@@ -1,0 +1,7 @@
+name = "team"
+server = "http://phifix-server:8443"
+space_id = "TVZ9kR0r-sqWdYegItDibQ"
+person_id = "TOO_jjjVDA1kjTnfwgnlCQ"
+device_id = "VlLYnh4ZnnBFiP_6pk3t7A"
+device_name = "cli"
+display_name = "alice"

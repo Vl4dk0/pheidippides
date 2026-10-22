@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+- **No more wire breaks after 0.2.0.** A space, server database and local
+  profile written by 0.2.0 keep working with every later build: no "recreate
+  the space", no re-invite. `crates/phi-core/tests/compat.rs` opens a space
+  recorded with the released 0.2.0 server image and CLI
+  (`tests/fixtures/space-0.2.0`: two people, a group, a DM, a signed settings
+  change, a second device and its revocation) with the current code, reads all
+  of it verified, sends new messages, enrolls a device and invites a person. A
+  change that breaks it needs a versioned reader (new signing domain beside the
+  old one, optional field, schema migration), not a new space. If a break is
+  ever unavoidable it is a major bump announced one release ahead, with a
+  `phi-server backup` in the upgrade steps and written migration notes, never a
+  silent loss. SPEC 6.10 and the README say so; `tests/fixtures/README.md` says
+  how to record the next fixture.
+
 ## 0.2.0 - 2026-10-22
 
 **Wire break.** Message, certificate and revocation signing bytes changed. Every

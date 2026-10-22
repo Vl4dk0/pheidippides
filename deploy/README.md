@@ -175,6 +175,10 @@ Back up `.env` separately and privately if preserving the admin token is desired
 
 Take a backup before upgrading, then run
 `PHI_TAG=<new-version> docker compose pull` and
-`PHI_TAG=<new-version> docker compose up -d` (or set `PHI_TAG` in `.env`). Client/server **major**
-versions must match or API requests get HTTP 426; minor/patch releases are
-wire-compatible. Upgrade all clients with a major bump.
+`PHI_TAG=<new-version> docker compose up -d` (or set `PHI_TAG` in `.env`). From
+0.2.0 on, a newer server opens the existing database and members keep their
+profiles; CI checks this against a space recorded with the 0.2.0 binaries
+(SPEC 6.10). Client/server **major** versions must match or API requests get
+HTTP 426. A major bump is announced one release ahead in the changelog and
+comes with migration notes; the backup above is what you restore if the
+upgrade goes wrong.
