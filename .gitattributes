@@ -1,0 +1,2 @@
+# Frozen test fixtures are binary SQLite files; never convert line endings.
+crates/phi-core/tests/fixtures/** -text

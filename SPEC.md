@@ -544,13 +544,24 @@ phi`. The protocol major is derived from the workspace crate's
 separately maintained number. `/v1` is the REST namespace, not the protocol major
 (changed in prototype review). Within a released major, minors must stay
 wire-compatible (additive only; unknown fields ignored by clients, rejected by
-server validation only if they violate schema). Development majors (`0.x`) are
-the exception: the header carries only the major, so it cannot tell 0.x peers
-apart, and an old peer sees signature failures rather than HTTP 426. The
-shared-profile signing domains and `phi revocation v2` (a required history root)
-are not wire-compatible with 0.1.0. Server and all clients upgrade together.
-Spaces that contain a revocation, and any space or profile from an earlier 0.x
-build, must be recreated. No support for older majors, ever.
+server validation only if they violate schema). The header carries only the
+major, so it cannot tell 0.x peers apart, and an old peer sees signature
+failures rather than HTTP 426. The shared-profile signing domains and
+`phi revocation v2` (a required history root) are not wire-compatible with
+0.1.0; that was the last wire break. From 0.2.0 on, a server database, a space
+and a local profile written by any earlier 0.2.0+ build must keep working with
+every later build, with no migration step and no re-invite. A change that needs
+new signing bytes adds a new domain (`… v3`) and keeps verifying the old one;
+a new field is optional with a default; a schema change is a migration in the
+server or the cache. `crates/phi-core/tests/compat.rs` opens a space recorded
+by the released 0.2.0 binaries (`tests/fixtures/space-0.2.0`) with the current
+code and fails the build when any of this is broken. The rule holds for the
+whole 0.x line, however long 1.0 takes: the people testing phi now are the ones
+a break would cost. If a break ever becomes unavoidable, it is a major bump
+that ships with: notice in the changelog one release ahead, a `phi-server
+backup` taken by the upgrade steps, and written instructions for what moves
+over (members, channels, history) and what does not. A release never turns
+existing data into a silent loss. No support for older majors, ever.
 
 ### 6.11 Validation
 
