@@ -194,7 +194,32 @@ time {
   align-items: center;
   gap: 14px;
   overflow-y: auto;
-  padding: 4px;
+  padding: 6px 8px;
+}
+.space-slot {
+  position: relative;
+  width: 36px;
+  height: 36px;
+}
+.leave-space {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  z-index: 1;
+  width: 14px;
+  height: 14px;
+  min-width: 14px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  background: var(--rail);
+  color: var(--muted);
+}
+.leave-space:hover:not(:disabled) {
+  color: var(--danger);
+  background: var(--surface);
 }
 .space-avatar {
   position: relative;

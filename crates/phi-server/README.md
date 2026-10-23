@@ -147,7 +147,9 @@ rejected until every hold row is gone. Commit marks the target revoked, clears
 holds whose device or holder is in the target, stores the prepared list in
 `histories`, and inserts the revocation. Prepared rows of a holder outside the
 target stay, including the caller's, so a second signature of the same target
-still commits. A root the caller never prepared is 409
+still commits. A device may prepare its own revocation (leaving a space): no
+hold is placed, and an unlisted write made afterwards fails the commit as below.
+A person may not prepare its own revocation (400). A root the caller never prepared is 409
 `revocation was not prepared`. If the target has signed something the stored
 list does not cover, the commit is 409 `history changed` and the holds stay.
 Members fetch each list once. Revocation of the target invalidates its tokens.

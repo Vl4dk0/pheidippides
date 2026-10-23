@@ -123,6 +123,13 @@ closed, and should be shared only with intended recipients. Device/person revoca
 messages only; previously read content stays compromised. Retention deletion
 beyond the server and local cache is best-effort.
 
+Each space in the rail has an X. After a confirm dialog, **Yes** revokes this
+computer in that space (signed by this computer, while still active) and deletes
+its profile, cache and keys from the shared CLI/GUI profile directory. Your other
+computers and the other members keep the space; remaining members rekey on their
+next open or send, so this computer can read nothing new. If the server cannot be
+reached or refuses, nothing is deleted and the dialog shows the error.
+
 The **View** menu hides each panel and the summary, reactions, attachments and
 metadata; it also controls desktop notifications. Theme follows the OS only.
 These preferences alone are persisted in localStorage. All message text is

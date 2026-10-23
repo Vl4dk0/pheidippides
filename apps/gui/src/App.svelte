@@ -64,6 +64,7 @@
   let connecting = $state(false);
   let settings = $state(false);
   let deleting = $state(false);
+  let leaving = $state<api.Profile | null>(null);
   let composing = $state(false);
   let body = $state('');
   let composerInput = $state<HTMLTextAreaElement>();
@@ -79,6 +80,8 @@
   let threadRevision = 0;
   let stopped = false;
   const watching = new Set<string>();
+  // Spaces left on this machine: their pollers must stop instead of retrying a deleted profile.
+  const departed = new Set<string>();
   const timers = new Set<ReturnType<typeof setTimeout>>();
   const visibleThreads = $derived(
     filterThreads(snapshot?.threads ?? [], filter, channel),
@@ -258,6 +261,37 @@
       threadSelection.change();
     }
   }
+  async function confirmLeave() {
+    const profile = leaving;
+    if (busy || !profile) return;
+    busy = true;
+    error = '';
+    try {
+      await api.leave(profile.id);
+      departed.add(profile.id);
+      leaving = null;
+      profiles = profiles.filter((p) => p.id !== profile.id);
+      const next = { ...syncErrors };
+      delete next[profile.id];
+      syncErrors = next;
+      if (selected === profile.id) {
+        revision = selection.change();
+        threadRevision = threadSelection.change();
+        selected = '';
+        snapshot = null;
+        thread = null;
+        selectedThread = '';
+        channel = '';
+        busy = false;
+        if (profiles[0]) await selectProfile(profiles[0].id);
+        else connecting = true;
+      }
+    } catch (reason) {
+      report(reason);
+    } finally {
+      busy = false;
+    }
+  }
   async function send() {
     const result = await request(
       {
@@ -307,7 +341,7 @@
     watching.add(profile.id);
     let initial = true,
       retry = 3000;
-    while (!stopped) {
+    while (!stopped && !departed.has(profile.id)) {
       try {
         const wasInitial = initial;
         const events = await api.poll(profile.id, wasInitial);
@@ -351,7 +385,7 @@
           }
         }
       } catch (reason) {
-        if (stopped) break;
+        if (stopped || departed.has(profile.id)) break;
         syncErrors = {
           ...syncErrors,
           [profile.id]: `${profile.name}: ${reason instanceof Error ? reason.message : String(reason)}`,
@@ -488,7 +522,7 @@
         />
       </div>{/if}
   {/snippet}
-  {#if !connecting && !settings && !deleting}{@render errorNotice()}{/if}
+  {#if !connecting && !settings && !deleting && !leaving}{@render errorNotice()}{/if}
   {#each Object.entries(syncErrors) as [profileId, syncError]}<div
       class="error banner"
       role="status"
@@ -568,25 +602,64 @@
         </div>
       </section></Modal
     >{/if}
+  {#if leaving}<Modal
+      label="Leave {leaving.name}"
+      onclose={() => (leaving = null)}
+      >{@render errorNotice()}
+      <section class="settings" aria-label="Leave {leaving.name}">
+        <div class="row modal-heading">
+          <div>
+            <small class="eyebrow">LEAVE SPACE</small>
+            <h2 tabindex="-1" data-modal-focus>
+              Leave {leaving.name} on this computer?
+            </h2>
+          </div>
+          <IconButton icon={X} label="Close" onclick={() => (leaving = null)} />
+        </div>
+        <p class="muted" style="line-height: 1.7; font-size: 12px;">
+          This computer is removed from the space and deletes its local copy and
+          keys. Channels are rotated, so it cannot read anything new. Your other
+          computers and the other members keep the space.
+        </p>
+        <div class="form-footer" style="margin-top: 20px;">
+          <button type="button" onclick={() => (leaving = null)}>Cancel</button>
+          <button
+            type="button"
+            class="danger-action"
+            disabled={busy}
+            onclick={confirmLeave}><span>Yes</span></button
+          >
+        </div>
+      </section></Modal
+    >{/if}
   <main class="workspace">
     <aside class="space-rail" aria-label="Spaces">
       <div class="brand" title="Pheidippides · encrypted agent messaging">
         <img src={appIcon} alt="Pheidippides" width="36" height="36" />
       </div>
       {#if prefs.spaces}<div class="space-list">
-          {#each profiles as profile (profile.id)}<button
-              class="space-avatar"
-              class:active={selected === profile.id}
-              title={`${profile.name} · ${profile.server}`}
-              aria-label={`Open ${profile.name}`}
-              aria-pressed={selected === profile.id}
-              disabled={busy}
-              onclick={() => selectProfile(profile.id)}
-              >{monogram(profile.name)}<span
-                class="status-dot"
-                class:offline={!!syncErrors[profile.id]}
-              ></span></button
-            >{/each}
+          {#each profiles as profile (profile.id)}<div class="space-slot">
+              <button
+                class="space-avatar"
+                class:active={selected === profile.id}
+                title={`${profile.name} · ${profile.server}`}
+                aria-label={`Open ${profile.name}`}
+                aria-pressed={selected === profile.id}
+                disabled={busy}
+                onclick={() => selectProfile(profile.id)}
+                >{monogram(profile.name)}<span
+                  class="status-dot"
+                  class:offline={!!syncErrors[profile.id]}
+                ></span></button
+              ><button
+                class="leave-space"
+                title={`Leave ${profile.name}`}
+                aria-label={`Leave ${profile.name}`}
+                disabled={busy}
+                onclick={() => (leaving = profile)}
+                ><X size={10} strokeWidth={2.5} /></button
+              >
+            </div>{/each}
         </div>{/if}
       <div class="rail-actions">
         {#if !prefs.threads}<IconButton

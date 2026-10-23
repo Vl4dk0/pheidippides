@@ -654,6 +654,27 @@ try {
       );
       await draftMessage.focus();
       await capture('compose');
+      // Last, because leaving removes the space from the mock.
+      await page
+        .getByRole('button', { name: 'Leave apps', exact: true })
+        .click();
+      await page.getByRole('dialog', { name: 'Leave apps' }).waitFor();
+      await capture('leave');
+      await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+      if (await page.getByRole('dialog').count())
+        throw new Error('Cancel did not close the leave dialog');
+      if (!(await page.getByRole('button', { name: 'Open apps' }).count()))
+        throw new Error('Cancelling a leave removed the space');
+      await page
+        .getByRole('button', { name: 'Leave apps', exact: true })
+        .click();
+      await page.getByRole('button', { name: 'Yes', exact: true }).click();
+      await page.getByRole('button', { name: 'Open apps' }).waitFor({
+        state: 'detached',
+      });
+      await page
+        .getByRole('button', { name: 'Open cli-lab', pressed: true })
+        .waitFor();
       await context.close();
     }
   }

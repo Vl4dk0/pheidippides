@@ -2661,6 +2661,32 @@ impl Client {
         self.resume_rotations().await?;
         self.refresh().await
     }
+    /// Removes this device from the space, signed while it is still active, so it needs no one
+    /// else's consent. Other devices of the person are untouched; the remaining members rekey
+    /// the channels on their next open or send. Consumes the client so the caller can delete
+    /// the profile's files afterwards.
+    pub async fn leave(mut self) -> Result<()> {
+        self.begin_operation().await?;
+        let revocation = self
+            .prepared_revocation(&RevocationTarget::Device {
+                device_id: self.profile.device_id,
+            })
+            .await?;
+        let response: CreateRevocationResponse = self
+            .http
+            .send(
+                Method::POST,
+                &format!("/spaces/{}/revocations", self.profile.space_id),
+                &CreateRevocationRequest {
+                    revocation: revocation.clone(),
+                },
+            )
+            .await?;
+        if response != revocation {
+            return Err(user("server changed signed revocation"));
+        }
+        Ok(())
+    }
     pub async fn set_settings(&mut self, key: &str, value: &str) -> Result<SettingsChange> {
         self.begin_operation().await?;
         let mut settings = self.settings.clone();

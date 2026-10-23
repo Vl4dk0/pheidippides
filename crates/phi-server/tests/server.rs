@@ -2209,6 +2209,87 @@ async fn upload_admission_precedes_body_reads_and_rechecks_revocation() -> TestR
 }
 
 #[tokio::test]
+async fn a_device_can_revoke_itself_and_its_last_write_is_caught() -> TestResult {
+    // Leaving one machine: no hold, siblings keep working, and a write made after listing
+    // fails the commit until the device lists again.
+    let f = Fixture::new().await?;
+    let bob = f.join(&f.root, GrantKind::Invite).await?;
+    let (grant, keys) = f
+        .grant(&bob, GrantKind::Enroll, Some(timestamp() + 10_000))
+        .await?;
+    let (sibling_key, redeem) = f.redeem_request(&grant, &keys)?;
+    let sibling_cert = redeem.certificate.clone();
+    let redeemed: RedeemGrantResponse = ok(
+        &f.app,
+        "POST",
+        &format!("/v1/grants/{}/redeem", keys.id()),
+        None,
+        redeem,
+    )
+    .await?;
+    let sibling = Actor {
+        key: sibling_key,
+        cert: sibling_cert,
+        token: token(&redeemed.device_token)?,
+    };
+    let target = RevocationTarget::Device {
+        device_id: bob.cert.data.device_id,
+    };
+    let prepare = async || -> TestResult<HistoryResponse> {
+        ok(
+            &f.app,
+            "POST",
+            &f.space("/revocations/prepare"),
+            Some(&bob.token),
+            PrepareRevocationRequest {
+                target: target.clone(),
+            },
+        )
+        .await
+    };
+    let commit = async |list: &HistoryResponse| -> TestResult<(StatusCode, Value)> {
+        let revocation = sign_revocation(
+            RevocationData {
+                space_id: f.sid,
+                target: target.clone(),
+                issuer_device: bob.cert.data.device_id,
+                created_at: timestamp(),
+                history: history_root(&list.signatures)?,
+            },
+            &bob.key,
+        )?;
+        let (status, body, _) = request(
+            &f.app,
+            "POST",
+            &f.space("/revocations"),
+            Some(&bob.token),
+            CreateRevocationRequest { revocation },
+        )
+        .await?;
+        Ok((status, body))
+    };
+    let status = async |actor: &Actor| -> TestResult<StatusCode> {
+        Ok(
+            request(&f.app, "GET", &f.space(""), Some(&actor.token), json!(null))
+                .await?
+                .0,
+        )
+    };
+    let first = prepare().await?;
+    let late = f.send(&bob, f.all, None).await?;
+    let (rejected, body) = commit(&first).await?;
+    assert_eq!(rejected, StatusCode::CONFLICT);
+    assert_eq!(body["message"], "history changed");
+    let second = prepare().await?;
+    assert!(second.signatures.contains(&late.signature));
+    assert_eq!(commit(&second).await?.0, StatusCode::OK);
+    assert_eq!(status(&bob).await?, StatusCode::UNAUTHORIZED);
+    assert_eq!(status(&sibling).await?, StatusCode::OK);
+    assert_eq!(status(&f.root).await?, StatusCode::OK);
+    Ok(())
+}
+
+#[tokio::test]
 async fn revocation_freezes_the_target_and_commits_its_stored_history() -> TestResult {
     // Device freeze: the stored list is what the commit checks, not a fresh equality.
     let f = Fixture::new().await?;
@@ -2317,17 +2398,14 @@ async fn revocation_freezes_the_target_and_commits_its_stored_history() -> TestR
         &f.space("/revocations/prepare"),
         Some(&f.root.token),
         PrepareRevocationRequest {
-            target: RevocationTarget::Device {
-                device_id: f.root.cert.data.device_id,
+            target: RevocationTarget::Person {
+                person_id: f.root.cert.data.person_id,
             },
         },
     )
     .await?;
     assert_eq!(self_status, StatusCode::BAD_REQUEST);
-    assert_eq!(
-        self_body["message"],
-        "a device cannot revoke itself or its own person"
-    );
+    assert_eq!(self_body["message"], "a person cannot revoke itself");
     let (_, enroll_redeem) = f.redeem_request(&enroll, &enroll_keys)?;
     let (_, invite_redeem) = f.redeem_request(&invite, &invite_keys)?;
     for (keys, body) in [(enroll_keys, enroll_redeem), (invite_keys, invite_redeem)] {

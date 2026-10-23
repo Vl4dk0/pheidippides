@@ -355,6 +355,18 @@ window.addEventListener('screenshot:incoming', () => {
 mockWindows('main');
 mockIPC((command, payload) => {
   if (command === 'profiles') return profiles;
+  if (command === 'leave') {
+    const { profile } = z.object({ profile: z.string() }).parse(payload);
+    for (const list of [profiles, snapshots]) {
+      const index = list.findIndex((entry) =>
+        'profile' in entry
+          ? entry.profile.id === profile
+          : entry.id === profile,
+      );
+      if (index >= 0) list.splice(index, 1);
+    }
+    return null;
+  }
   // Polls stay quiet until the screenshot runner explicitly injects a message.
   if (command === 'poll') {
     const { profile } = z.object({ profile: z.string() }).parse(payload);

@@ -2204,6 +2204,32 @@ async fn revoking_the_root_keeps_history_invites_and_devices_working() -> Result
 }
 
 #[tokio::test]
+async fn leaving_removes_only_this_device_and_the_others_rekey() -> Result<()> {
+    let f = Fixture::new().await?;
+    let (mut alice, mut bob) = f.pair().await?;
+    let enroll = bob.invite(true, true).await?;
+    let mut laptop = Client::join(f.store("laptop"), &enroll, "bob").await?;
+    let old = bob.send("#all", "Before", options("old")).await?;
+    let profile = bob.profile.clone();
+    bob.leave().await?;
+    f.store("bob").remove_profile(&profile)?;
+    ensure!(f.store("bob").profiles()?.is_empty());
+    ensure!(!f.store("bob").cache_dir(&profile).exists());
+    let new = alice.send("#all", "After", options("new")).await?;
+    ensure!(new.envelope.epoch == 1);
+    ensure!(
+        alice
+            .read(old.id, ReadOptions::default())
+            .await?
+            .text()
+            .contains("old")
+    );
+    let seen = laptop.read(new.id, ReadOptions::default()).await?.text();
+    ensure!(seen.contains("new") && !seen.contains("VERIFICATION FAILED"));
+    Ok(())
+}
+
+#[tokio::test]
 async fn revoked_device_and_colluding_host_cannot_extend_history() -> Result<()> {
     let f = Fixture::new().await?;
     let mut alice = f.alice().await?;

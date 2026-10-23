@@ -231,14 +231,32 @@ pub async fn provision(
     .map_err(err)?;
     Ok(ProfileView::from(&client.profile))
 }
-async fn open(store: &Store, id: &str) -> Result<Client, String> {
-    let profile = store
+fn find_profile(store: &Store, id: &str) -> Result<Profile, String> {
+    store
         .profiles()
         .map_err(err)?
         .into_iter()
         .find(|p| profile_id(p) == id)
-        .ok_or("unknown profile")?;
+        .ok_or_else(|| "unknown profile".to_string())
+}
+async fn open(store: &Store, id: &str) -> Result<Client, String> {
+    let profile = find_profile(store, id)?;
     Client::open_gui(store.clone(), profile).await.map_err(err)
+}
+/// Leaves the space on this machine only: the device is revoked on the server, then the local
+/// profile is deleted. Not a `Request`, because those open the client first and a device that
+/// was already revoked can no longer open.
+#[tauri::command]
+pub async fn leave(state: State<'_, AppState>, profile: String) -> Result<(), String> {
+    let profile = find_profile(&state.0, &profile)?;
+    match Client::open_gui(state.0.clone(), profile.clone()).await {
+        Ok(client) => client.leave().await.map_err(err)?,
+        // Already revoked (or the response of an earlier leave was lost): nothing is left to
+        // leave on the server, only the local copy.
+        Err(phi_core::Error::Auth) => {}
+        Err(error) => return Err(err(error)),
+    }
+    state.0.remove_profile(&profile).map_err(err)
 }
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]

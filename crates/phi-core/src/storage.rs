@@ -82,6 +82,19 @@ impl Store {
             toml::to_string_pretty(profile)?.as_bytes(),
         )
     }
+    /// Forgets a profile on this machine. The profile directory (`profile.toml` and the keys)
+    /// goes last, so a crash leaves it listed for a retry and no decrypted cache outlives it.
+    pub fn remove_profile(&self, profile: &Profile) -> Result<()> {
+        for dir in [self.cache_dir(profile), self.profile_dir(profile)] {
+            match fs::remove_dir_all(dir) {
+                Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                    return Err(error.into());
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
     pub fn binding(cwd: &Path) -> Result<Option<Binding>> {
         for ancestor in cwd.ancestors() {
             let file = ancestor.join(".phi");

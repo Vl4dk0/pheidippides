@@ -207,6 +207,9 @@ export async function provision(request: Provision): Promise<Profile> {
 export async function poll(profile: string, initial: boolean): Promise<Poll> {
   return pollSchema.parse(await invoke<unknown>('poll', { profile, initial }));
 }
+export async function leave(profile: string): Promise<void> {
+  await invoke('leave', { profile });
+}
 export const nothing = z.null();
 export const grantLink = z
   .string()

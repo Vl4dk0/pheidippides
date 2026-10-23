@@ -13,7 +13,8 @@ fn main() -> Result<(), String> {
             bridge::profiles,
             bridge::provision,
             bridge::execute,
-            bridge::poll
+            bridge::poll,
+            bridge::leave
         ])
         .run(tauri::generate_context!())
         .map_err(|e| e.to_string())

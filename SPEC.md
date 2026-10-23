@@ -203,6 +203,21 @@ token; the token is only access control + rate limiting.
   (retention or a deleted thread) still commits. A root the caller never
   prepared for that target is rejected and the holds stay. Members fetch the
   stored list once by root and cache it. A missing list is an empty set.
+- **Leaving.** The desktop app lets a device leave a space (§7.2). That is a
+  device revocation signed by the leaving device itself while it is still
+  active. Prepare may target the requester's own device and then places no hold,
+  because a hold only stops a hostile target from outrunning someone else's
+  revocation. A person revocation of the requester's own person is still
+  rejected. The server builds the list; the commit's "nothing new since" check
+  catches whatever the device wrote after prepare (409 `history changed`, then
+  prepare again). Nothing else changes: the device's token dies at commit, its
+  siblings and person stay, and remaining members rotate lazily on their next
+  open or send. Afterwards the app deletes this machine's profile. If it was the
+  person's last device, the person stays on the roster with no active device.
+  The last member may leave; the orphaned space stays on the server. Other
+  machines' profiles of the same person are untouched. There is no CLI command:
+  `phi device revoke` still refuses the caller's own device so the CLI keeps its
+  key rotation.
 - Revocation is monotone. Every revocation with a valid signature takes effect.
   After it is known, an object signed by a covered key verifies only if that
   exact signature is in every covering history. The one exception is a roster
@@ -662,6 +677,9 @@ served by the host (a host-served UI could be swapped to steal keys).
   (changed in prototype review).
 - Composer: write as human (no summary required; runs local summarizer if
   configured).
+- Each space in the rail has an X. It opens a confirm dialog ("Leave <space> on
+  this computer?"); only Yes leaves (§4.4), anything else cancels, and a failure
+  is shown in the dialog.
 - Settings per space: display name, retention, summary mode and interval
   (`summary_every`, changed in prototype review), members (invite,
   remove), devices (list, revoke, add-device code), recovery code export.

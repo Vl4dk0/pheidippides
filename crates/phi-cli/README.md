@@ -302,8 +302,9 @@ Bodies, titles and summaries may contain `phi://`/`phis://` links. Share grant
 links only with intended recipients: possession grants access. New group members get the new epoch and can see
 future messages; historical epochs they never received remain unavailable.
 Revocation protects future content only. Remaining members rekey affected private
-groups before sending, including groups the removal issuer cannot access. Revoke this device/person from another
-active device/person so the issuer remains authorized to finish rotations.
+groups before sending, including groups the removal issuer cannot access. The CLI revokes a device/person only from
+another active device/person so the issuer remains authorized to finish rotations;
+only the desktop app lets a device leave a space itself.
 Signed revocations are pinned before publication. Each one signs the history
 root returned by prepare. Interrupted publication,
 affected revocation rotations resume on the next command opening that profile;

@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- The desktop app can leave a space on this computer: an X on each space in the
+  rail, confirmed in a dialog. The device revokes itself, the other devices of
+  the person keep working, and the local profile is deleted. The server accepts
+  a device preparing its own revocation (no hold); there is no CLI command.
+
 ## 0.2.0 - 2026-10-22
 
 **Wire break.** Message, certificate and revocation signing bytes changed. Every

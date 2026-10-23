@@ -353,22 +353,29 @@ impl Db {
         req.validate()?;
         self.transaction(|db| {
             let devices = db.target_devices(a.sid(), &req.target)?;
-            if devices
-                .iter()
-                .any(|device| device.cert.data.device_id == a.device())
+            // Only a device may remove itself (leaving a space on one machine). Its own person
+            // would also freeze the sibling devices, which nothing needs.
+            let own_device = matches!(req.target, RevocationTarget::Device { device_id } if device_id == a.device());
+            if !own_device
+                && devices
+                    .iter()
+                    .any(|device| device.cert.data.device_id == a.device())
             {
-                return Err(ApiError::invalid(
-                    "a device cannot revoke itself or its own person",
-                ));
+                return Err(ApiError::invalid("a person cannot revoke itself"));
             }
-            for device in &devices {
-                db.conn.execute(
-                    "INSERT OR IGNORE INTO revocation_holds(device_id, holder_device) VALUES(?,?)",
-                    params![
-                        device.cert.data.device_id.to_string(),
-                        a.device().to_string()
-                    ],
-                )?;
+            // The hold stops a hostile target from outrunning someone else's revocation. A
+            // device revoking itself can only delay itself, and the commit rejects anything it
+            // wrote after listing.
+            if !own_device {
+                for device in &devices {
+                    db.conn.execute(
+                        "INSERT OR IGNORE INTO revocation_holds(device_id, holder_device) VALUES(?,?)",
+                        params![
+                            device.cert.data.device_id.to_string(),
+                            a.device().to_string()
+                        ],
+                    )?;
+                }
             }
             let signatures = db.target_history(a.sid(), &devices)?;
             let root = phi_crypto::history_root(&signatures)?;

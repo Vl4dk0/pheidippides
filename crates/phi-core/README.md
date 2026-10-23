@@ -62,6 +62,11 @@ See [`phi-cli/README.md`](../phi-cli/README.md) for commands, output and honest
 limits. `tests/e2e.rs` starts in-process Axum servers bound to ephemeral loopback
 ports only for test lifetimes; no production server or GUI is launched.
 
+`Client::leave` revokes the caller's own device (prepare, sign, commit, no local
+rotation: the remaining members rekey on their next open or send) and consumes the
+client; `Store::remove_profile` then deletes the profile and its cache, cache first.
+`Client::revoke` still refuses the caller's own device or person.
+
 A revocation signs the history root from prepare. The client stores that list,
 fetches any other root it does not have, checks the bytes against the root, and
 caches the list in the profile cache, beside the trust pins. After revocation, the issuing client rotates every affected channel it can access.
