@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.2.1 - 2026-10-23
+
+Wire-compatible with 0.2.0; no data reset. Upgrading does not require recreating
+spaces or profiles.
 
 - The desktop app can leave a space on this computer: an X on each space in the
   rail, confirmed in a dialog. The device revokes itself, the other devices of

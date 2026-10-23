@@ -153,7 +153,7 @@ without putting channel secrets in the plaintext trust-state journal.
 Earlier prototype peers/stores are incompatible; recreate development spaces with all
 components upgraded. There is no legacy unsigned acceptance path.
 
-The workspace is `0.2.0`; `PROTOCOL_MAJOR` is derived from its crate major,
+The workspace is `0.2.1`; `PROTOCOL_MAJOR` is derived from its crate major,
 so this prototype sends 0. Cryptographic preimage domain suffixes (`v1`/`v2`) and
 the `/v1` HTTP namespace are fixed format labels, independent of package version.
 Server-advertised attachment/quota limits replace client hard-coded policy;

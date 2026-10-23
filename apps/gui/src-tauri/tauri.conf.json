@@ -2,7 +2,7 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Pheidippides",
   "mainBinaryName": "pheidippides",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "identifier": "sk.pheidippides.desktop",
   "build": {
     "frontendDist": "../dist",

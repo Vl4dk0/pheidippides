@@ -129,7 +129,7 @@ never advance to unreturned high-water marks, and allow private-channel seq gaps
 The HTTP route namespace remains `/v1`; the protocol header negotiates compatibility.
 
 `PROTOCOL_MAJOR` is parsed at compile time from `CARGO_PKG_VERSION_MAJOR` (0 for
-workspace 0.2.0); header and REST-prefix constants have shared production callers.
+workspace 0.2.1); header and REST-prefix constants have shared production callers.
 `Space.limits` advertises per-file plaintext bytes and space quota. Upload shape
 validation does not freeze the deployment default; policy uses that advertised
 limit and the server's configured limit. Proxies must fit base64 plus AEAD/JSON.

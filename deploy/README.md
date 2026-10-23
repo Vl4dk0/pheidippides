@@ -73,18 +73,18 @@ Keep TLS off in phi-server. Run natively on localhost, or use Compose:
 
 ```sh
 cd phi   # the directory created by init
-curl -fsSLO https://raw.githubusercontent.com/Vl4dk0/pheidippides/v0.2.0/deploy/compose.yml
+curl -fsSLO https://raw.githubusercontent.com/Vl4dk0/pheidippides/v0.2.1/deploy/compose.yml
 docker compose pull
 docker compose up -d
 ```
 
 Compose runs the published multi-arch (amd64/arm64) image
-`ghcr.io/vl4dk0/phi-server:0.2.0` by default; the tag is explicit so upgrades
+`ghcr.io/vl4dk0/phi-server:0.2.1` by default; the tag is explicit so upgrades
 are deliberate. Select another tag or your own build with
 `PHI_TAG=0.1.1 docker compose pull` /
 `PHI_IMAGE=registry.example.org/team/phi-server` (or put these variables in
 `.env`). To build locally instead, run
-`docker build -f deploy/Dockerfile -t phi-server:0.2.0 .` from the source
+`docker build -f deploy/Dockerfile -t phi-server:0.2.1 .` from the source
 checkout and set `PHI_IMAGE=phi-server`.
 The `PHI_SERVER_` prefix is reserved for server config overrides; image variables
 use `PHI_IMAGE`/`PHI_TAG` so they can safely share the Compose env file.
