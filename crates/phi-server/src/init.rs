@@ -81,7 +81,7 @@ fn next_steps() -> &'static str {
          3. Create a space (in another shell with the token loaded):\n\
             $env:PHI_ADMIN_TOKEN = $env:PHI_SERVER_ADMIN_TOKEN; phi space create game --server http://127.0.0.1:8443\n\
          Use your public HTTPS URL when behind a reverse proxy.\n\
-         For Docker Compose and TLS setup, see deploy/README.md."
+         For Docker Compose and TLS setup, see https://github.com/Vl4dk0/pheidippides#host-a-server"
     }
     #[cfg(not(windows))]
     {
@@ -92,7 +92,7 @@ fn next_steps() -> &'static str {
          3. Create a space (in another shell with .env loaded):\n\
             PHI_ADMIN_TOKEN=\"$PHI_SERVER_ADMIN_TOKEN\" phi space create game --server http://127.0.0.1:8443\n\
          Use your public HTTPS URL when behind a reverse proxy.\n\
-         For Docker Compose and TLS setup, see deploy/README.md."
+         For Docker Compose and TLS setup, see https://github.com/Vl4dk0/pheidippides#host-a-server"
     }
 }
 
