@@ -1345,7 +1345,7 @@ async fn summary_bytes_migration_keeps_history_and_refuses_signed_settings() -> 
         .err()
         .ok_or_else(|| anyhow::anyhow!("signed settings should refuse startup"))?;
     assert!(
-        error.to_string().contains("signed settings record"),
+        error.to_string().contains("signed space settings"),
         "{error}"
     );
     assert_eq!(db_snapshot(f.dir.path())?, signed);
@@ -1362,7 +1362,7 @@ async fn summary_bytes_migration_keeps_history_and_refuses_signed_settings() -> 
         .err()
         .ok_or_else(|| anyhow::anyhow!("a Settings event should refuse startup"))?;
     assert!(
-        error.to_string().contains("signed settings record"),
+        error.to_string().contains("signed space settings"),
         "{error}"
     );
     assert_eq!(db_snapshot(f.dir.path())?, event_signed);

@@ -86,7 +86,7 @@ impl Store {
             )?;
             if signed {
                 return Err(ApiError(ErrorBody::Internal {
-                    message: "refusing to start: a signed settings record is present (space settings_change or a Settings event). summary_every cannot be replaced under the current signing key; the issuing device must re-issue settings before this server can open the database. The database was not modified.".into(),
+                    message: "refusing to start: this database holds signed space settings from before 0.3. Only their issuer could re-sign them, so migrating would drop them. The database was not modified; keep running phi-server 0.2.".into(),
                 }));
             }
         }
