@@ -291,6 +291,6 @@ pub struct ThreadActivity {
 /// An additive error detail lets clients recover drafts without parsing human prose.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SummaryRequirement {
-    pub messages_since_summary: u64,
+    pub bytes_since_summary: u64,
     pub threshold: u32,
 }

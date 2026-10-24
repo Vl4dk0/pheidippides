@@ -11,6 +11,10 @@ pub const MAX_MENTIONS: usize = 128;
 pub const MAX_ATTACHMENTS: usize = 32;
 pub const MAX_PAGE_SIZE: u32 = 1000;
 pub const MAX_WAIT_SECONDS: u16 = 900;
+/// Summaries are sized in bytes because the server only sees ciphertext lengths, never text.
+pub const DEFAULT_SUMMARY_BYTES: u32 = 8192;
+pub const MIN_SUMMARY_BYTES: u32 = 1024;
+pub const MAX_SUMMARY_BYTES: u32 = 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("{field}: {message}")]
@@ -233,9 +237,9 @@ impl Validate for MessageContent {
 impl Validate for SpaceSettings {
     fn validate(&self) -> Result<(), ValidationError> {
         check(
-            self.summary_every > 0,
-            "summary_every",
-            "must be a positive integer",
+            (MIN_SUMMARY_BYTES..=MAX_SUMMARY_BYTES).contains(&self.summary_bytes),
+            "summary_bytes",
+            "must be between 1024 and 1048576",
         )?;
         check(
             self.rate_limits.messages_per_minute > 0 && self.rate_limits.messages_per_hour > 0,

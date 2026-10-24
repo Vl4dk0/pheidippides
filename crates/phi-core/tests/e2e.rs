@@ -1103,7 +1103,7 @@ async fn summaries_required_off_explicit_and_local_summarizer() -> Result<()> {
             .is_err()
     );
     let reopened = Client::open(f.store("alice"), alice.profile.clone(), None).await?;
-    ensure!(reopened.settings.summary_every == 1);
+    ensure!(reopened.settings.summary_bytes == 1);
     alice.profile.summarizer = Some("echo local-summary".into());
     let root = alice
         .send(
@@ -2176,7 +2176,7 @@ async fn revoking_the_root_keeps_history_invites_and_devices_working() -> Result
     .await?;
     let invite = bob.invite(false, false).await?;
     let mut carol = Client::join(f.store("carol"), &invite, "carol").await?;
-    ensure!(carol.settings.summary_every == 7);
+    ensure!(carol.settings.summary_bytes == 7);
     let text = carol.read(root.id, ReadOptions::default()).await?.text();
     ensure!(
         text.contains("clear history")
@@ -2199,7 +2199,7 @@ async fn revoking_the_root_keeps_history_invites_and_devices_working() -> Result
             && !laptop_text.contains("VERIFICATION FAILED")
     );
     let reopened = Client::open(f.store("carol"), carol.profile.clone(), None).await?;
-    ensure!(reopened.settings.summary_every == 7);
+    ensure!(reopened.settings.summary_bytes == 7);
     Ok(())
 }
 
@@ -2371,7 +2371,7 @@ async fn revoked_device_and_colluding_host_cannot_extend_history() -> Result<()>
         )?;
         let mut space: Space = serde_json::from_str(&original)?;
         let mut settings = space.settings.clone();
-        settings.summary_every = settings.summary_every.saturating_add(1);
+        settings.summary_bytes = settings.summary_bytes.saturating_add(1);
         space.settings_change = Some(phi_crypto::sign_settings(
             SettingsChangeData {
                 space_id: alice.profile.space_id,

@@ -794,9 +794,9 @@ impl Client {
             required: !self.from_gui
                 && self.settings.summary_mode == SummaryMode::Required
                 && u64::try_from(messages_since_summary).unwrap_or(u64::MAX)
-                    >= u64::from(self.settings.summary_every),
+                    >= u64::from(self.settings.summary_bytes),
             messages_since_summary,
-            threshold: self.settings.summary_every,
+            threshold: self.settings.summary_bytes,
             summarizer_configured: self.profile.summarizer.is_some(),
             previous_summary: last_summary.and_then(|index| history[index].content.summary.clone()),
         }
@@ -1349,7 +1349,7 @@ impl Client {
                 WaitEntry::Settings(change) => {
                     output.push_str(&format!(
                         "to: #all · space settings changed: retention_days={} summary_mode={:?} summary_every={}\n",
-                        change.data.settings.retention_days, change.data.settings.summary_mode, change.data.settings.summary_every
+                        change.data.settings.retention_days, change.data.settings.summary_mode, change.data.settings.summary_bytes
                     ));
                 }
                 WaitEntry::Revocation(revocation) => {
@@ -2704,7 +2704,7 @@ impl Client {
                 }
             }
             "summary_every" => {
-                settings.summary_every = value
+                settings.summary_bytes = value
                     .parse()
                     .map_err(|_| user("summary_every must be a positive integer"))?;
             }

@@ -354,7 +354,7 @@ pub async fn execute(
                     .collect(),
                 retention_days: client.settings.retention_days,
                 summary_mode: client.settings.summary_mode,
-                summary_every: client.settings.summary_every,
+                summary_every: client.settings.summary_bytes,
                 members: client.names(),
                 devices: client
                     .devices
@@ -501,7 +501,7 @@ pub async fn execute(
                     .await
                     .map_err(err)?;
             }
-            if client.settings.summary_every != summary_every {
+            if client.settings.summary_bytes != summary_every {
                 client
                     .set_settings("summary_every", &summary_every.to_string())
                     .await

@@ -136,7 +136,7 @@ impl Config {
         SpaceSettings {
             retention_days: self.defaults.retention_days,
             summary_mode: self.defaults.summary_mode,
-            summary_every: SpaceSettings::default().summary_every,
+            summary_bytes: SpaceSettings::default().summary_bytes,
             rate_limits: RateLimits {
                 messages_per_minute: self.limits.messages_per_min,
                 messages_per_hour: self.limits.messages_per_hour,

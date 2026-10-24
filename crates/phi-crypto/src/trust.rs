@@ -105,28 +105,13 @@ pub fn thread_deletion_signing_bytes(data: &ThreadDeletionData) -> Result<Vec<u8
     )
 }
 pub fn settings_signing_bytes(data: &SettingsChangeData) -> Result<Vec<u8>, CryptoError> {
-    // The implicit default preserves existing signed settings; custom intervals are explicitly bound.
-    if data.settings.summary_every != SpaceSettings::default().summary_every {
-        return signing_bytes(
-            "phi settings v2",
-            &(
-                data.space_id,
-                data.issuer_device,
-                data.created_at,
-                &data.settings,
-            ),
-        );
-    }
     signing_bytes(
-        "phi settings v1",
+        "phi settings v3",
         &(
             data.space_id,
             data.issuer_device,
             data.created_at,
-            data.settings.retention_days,
-            data.settings.summary_mode,
-            data.settings.rate_limits.messages_per_minute,
-            data.settings.rate_limits.messages_per_hour,
+            &data.settings,
         ),
     )
 }

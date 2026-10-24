@@ -60,7 +60,7 @@ impl Db {
                     [thread.to_string()],
                     |row| row.get(0),
                 )?;
-                let summary_every = settings.summary_every;
+                let summary_every = settings.summary_bytes;
                 if since_summary >= u64::from(summary_every) {
                     return Err(ApiError::summary_required(since_summary, summary_every));
                 }

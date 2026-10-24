@@ -235,19 +235,15 @@ impl Default for RateLimits {
 pub struct SpaceSettings {
     pub retention_days: u32,
     pub summary_mode: SummaryMode,
-    #[serde(default = "default_summary_every")]
-    pub summary_every: u32,
+    pub summary_bytes: u32,
     pub rate_limits: RateLimits,
-}
-fn default_summary_every() -> u32 {
-    3
 }
 impl Default for SpaceSettings {
     fn default() -> Self {
         Self {
             retention_days: 14,
             summary_mode: SummaryMode::Required,
-            summary_every: default_summary_every(),
+            summary_bytes: DEFAULT_SUMMARY_BYTES,
             rate_limits: RateLimits::default(),
         }
     }

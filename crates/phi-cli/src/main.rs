@@ -1291,7 +1291,7 @@ async fn run(cli: Cli) -> Result<u8> {
                         client.profile.space_id,
                         client.settings.retention_days,
                         client.settings.summary_mode,
-                        client.settings.summary_every
+                        client.settings.summary_bytes
                     ),
                     SpaceCommand::Create { .. } => {
                         unreachable!("handled before profile resolution")

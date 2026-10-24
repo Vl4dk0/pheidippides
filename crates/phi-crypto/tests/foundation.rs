@@ -912,7 +912,7 @@ fn revocation_history_is_the_only_evidence_for_a_revoked_signer() -> Result<(), 
     )?;
     let mut unlisted_settings = settings.data.clone();
     unlisted_settings.created_at = 41;
-    unlisted_settings.settings.summary_every = 5;
+    unlisted_settings.settings.summary_bytes = 4096;
     let unlisted_settings = sign_settings(unlisted_settings, &member_keys)?;
     let state = sign_thread_state(
         ThreadStateData {
@@ -1303,19 +1303,14 @@ fn reactions_and_settings_authenticate_identity_and_removal() -> Result<(), Cryp
         &f.keys,
     )?;
     directory.verify_settings(&settings)?;
-    let mut legacy = serde_json::to_value(&settings)?;
-    if let Some(object) = legacy["data"]["settings"].as_object_mut() {
-        object.remove("summary_every");
-    }
-    directory.verify_settings(&serde_json::from_value(legacy)?)?;
-    settings.data.settings.summary_every = 5;
+    settings.data.settings.summary_bytes = 4096;
     assert!(directory.verify_settings(&settings).is_err());
     settings = sign_settings(settings.data, &f.keys)?;
     directory.verify_settings(&settings)?;
     let mut changed = settings.clone();
-    changed.data.settings.summary_every = 3;
+    changed.data.settings.summary_bytes = 8192;
     assert!(directory.verify_settings(&changed).is_err());
-    changed.data.settings.summary_every = 0;
+    changed.data.settings.summary_bytes = 0;
     assert!(directory.verify_settings(&changed).is_err());
     settings.data.settings.retention_days = 0;
     assert!(directory.verify_settings(&settings).is_err());
@@ -1510,7 +1505,7 @@ fn wire_validation_is_strict_bounded_and_major_versioned() -> Result<(), CryptoE
     markdown.validate()?;
     let settings = SpaceSettings::default();
     assert_eq!(settings.retention_days, 14);
-    assert_eq!(settings.summary_every, 3);
+    assert_eq!(settings.summary_bytes, 8192);
     assert_eq!(settings.rate_limits.messages_per_hour, 600);
     check_protocol(PROTOCOL_MAJOR).map_err(|_| CryptoError::Trust("wrong protocol"))?;
     let upgrade = match check_protocol(PROTOCOL_MAJOR + 1) {
