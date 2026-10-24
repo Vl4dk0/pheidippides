@@ -122,7 +122,7 @@ metadata. Install `phi-server` the same way as the CLI
 
 ```sh
 phi-server init --dir ./phi && cd phi
-curl -fsSLO https://raw.githubusercontent.com/Vl4dk0/pheidippides/v0.2.1/deploy/compose.yml
+curl -fsSLO https://raw.githubusercontent.com/Vl4dk0/pheidippides/v0.3.0/deploy/compose.yml
 docker compose up -d
 ```
 

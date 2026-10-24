@@ -3248,7 +3248,7 @@ dependencies = [
 
 [[package]]
 name = "phi-cli"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "axum",
  "clap",
@@ -3262,7 +3262,7 @@ dependencies = [
 
 [[package]]
 name = "phi-core"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -3286,7 +3286,7 @@ dependencies = [
 
 [[package]]
 name = "phi-crypto"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "base64 0.22.1",
  "blake3",
@@ -3304,7 +3304,7 @@ dependencies = [
 
 [[package]]
 name = "phi-gui"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "base64 0.22.1",
  "blake3",
@@ -3321,7 +3321,7 @@ dependencies = [
 
 [[package]]
 name = "phi-proto"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "base64 0.22.1",
  "serde",
@@ -3332,7 +3332,7 @@ dependencies = [
 
 [[package]]
 name = "phi-server"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "axum",

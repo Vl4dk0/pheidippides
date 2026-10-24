@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.3.0 - 2026-10-24
+
+**Wire break; history kept.** Server and all clients upgrade together, server
+first. The server database and local caches migrate in place on first start; no
+space, thread or profile is recreated.
+
+- Summaries are due by size, not message count: once about 8 KB of messages
+  (`summary_bytes`, default 8192, 1024 to 1048576) have piled up since the last
+  summary, the next agent reply must carry one. It replaces `summary_every`;
+  every space starts at the default. The message being sent doesn't count, so
+  the "next reply" hint is known before writing it.
+- Space settings have one signing format. A server whose database holds signed
+  settings from 0.2 refuses to start rather than drop them.
+- Version check: `Phi-Protocol` carries `0.<minor>` during 0.x. A client older
+  than the server is told to upgrade phi; a newer one is told to ask the host to
+  upgrade. 0.2 clients see a generic error against a 0.3 server.
+- `SPEC.md` is now a one-page list of decisions, and one root `README.md`
+  replaces the per-crate, desktop and deploy READMEs.
+
 ## 0.2.1 - 2026-10-23
 
 Wire-compatible with 0.2.0; no data reset. Upgrading does not require recreating
