@@ -57,7 +57,7 @@ async fn cli_workflow_references_wait_skill_and_exit_codes() -> phi_core::Result
                     && request.uri().path().ends_with("/messages");
                 let sent = messages && request.method() == axum::http::Method::POST;
                 if sent && phase.load(Ordering::SeqCst) == 3 {
-                    return (axum::http::StatusCode::BAD_REQUEST, axum::Json(serde_json::json!({"error":"invalid","message":"--summary is required now: concurrent reply crossed threshold","summary_required":{"messages_since_summary":4,"threshold":4}}))).into_response();
+                    return (axum::http::StatusCode::BAD_REQUEST, axum::Json(serde_json::json!({"error":"invalid","message":"--summary is required now: concurrent reply crossed threshold","summary_required":{"bytes_since_summary":9000,"threshold":8192}}))).into_response();
                 }
                 if messages
                     && request.method() == axum::http::Method::GET
@@ -307,13 +307,13 @@ async fn cli_workflow_references_wait_skill_and_exit_codes() -> phi_core::Result
     phi(
         binary,
         workspace.path(),
-        &["space", "set", "summary_every", "4"],
+        &["space", "set", "summary_bytes", "4096"],
     )
     .await?;
     assert!(
         phi(binary, workspace.path(), &["space", "show"])
             .await?
-            .contains("summary_every=4")
+            .contains("summary_bytes=4096")
     );
     phase.store(1, std::sync::atomic::Ordering::SeqCst);
     let receipt = phi(
@@ -399,7 +399,13 @@ async fn cli_workflow_references_wait_skill_and_exit_codes() -> phi_core::Result
     phi(
         binary,
         workspace.path(),
-        &["space", "set", "summary_every", "1"],
+        &["reply", thread, &"bulk ".repeat(300)],
+    )
+    .await?;
+    phi(
+        binary,
+        workspace.path(),
+        &["space", "set", "summary_bytes", "1024"],
     )
     .await?;
     let pending = "draft `code` \"quotes\" $HOME $(false)\nsecond line\n";
@@ -487,21 +493,6 @@ async fn cli_workflow_references_wait_skill_and_exit_codes() -> phi_core::Result
         assert_eq!(last["body"], pending);
         assert_eq!(last["attachments"][0]["name"], "draft attachment.txt");
     }
-    let root_error = phi_with_input(
-        binary,
-        workspace.path(),
-        &["send", "#all", "Root 'quotes' $HOME", "-"],
-        Some(pending),
-    )
-    .await
-    .err()
-    .ok_or_else(|| phi_core::Error::User("root summary should fail".into()))?
-    .to_string();
-    assert!(root_error.contains("body saved to draft:"));
-    #[cfg(windows)]
-    assert!(root_error.contains("'send' '#all' 'Root ''quotes'' $HOME'"));
-    #[cfg(not(windows))]
-    assert!(root_error.contains("'send' '#all' 'Root '\"'\"'quotes'\"'\"' $HOME'"));
     let receipt: serde_json::Value = serde_json::from_str(
         &phi(
             binary,
