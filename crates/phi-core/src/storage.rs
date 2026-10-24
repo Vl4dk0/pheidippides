@@ -269,6 +269,14 @@ impl Cache {
             tx.execute_batch("PRAGMA user_version=2")?;
             tx.commit()?;
         }
+        if db.query_row("PRAGMA user_version", [], |r| r.get::<_, u32>(0))? < 3 {
+            // The cached settings are a copy of a server fact in the old signed shape; dropping them makes the
+            // next refresh fetch and verify the current record while history, pins and drafts stay.
+            let tx = db.unchecked_transaction()?;
+            tx.execute("DELETE FROM state WHERE name='settings'", [])?;
+            tx.execute_batch("PRAGMA user_version=3")?;
+            tx.commit()?;
+        }
         Ok(Self { db })
     }
     pub fn get<T: DeserializeOwned>(&self, name: &str) -> Result<Option<T>> {

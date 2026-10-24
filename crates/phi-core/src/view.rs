@@ -579,11 +579,11 @@ pub fn format_last_seen(seconds: u64) -> String {
     }
 }
 
-/// Preflight includes the pending reply so callers can prepare a summary before composing it.
+/// Preflight is knowable before the reply is written (the pending message is not counted), so callers can prepare a summary first.
 #[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct SummaryPreflight {
     pub required: bool,
-    pub messages_since_summary: usize,
+    pub bytes_since_summary: u64,
     pub threshold: u32,
     pub summarizer_configured: bool,
     /// Current rolling summary, when one exists, so the next one extends it.
@@ -592,13 +592,13 @@ pub struct SummaryPreflight {
 impl SummaryPreflight {
     pub fn text(&self) -> String {
         let mut output = format!(
-            "next reply: --summary {} ({} since last, including next reply; threshold {}){}\n",
+            "next reply: --summary {} ({} bytes since last; threshold {}){}\n",
             if self.required {
                 "required"
             } else {
                 "optional"
             },
-            self.messages_since_summary,
+            self.bytes_since_summary,
             self.threshold,
             if self.summarizer_configured {
                 "; local summarizer configured"

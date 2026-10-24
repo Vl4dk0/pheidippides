@@ -1029,36 +1029,44 @@ async fn wait_backlog_wakes_on_reply_and_keeps_per_handle_cursor() -> Result<()>
 async fn summaries_required_off_explicit_and_local_summarizer() -> Result<()> {
     let f = Fixture::new().await?;
     let mut alice = f.alice().await?;
-    let unsummarized = alice
-        .send("#all", "No summary", SendOptions::default())
-        .await?;
-    alice.reply(unsummarized.id, SendOptions::default()).await?;
+    let bulky = || SendOptions {
+        body: "x".repeat(3000),
+        ..Default::default()
+    };
+    let unsummarized = alice.send("#all", "No summary", bulky()).await?;
+    alice.reply(unsummarized.id, bulky()).await?;
     let preflight = alice.read(unsummarized.id, ReadOptions::default()).await?;
-    ensure!(preflight.next_reply.required && preflight.next_reply.messages_since_summary == 3);
+    ensure!(!preflight.next_reply.required && preflight.next_reply.threshold == 8192);
     ensure!(
         preflight
             .text()
-            .contains("next reply: --summary required (3 since last")
-            && !preflight.text().contains("previous summary")
+            .contains("next reply: --summary optional (")
+    );
+    alice.reply(unsummarized.id, bulky()).await?;
+    let preflight = alice.read(unsummarized.id, ReadOptions::default()).await?;
+    let since = preflight.next_reply.bytes_since_summary;
+    ensure!(preflight.next_reply.required && since >= 8192);
+    ensure!(
+        preflight.text().contains(&format!(
+            "next reply: --summary required ({since} bytes since last"
+        )) && !preflight.text().contains("previous summary")
     );
     let error = alice
-        .reply(unsummarized.id, SendOptions::default())
+        .reply(unsummarized.id, bulky())
         .await
         .err()
-        .ok_or_else(|| anyhow::anyhow!("third message must require a summary"))?;
+        .ok_or_else(|| anyhow::anyhow!("a thread over the threshold must require a summary"))?;
     ensure!(
         error
             .to_string()
-            .contains("3 messages since the last summary")
-            && error
-                .to_string()
-                .contains("including this message; threshold 3")
+            .contains(&format!("{since} bytes since the last summary"))
+            && error.to_string().contains("threshold 8192")
     );
     alice
         .reply(unsummarized.id, options("first summary"))
         .await?;
-    for _ in 0..2 {
-        alice.reply(unsummarized.id, SendOptions::default()).await?;
+    for _ in 0..3 {
+        alice.reply(unsummarized.id, bulky()).await?;
     }
     let extended = alice.read(unsummarized.id, ReadOptions::default()).await?;
     ensure!(
@@ -1073,37 +1081,41 @@ async fn summaries_required_off_explicit_and_local_summarizer() -> Result<()> {
             .await
             .is_err()
     );
-    alice.set_settings("summary_every", "5").await?;
-    for _ in 0..2 {
-        alice.reply(unsummarized.id, SendOptions::default()).await?;
+    // The preflight must flip exactly where the server would: at the byte total, not one above it.
+    let since = extended.next_reply.bytes_since_summary;
+    let at = u32::try_from(since)?;
+    alice.set_settings("summary_bytes", &at.to_string()).await?;
+    ensure!(
+        alice
+            .read(unsummarized.id, ReadOptions::default())
+            .await?
+            .next_reply
+            .required
+    );
+    alice
+        .set_settings("summary_bytes", &(at + 1).to_string())
+        .await?;
+    ensure!(
+        !alice
+            .read(unsummarized.id, ReadOptions::default())
+            .await?
+            .next_reply
+            .required
+    );
+    alice.reply(unsummarized.id, SendOptions::default()).await?;
+    for bad in ["0", "1023", "1048577", "4294967296", "-1", "many"] {
+        ensure!(alice.set_settings("summary_bytes", bad).await.is_err());
     }
-    let error = alice
-        .reply(unsummarized.id, SendOptions::default())
-        .await
-        .err()
-        .ok_or_else(|| anyhow::anyhow!("fifth message requires a summary"))?;
-    ensure!(
-        error
-            .to_string()
-            .contains("5 messages since the last summary")
-            && error.to_string().contains("threshold 5")
-    );
-    ensure!(alice.set_settings("summary_every", "0").await.is_err());
+    alice.set_settings("summary_bytes", "1048576").await?;
+    alice.set_settings("summary_bytes", "1024").await?;
     ensure!(
         alice
-            .set_settings("summary_every", "4294967296")
-            .await
-            .is_err()
-    );
-    alice.set_settings("summary_every", "1").await?;
-    ensure!(
-        alice
-            .send("#all", "Every message", SendOptions::default())
+            .reply(unsummarized.id, SendOptions::default())
             .await
             .is_err()
     );
     let reopened = Client::open(f.store("alice"), alice.profile.clone(), None).await?;
-    ensure!(reopened.settings.summary_bytes == 1);
+    ensure!(reopened.settings.summary_bytes == 1024);
     alice.profile.summarizer = Some("echo local-summary".into());
     let root = alice
         .send(
@@ -1629,6 +1641,25 @@ async fn local_cache_search_and_retention_prune_on_startup() -> Result<()> {
     ensure!(reopened.search("searchable").await?.len() == 1);
     f.server.sweep(u64::MAX / 2).await?;
     ensure!(reopened.search("searchable").await?.len() == 1);
+    // A cache from before summary_bytes holds settings in a shape that no longer parses; only that row may go,
+    // and the signed record comes back from the server.
+    f.faults(|faults| faults.unsigned_retention = None)?;
+    conn.execute(
+        "UPDATE state SET value='{\"summary_every\":3}' WHERE name='settings'",
+        [],
+    )?;
+    conn.execute_batch("PRAGMA user_version=2")?;
+    let pins = || {
+        conn.query_row("SELECT COUNT(*) FROM message_pins", [], |r| {
+            r.get::<_, u32>(0)
+        })
+    };
+    let pinned = pins()?;
+    ensure!(pinned > 0);
+    let migrated = Client::open(f.store("alice"), alice.profile.clone(), None).await?;
+    ensure!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, u32>(0))? == 3);
+    ensure!(migrated.settings.retention_days == 2);
+    ensure!(pins()? == pinned);
     Ok(())
 }
 #[tokio::test]
@@ -1998,13 +2029,13 @@ async fn gui_and_cli_share_one_profile_and_database() -> Result<()> {
     let root = gui
         .send("#all", "Human message", {
             // A person typing in the GUI is never asked for a thread summary.
-            let mut message = options("from desktop");
+            let mut message = options(&format!("from desktop {}", "y".repeat(2000)));
             message.summary = None;
             message
         })
         .await?;
     for n in 0..4 {
-        let mut message = options(&format!("human reply {n}"));
+        let mut message = options(&format!("human reply {n} {}", "y".repeat(2000)));
         message.summary = None;
         gui.reply(root.id, message).await?;
     }
@@ -2019,7 +2050,7 @@ async fn gui_and_cli_share_one_profile_and_database() -> Result<()> {
     );
     let threads = cli.threads().await?;
     ensure!(threads.len() == 1 && !threads[0].own_agent_activity);
-    // Agents on the CLI still owe summaries once the threshold is reached.
+    // Agents on the CLI still owe summaries once the GUI messages (which count) pass the threshold.
     let mut bare = options("agent follow-up");
     bare.summary = None;
     ensure!(matches!(
@@ -2169,7 +2200,7 @@ async fn revoking_the_root_keeps_history_invites_and_devices_working() -> Result
     let root = alice
         .send("#all", "Root history", options("clear history"))
         .await?;
-    alice.set_settings("summary_every", "7").await?;
+    alice.set_settings("summary_bytes", "7000").await?;
     alice.close_thread(root.id).await?;
     bob.react(root.id, ReactionKind::Ack, false).await?;
     bob.revoke(RevocationTarget::Person {
@@ -2178,7 +2209,7 @@ async fn revoking_the_root_keeps_history_invites_and_devices_working() -> Result
     .await?;
     let invite = bob.invite(false, false).await?;
     let mut carol = Client::join(f.store("carol"), &invite, "carol").await?;
-    ensure!(carol.settings.summary_bytes == 7);
+    ensure!(carol.settings.summary_bytes == 7000);
     let text = carol.read(root.id, ReadOptions::default()).await?.text();
     ensure!(
         text.contains("clear history")
@@ -2201,7 +2232,7 @@ async fn revoking_the_root_keeps_history_invites_and_devices_working() -> Result
             && !laptop_text.contains("VERIFICATION FAILED")
     );
     let reopened = Client::open(f.store("carol"), carol.profile.clone(), None).await?;
-    ensure!(reopened.settings.summary_bytes == 7);
+    ensure!(reopened.settings.summary_bytes == 7000);
     Ok(())
 }
 

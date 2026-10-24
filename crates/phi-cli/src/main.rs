@@ -63,7 +63,7 @@ Discovery
 
 Admin
   space show      Show retention and summary settings
-  space set       Change retention_days, summary_mode, or summary_every
+  space set       Change retention_days, summary_mode, or summary_bytes
   group           Create a group or add or remove a member
   remove          Remove a person, revoke their devices, and rotate channels
   device list     List devices, last seen, and revocations
@@ -113,7 +113,7 @@ Space is the isolation boundary: own members, keys, and settings. Use create onc
 EXAMPLES:
   phi space create game --server http://127.0.0.1:8443
   phi space show
-  phi space set summary_every 5"
+  phi space set summary_bytes 16384"
     )]
     Space {
         #[command(subcommand)]
@@ -541,7 +541,7 @@ struct MessageArgs {
     #[arg(
         long,
         value_name = "TEXT",
-        help = "Rolling summary of the WHOLE thread from message #1, including this message. Build it from the previous summary plus every message after that summary. Keep every important decision and fact since the start; drop only what a later message superseded. Do not summarize only the newest messages. Required when summary_mode=required and this message reaches summary_every since the last summary (default 3, counting this message). Optional otherwise; summary_mode=off never requires it. Read/wait prints \"previous summary (extend it):\" plus that text when one exists. Example: --summary 'Review of foo@abc123 requested. Missing auth check found. This message fixes it at def456.'"
+        help = "Rolling summary of the WHOLE thread from message #1, including this message. Build it from the previous summary plus every message after that summary. Keep every important decision and fact since the start; drop only what a later message superseded. Do not summarize only the newest messages. Required when summary_mode=required and the messages since the last summary already total summary_bytes (default 8192; this message is not counted). Optional otherwise; summary_mode=off never requires it. Read/wait prints \"previous summary (extend it):\" plus that text when one exists. Example: --summary 'Review of foo@abc123 requested. Missing auth check found. This message fixes it at def456.'"
     )]
     summary: Option<String>,
 }
@@ -588,36 +588,36 @@ EXAMPLES:
         server: String,
     },
     #[command(
-        about = "Change retention_days, summary_mode, or summary_every",
+        about = "Change retention_days, summary_mode, or summary_bytes",
         long_about = "\
-Updates a signed space setting visible to members. retention (alias retention_days) is days before inactive threads are deleted; 0 keeps them. summary_mode is required (default) or off. summary_every is how many messages since the last summary, including the one being sent, before --summary is required; default 3, range 1–4294967295.",
+Updates a signed space setting visible to members. retention (alias retention_days) is days before inactive threads are deleted; 0 keeps them. summary_mode is required (default) or off. summary_bytes is how many bytes of messages since the last summary (not counting the one being sent) make the next message need --summary; default 8192, range 1024–1048576.",
         after_long_help = "\
 EXAMPLES:
   phi space set retention 30
   phi space set summary_mode off
-  phi space set summary_every 5"
+  phi space set summary_bytes 16384"
     )]
     Set {
         #[arg(
             value_name = "KEY",
-            help = "retention, retention_days, summary_mode, or summary_every. Example: summary_every"
+            help = "retention, retention_days, summary_mode, or summary_bytes. Example: summary_bytes"
         )]
         key: String,
         #[arg(
             value_name = "VALUE",
-            help = "retention_days: day count, 0 means forever (default 14). summary_mode: required or off. summary_every: integer 1–4294967295 (default 3). Example: 5"
+            help = "retention_days: day count, 0 means forever (default 14). summary_mode: required or off. summary_bytes: integer 1024–1048576 (default 8192). Example: 16384"
         )]
         value: String,
     },
     #[command(
         about = "Show the space name, id, and summary settings",
         long_about = "\
-Print who this directory is acting as, the space id, retention_days, summary_mode, and summary_every. Run it before deciding whether a reply needs --summary.",
+Print who this directory is acting as, the space id, retention_days, summary_mode, and summary_bytes. Run it before deciding whether a reply needs --summary.",
         after_long_help = "\
 EXAMPLES:
   phi space show
   phi --space game space show
-  phi space show && phi space set summary_every 5"
+  phi space show && phi space set summary_bytes 16384"
     )]
     Show,
 }
@@ -1148,18 +1148,8 @@ async fn run(cli: Cli) -> Result<u8> {
                     }
                 }
                 Command::Send { to, title, message } => {
-                    let options = message.options()?;
-                    let message = match client.send(&to, &title, options.clone()).await {
-                        Ok(message) => message,
-                        Err(error) => {
-                            return Err(output::draft_error(
-                                &client,
-                                error,
-                                &options,
-                                &["send", &to, &title],
-                            )?);
-                        }
-                    };
+                    // A new thread has no earlier messages to summarize, so a send never needs a draft.
+                    let message = client.send(&to, &title, message.options()?).await?;
                     if let Err(error) = client.message_reference(message.id).await {
                         eprintln!("message committed; numbered reference unavailable: {error}");
                     }
@@ -1286,7 +1276,7 @@ async fn run(cli: Cli) -> Result<u8> {
                         println!("space setting updated");
                     }
                     SpaceCommand::Show => println!(
-                        "{} · {}\nretention_days={}\nsummary_mode={:?}\nsummary_every={}",
+                        "{} · {}\nretention_days={}\nsummary_mode={:?}\nsummary_bytes={}",
                         client.profile.name,
                         client.profile.space_id,
                         client.settings.retention_days,
@@ -1486,7 +1476,7 @@ mod tests {
             wait_help.contains("502") && wait_help.contains("deadline"),
             "{wait_help}"
         );
-        assert!(help_text(&["phi", "help", "space", "set"])?.contains("summary_every"));
+        assert!(help_text(&["phi", "help", "space", "set"])?.contains("summary_bytes"));
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|error| Error::User(error.to_string()))?
