@@ -130,9 +130,11 @@ describe('desktop state boundary', () => {
         messages: [message],
       }).success,
     ).toBe(false);
-    const interval = snapshotSchema.shape.summary_every;
-    expect(interval.parse(3)).toBe(3);
-    for (const bad of [0, -1, 1.5, 4294967296]) {
+    const interval = snapshotSchema.shape.summary_bytes;
+    expect(interval.parse(8192)).toBe(8192);
+    expect(interval.parse(1024)).toBe(1024);
+    expect(interval.parse(1048576)).toBe(1048576);
+    for (const bad of [0, -1, 1.5, 1023, 1048577]) {
       expect(interval.safeParse(bad).success).toBe(false);
     }
     expect(entrySchema.parse(entry)).toEqual(entry);

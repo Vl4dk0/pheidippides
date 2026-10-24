@@ -42,7 +42,7 @@
   let name = $state(untrack(() => snapshot.profile.display_name));
   let retention = $state(untrack(() => snapshot.retention_days));
   let summaryMode = $state(untrack(() => snapshot.summary_mode));
-  let summaryEvery = $state(untrack(() => snapshot.summary_every));
+  let summaryBytes = $state(untrack(() => snapshot.summary_bytes));
   let code = $state('');
   let codeType = $state('');
   let confirmation = $state('');
@@ -115,7 +115,7 @@
         const settingsChanged =
           retention !== snapshot.retention_days ||
           summaryMode !== snapshot.summary_mode ||
-          summaryEvery !== snapshot.summary_every;
+          summaryBytes !== snapshot.summary_bytes;
         if (name !== snapshot.profile.display_name) {
           const result = await request({ kind: 'display_name', name }, nothing);
           if (result === undefined) return;
@@ -126,7 +126,7 @@
               kind: 'settings',
               retention_days: retention,
               summary_mode: summaryMode,
-              summary_every: summaryEvery,
+              summary_bytes: summaryBytes,
             },
             nothing,
           );
@@ -154,12 +154,13 @@
             ><ChevronDown size={14} /></span
           ></label
         ><label
-          >Summary interval<input
+          >Summary after (bytes)<input
             type="number"
-            min="1"
-            max="4294967295"
+            min="1024"
+            max="1048576"
             step="1"
-            bind:value={summaryEvery}
+            placeholder="8192"
+            bind:value={summaryBytes}
             required
             disabled={summaryMode === 'off'}
           /></label
@@ -168,7 +169,7 @@
       <div class="form-footer">
         <small class="muted"
           >Delete inactive threads after this many days; 0 keeps them forever.
-          Summaries refresh every N messages.</small
+          Summaries refresh after this many bytes (default 8192).</small
         ><IconButton
           icon={Save}
           label="Save changes"
