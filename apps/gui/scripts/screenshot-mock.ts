@@ -297,7 +297,7 @@ const snapshots = profiles.map((profile, i) =>
         : [],
     retention_days: 14,
     summary_mode: 'required',
-    summary_every: 3,
+    summary_bytes: 8192,
     members: Object.fromEntries(people.map((p, n) => [id(n + 1 + i * 10), p])),
     devices: people.flatMap((_, n) => [
       {
@@ -387,7 +387,7 @@ mockIPC((command, payload) => {
         .object({
           retention_days: z.number(),
           summary_mode: z.enum(['required', 'off']),
-          summary_every: z.number(),
+          summary_bytes: z.number(),
         })
         .parse(request);
       Object.assign(snapshot, settings);

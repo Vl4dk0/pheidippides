@@ -482,7 +482,9 @@ try {
       await capture('settings');
       await page.getByLabel('Display name', { exact: true }).fill('Vladko J.');
       await page.getByLabel('Retention · days', { exact: true }).fill('30');
-      await page.getByLabel('Summary interval', { exact: true }).fill('4');
+      await page
+        .getByLabel('Summary after (bytes)', { exact: true })
+        .fill('4096');
       await page
         .getByRole('button', { name: 'Save changes', exact: true })
         .click();
@@ -502,15 +504,17 @@ try {
           .getByLabel('Retention · days', { exact: true })
           .inputValue()) !== '30' ||
         (await page
-          .getByLabel('Summary interval', { exact: true })
-          .inputValue()) !== '4'
+          .getByLabel('Summary after (bytes)', { exact: true })
+          .inputValue()) !== '4096'
       )
         throw new Error(
           'Single Save did not persist both profile and space settings',
         );
       await page.getByLabel('Display name', { exact: true }).fill('Vladko');
       await page.getByLabel('Retention · days', { exact: true }).fill('14');
-      await page.getByLabel('Summary interval', { exact: true }).fill('3');
+      await page
+        .getByLabel('Summary after (bytes)', { exact: true })
+        .fill('8192');
       await page
         .getByRole('button', { name: 'Save changes', exact: true })
         .click();
