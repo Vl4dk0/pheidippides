@@ -15,6 +15,22 @@ const NOTIFICATION_MESSAGE: &str = "
 ";
 
 impl Db {
+    /// Ciphertext is the only size the server can measure. The message that carried
+    /// the previous summary resets the interval and is not part of the next one.
+    fn bytes_since_summary(&self, thread: MessageId) -> Result<u64> {
+        let mut statement = self.conn.prepare(
+            "SELECT json_extract(json,'$.envelope.ciphertext') FROM messages WHERE thread_id=?1
+             AND seq>COALESCE((SELECT MAX(seq) FROM messages WHERE thread_id=?1
+             AND json_extract(json,'$.has_summary')=1),0)",
+        )?;
+        let rows = statement.query_map([thread.to_string()], |row| row.get::<_, String>(0))?;
+        let mut total = 0u64;
+        for row in rows {
+            let decoded = row?.parse::<Base64Bytes>().map_err(ApiError::internal)?;
+            total += decoded.len() as u64;
+        }
+        Ok(total)
+    }
     pub fn send(&mut self, a: &Auth, cid: ChannelId, r: SendMessageRequest) -> Result<Message> {
         r.validate()?;
         let c = self.channel(a, cid)?;
@@ -48,21 +64,15 @@ impl Db {
                 r.id
             };
             let settings = db.space(a.sid())?.settings;
-            if settings.summary_mode == SummaryMode::Required
-                && !e.from_gui
-                && !r.has_summary
-            {
-                // Count at commit so simultaneous replies cannot both bypass the threshold.
-                let since_summary: u64 = db.conn.query_row(
-                    "SELECT COUNT(*)+1 FROM messages WHERE thread_id=?1 AND seq>COALESCE(
-                        (SELECT MAX(seq) FROM messages WHERE thread_id=?1
-                        AND json_extract(json,'$.has_summary')=1),0)",
-                    [thread.to_string()],
-                    |row| row.get(0),
-                )?;
-                let summary_every = settings.summary_bytes;
-                if since_summary >= u64::from(summary_every) {
-                    return Err(ApiError::summary_required(since_summary, summary_every));
+            if settings.summary_mode == SummaryMode::Required && !e.from_gui && !r.has_summary {
+                // Decided inside the commit so two replies cannot both slip under a line
+                // neither has crossed. The body being saved is left out, so the sender
+                // can know a summary is due before writing it. Ciphertext length is the
+                // only size visible here: GUI messages add to it and never owe a summary.
+                let since_summary = db.bytes_since_summary(thread)?;
+                let threshold = settings.summary_bytes;
+                if since_summary >= u64::from(threshold) {
+                    return Err(ApiError::summary_required(since_summary, threshold));
                 }
             }
             let latest: u64 = db.conn.query_row(

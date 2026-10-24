@@ -74,12 +74,36 @@ impl Store {
                  ALTER TABLE threads ADD COLUMN close_json TEXT;",
             )?;
         }
-        if conn.query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))? < 1 {
+        let version: u32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        // A signed settings record can be renewed only by its issuer, and a message
+        // count has no honest size. Stop before rewriting either one.
+        if version < 2 {
+            let signed: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM spaces WHERE json_extract(json,'$.settings_change') IS NOT NULL)
+                 OR EXISTS(SELECT 1 FROM events WHERE json_extract(json,'$.event.kind')='settings')",
+                [],
+                |row| row.get(0),
+            )?;
+            if signed {
+                return Err(ApiError(ErrorBody::Internal {
+                    message: "refusing to start: a signed settings record is present (space settings_change or a Settings event). summary_every cannot be replaced under the current signing key; the issuing device must re-issue settings before this server can open the database. The database was not modified.".into(),
+                }));
+            }
+        }
+        if version < 1 {
             conn.execute_batch("BEGIN IMMEDIATE;
                 INSERT OR IGNORE INTO message_mentions
                 SELECT m.id,json_extract(j.value,'$.person_id'),COALESCE(json_extract(j.value,'$.handle'),'')
                 FROM messages m,json_each(m.json,'$.envelope.mentions') j;
                 PRAGMA user_version=1; COMMIT;")?;
+        }
+        if version < 2 {
+            // The old interval is dropped, not converted: every unsigned space starts at the default.
+            conn.execute_batch(&format!(
+                "BEGIN IMMEDIATE;
+                 UPDATE spaces SET json=json_set(json_remove(json,'$.settings.summary_every'),'$.settings.summary_bytes',{DEFAULT_SUMMARY_BYTES});
+                 PRAGMA user_version=2; COMMIT;"
+            ))?;
         }
         Ok(Self(Arc::new(Mutex::new(Db { conn, config }))))
     }

@@ -1085,33 +1085,131 @@ async fn messages_check_signatures_threads_summaries_and_pagination() -> TestRes
             .0,
         400
     );
-    let mut unsummarized = f.message(&f.root, f.all, None, vec![])?;
-    unsummarized.has_summary = false;
-    unsummarized.envelope.summary_covers_seq = None;
-    unsummarized.signature = f
-        .root
-        .key
-        .sign(&message_signing_bytes(&unsummarized.envelope)?);
-    let short: Message = ok(&f.app, "POST", &path, Some(&f.root.token), unsummarized).await?;
-    let mut first_reply = f.message(&f.root, f.all, Some(short.id), vec![])?;
-    first_reply.has_summary = false;
-    first_reply.envelope.summary_covers_seq = None;
-    first_reply.signature = f
-        .root
-        .key
-        .sign(&message_signing_bytes(&first_reply.envelope)?);
-    let _: Message = ok(&f.app, "POST", &path, Some(&f.root.token), first_reply).await?;
-    let mut third = f.message(&f.root, f.all, Some(short.id), vec![])?;
-    third.has_summary = false;
-    third.envelope.summary_covers_seq = None;
-    third.signature = f.root.key.sign(&message_signing_bytes(&third.envelope)?);
-    let (status, error, _) = request(&f.app, "POST", &path, Some(&f.root.token), third).await?;
+    let settings = SpaceSettings {
+        summary_bytes: MIN_SUMMARY_BYTES,
+        ..SpaceSettings::default()
+    };
+    let change = sign_settings(
+        SettingsChangeData {
+            space_id: f.sid,
+            issuer_device: f.root.cert.data.device_id,
+            created_at: timestamp(),
+            settings,
+        },
+        &f.root.key,
+    )?;
+    let _: SettingsChange = ok(
+        &f.app,
+        "PATCH",
+        &f.space("/settings"),
+        Some(&f.root.token),
+        UpdateSettingsRequest { change },
+    )
+    .await?;
+    let prepare =
+        |thread: Option<MessageId>, n: usize, gui: bool, summary: bool| -> TestResult<_> {
+            let mut r = f.message(&f.root, f.all, thread, vec![])?;
+            r.envelope.ciphertext = Base64Bytes::new(vec![2; n]);
+            r.envelope.from_gui = gui;
+            r.has_summary = summary;
+            r.envelope.summary_covers_seq = summary.then_some(0);
+            r.signature = f.root.key.sign(&message_signing_bytes(&r.envelope)?);
+            Ok(r)
+        };
+    // One byte under the line, including a reply, still does not count the message being sent.
+    let under: Message = ok(
+        &f.app,
+        "POST",
+        &path,
+        Some(&f.root.token),
+        prepare(None, (MIN_SUMMARY_BYTES - 1) as usize, false, false)?,
+    )
+    .await?;
+    let _: Message = ok(
+        &f.app,
+        "POST",
+        &path,
+        Some(&f.root.token),
+        prepare(Some(under.id), 16, false, false)?,
+    )
+    .await?;
+    let sized: Message = ok(
+        &f.app,
+        "POST",
+        &path,
+        Some(&f.root.token),
+        prepare(None, MIN_SUMMARY_BYTES as usize, false, false)?,
+    )
+    .await?;
+    let (status, error, _) = request(
+        &f.app,
+        "POST",
+        &path,
+        Some(&f.root.token),
+        prepare(Some(sized.id), 16, false, false)?,
+    )
+    .await?;
     assert_eq!(status, 400);
-    assert!(
-        error
-            .to_string()
-            .contains("3 messages since the last summary")
-    );
+    match serde_json::from_value::<ErrorBody>(error)? {
+        ErrorBody::Invalid {
+            message,
+            summary_required: Some(req),
+        } => {
+            assert_eq!(
+                req,
+                SummaryRequirement {
+                    bytes_since_summary: u64::from(MIN_SUMMARY_BYTES),
+                    threshold: MIN_SUMMARY_BYTES,
+                }
+            );
+            assert!(message.contains(&format!("{MIN_SUMMARY_BYTES} bytes since the last summary")));
+        }
+        other => anyhow::bail!("expected summary requirement, got {other:?}"),
+    }
+    let gui_bytes = 100usize;
+    let _: Message = ok(
+        &f.app,
+        "POST",
+        &path,
+        Some(&f.root.token),
+        prepare(Some(sized.id), gui_bytes, true, false)?,
+    )
+    .await?;
+    let (status, error, _) = request(
+        &f.app,
+        "POST",
+        &path,
+        Some(&f.root.token),
+        prepare(Some(sized.id), 16, false, false)?,
+    )
+    .await?;
+    assert_eq!(status, 400);
+    match serde_json::from_value::<ErrorBody>(error)? {
+        ErrorBody::Invalid {
+            summary_required: Some(req),
+            ..
+        } => assert_eq!(
+            req.bytes_since_summary,
+            u64::from(MIN_SUMMARY_BYTES) + gui_bytes as u64
+        ),
+        other => anyhow::bail!("expected GUI ciphertext to count, got {other:?}"),
+    }
+    let _: Message = ok(
+        &f.app,
+        "POST",
+        &path,
+        Some(&f.root.token),
+        prepare(Some(sized.id), 2000, false, true)?,
+    )
+    .await?;
+    let _: Message = ok(
+        &f.app,
+        "POST",
+        &path,
+        Some(&f.root.token),
+        prepare(Some(sized.id), 16, false, false)?,
+    )
+    .await?;
     let root = f.send(&f.root, f.all, None).await?;
     let mut overclaim = f.message(&f.root, f.all, Some(root.id), vec![])?;
     overclaim.envelope.summary_covers_seq = Some(u64::MAX);
@@ -1162,6 +1260,115 @@ async fn messages_check_signatures_threads_summaries_and_pagination() -> TestRes
             .0,
         400
     );
+    Ok(())
+}
+fn db_snapshot(dir: &std::path::Path) -> TestResult<(u32, String, i64, i64)> {
+    let conn = rusqlite::Connection::open(dir.join("phi.db"))?;
+    let version: u32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    let space: String = conn.query_row("SELECT json FROM spaces", [], |row| row.get(0))?;
+    let messages: i64 = conn.query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))?;
+    let events: i64 = conn.query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))?;
+    Ok((version, space, messages, events))
+}
+fn db_batch(dir: &std::path::Path, sql: &str) -> TestResult {
+    rusqlite::Connection::open(dir.join("phi.db"))?.execute_batch(sql)?;
+    Ok(())
+}
+#[tokio::test]
+async fn summary_bytes_migration_keeps_history_and_refuses_signed_settings() -> TestResult {
+    let f = Fixture::new().await?;
+    let kept = f.send(&f.root, f.all, None).await?;
+    let history = db_snapshot(f.dir.path())?;
+    // Count intervals are not sizes. An unsigned space takes the default once; messages stay.
+    db_batch(
+        f.dir.path(),
+        "BEGIN IMMEDIATE;
+         UPDATE spaces SET json=json_set(json_remove(json,'$.settings.summary_bytes'),'$.settings.summary_every',3);
+         PRAGMA user_version=1; COMMIT;",
+    )?;
+    let migrated = Server::open(f.config.clone())?;
+    let space: Space = ok(
+        &migrated.router(),
+        "GET",
+        &f.space(""),
+        Some(&f.root.token),
+        json!(null),
+    )
+    .await?;
+    assert_eq!(space.settings.summary_bytes, DEFAULT_SUMMARY_BYTES);
+    assert_eq!(space.settings.retention_days, 14);
+    assert_eq!(space.settings.summary_mode, SummaryMode::Required);
+    assert!(space.settings_change.is_none());
+    let page: ListMessagesResponse = ok(
+        &migrated.router(),
+        "GET",
+        &format!("/v1/channels/{}/messages", f.all),
+        Some(&f.root.token),
+        json!(null),
+    )
+    .await?;
+    assert!(page.messages.iter().any(|m| m.id == kept.id));
+    let conn = rusqlite::Connection::open(f.dir.path().join("phi.db"))?;
+    let every: Option<i64> = conn.query_row(
+        "SELECT json_extract(json,'$.settings.summary_every') FROM spaces",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(every, None);
+    let after = db_snapshot(f.dir.path())?;
+    assert_eq!(after.0, 2);
+    assert_eq!(after.2, history.2);
+    assert_eq!(after.3, history.3);
+    drop(conn);
+    db_batch(
+        f.dir.path(),
+        "UPDATE spaces SET json=json_set(json,'$.settings.summary_bytes',2048);",
+    )?;
+    let reopened = Server::open(f.config.clone())?;
+    let space: Space = ok(
+        &reopened.router(),
+        "GET",
+        &f.space(""),
+        Some(&f.root.token),
+        json!(null),
+    )
+    .await?;
+    assert_eq!(space.settings.summary_bytes, 2048);
+    db_batch(
+        f.dir.path(),
+        "BEGIN IMMEDIATE;
+         UPDATE spaces SET json=json_set(json_remove(json,'$.settings.summary_bytes'),'$.settings.summary_every',3,'$.settings_change',json('{\"kept\":true}'));
+         PRAGMA user_version=1; COMMIT;",
+    )?;
+    let signed = db_snapshot(f.dir.path())?;
+    let error = Server::open(f.config.clone())
+        .err()
+        .ok_or_else(|| anyhow::anyhow!("signed settings should refuse startup"))?;
+    assert!(
+        error.to_string().contains("signed settings record"),
+        "{error}"
+    );
+    assert_eq!(db_snapshot(f.dir.path())?, signed);
+    db_batch(
+        f.dir.path(),
+        "BEGIN IMMEDIATE;
+         UPDATE spaces SET json=json_remove(json,'$.settings_change');
+         INSERT INTO events(space_id,seq,channel_id,target_person,thread_id,json)
+         VALUES((SELECT id FROM spaces),900001,NULL,NULL,NULL,'{\"event\":{\"kind\":\"settings\"}}');
+         PRAGMA user_version=1; COMMIT;",
+    )?;
+    let event_signed = db_snapshot(f.dir.path())?;
+    let error = Server::open(f.config.clone())
+        .err()
+        .ok_or_else(|| anyhow::anyhow!("a Settings event should refuse startup"))?;
+    assert!(
+        error.to_string().contains("signed settings record"),
+        "{error}"
+    );
+    assert_eq!(db_snapshot(f.dir.path())?, event_signed);
+    assert!(event_signed.1.contains("summary_every"));
+    assert!(!event_signed.1.contains("summary_bytes"));
+    assert_eq!(event_signed.2, history.2);
     Ok(())
 }
 #[tokio::test]

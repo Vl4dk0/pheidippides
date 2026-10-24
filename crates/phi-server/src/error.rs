@@ -17,7 +17,7 @@ impl ApiError {
     pub fn summary_required(bytes_since_summary: u64, threshold: u32) -> Self {
         Self(ErrorBody::Invalid {
             message: format!(
-                "--summary is required now: {bytes_since_summary} messages since the last summary (including this message; threshold {threshold}) and summary_mode=required"
+                "--summary is required now: {bytes_since_summary} bytes since the last summary (threshold {threshold}) and summary_mode=required"
             ),
             summary_required: Some(phi_proto::SummaryRequirement {
                 bytes_since_summary,
