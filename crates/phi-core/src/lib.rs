@@ -6,7 +6,7 @@ mod storage;
 mod transport;
 mod view;
 pub use client::*;
-pub use phi_proto::PROTOCOL_MAJOR;
+pub use phi_proto::PROTOCOL;
 pub use reference::*;
 pub use storage::*;
 pub use transport::Error;

@@ -1507,16 +1507,20 @@ fn wire_validation_is_strict_bounded_and_major_versioned() -> Result<(), CryptoE
     assert_eq!(settings.retention_days, 14);
     assert_eq!(settings.summary_bytes, 8192);
     assert_eq!(settings.rate_limits.messages_per_hour, 600);
-    check_protocol(PROTOCOL_MAJOR).map_err(|_| CryptoError::Trust("wrong protocol"))?;
-    let upgrade = match check_protocol(PROTOCOL_MAJOR + 1) {
+    check_protocol(PROTOCOL).map_err(|_| CryptoError::Trust("wrong protocol"))?;
+    let upgrade = match check_protocol("99") {
         Err(e) => e,
         Ok(()) => return Err(CryptoError::Trust("expected upgrade")),
     };
     assert_eq!(upgrade.status_code(), 426);
     assert_eq!(
         serde_json::to_value(upgrade)?,
-        json!({"error":"upgrade","required_major":PROTOCOL_MAJOR})
+        json!({"error":"upgrade","server":PROTOCOL})
     );
+    // Hosts from before the header answer with a major and no server version.
+    let old_host: ErrorBody =
+        serde_json::from_value(json!({"error":"upgrade","required_major":0}))?;
+    assert_eq!(old_host, ErrorBody::Upgrade { server: None });
     let response: Counts = serde_json::from_value(
         json!({"unread_threads":0,"mentions":0,"claimed_by_you":0,"channels":[],"latest_seq":0,"future":true}),
     )?;

@@ -9,21 +9,15 @@ pub use encoding::*;
 pub use model::*;
 pub use validation::*;
 
-pub const PROTOCOL_MAJOR: u16 = {
-    let bytes = env!("CARGO_PKG_VERSION_MAJOR").as_bytes();
-    let mut major = 0_u16;
-    let mut index = 0;
-    while index < bytes.len() {
-        major = match major.checked_mul(10) {
-            Some(value) => match value.checked_add((bytes[index] - b'0') as u16) {
-                Some(value) => value,
-                None => panic!("package major exceeds protocol range"),
-            },
-            None => panic!("package major exceeds protocol range"),
-        };
-        index += 1;
-    }
-    major
+/// Peers talk only when this matches. It is the breaking part of the package version, so a
+/// wire break can't be forgotten: under 0.x the minor breaks, from 1.0 the major does.
+pub const PROTOCOL: &str = if is_zero(env!("CARGO_PKG_VERSION_MAJOR")) {
+    concat!("0.", env!("CARGO_PKG_VERSION_MINOR"))
+} else {
+    env!("CARGO_PKG_VERSION_MAJOR")
 };
+const fn is_zero(major: &str) -> bool {
+    major.len() == 1 && major.as_bytes()[0] == b'0'
+}
 pub const PROTOCOL_HEADER: &str = "Phi-Protocol";
 pub const API_PREFIX: &str = "/v1";

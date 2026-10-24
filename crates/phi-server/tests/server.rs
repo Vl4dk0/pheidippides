@@ -112,7 +112,7 @@ async fn request(
     let mut req = Request::builder()
         .method(method)
         .uri(path)
-        .header("Phi-Protocol", PROTOCOL_MAJOR)
+        .header("Phi-Protocol", PROTOCOL)
         .header("Content-Type", "application/json");
     if let Some(t) = token {
         req = req.header("Authorization", format!("Bearer {t}"));
@@ -470,13 +470,14 @@ async fn admin_creation_auth_and_major_version_are_enforced() -> TestResult {
             }
             let response = f.app.clone().oneshot(req.body(Body::empty())?).await?;
             assert_eq!(response.status(), 200);
+            assert_eq!(response.headers()[PROTOCOL_HEADER], PROTOCOL);
             let body = to_bytes(response.into_body(), 1000).await?;
             if method == "HEAD" {
                 assert!(body.is_empty());
             } else {
                 assert_eq!(
                     serde_json::from_slice::<Value>(&body)?,
-                    json!({"status": "ok", "protocol_major": PROTOCOL_MAJOR})
+                    json!({"status": "ok", "protocol": PROTOCOL})
                 );
             }
         }
@@ -507,11 +508,12 @@ async fn admin_creation_auth_and_major_version_are_enforced() -> TestResult {
         )
         .await?;
     assert_eq!(response.status(), 426);
+    assert_eq!(response.headers()[PROTOCOL_HEADER], PROTOCOL);
     let err: ErrorBody = serde_json::from_slice(&to_bytes(response.into_body(), 1000).await?)?;
     assert_eq!(
         err,
         ErrorBody::Upgrade {
-            required_major: PROTOCOL_MAJOR
+            server: Some(PROTOCOL.into())
         }
     );
     let response = f
@@ -2117,7 +2119,7 @@ async fn upload_admission_precedes_body_reads_and_rechecks_revocation() -> TestR
             Request::builder()
                 .method("POST")
                 .uri("/v1/blobs")
-                .header("Phi-Protocol", PROTOCOL_MAJOR)
+                .header("Phi-Protocol", PROTOCOL)
                 .body(make_body(polled.clone()))?,
         )
         .await?;
@@ -2138,7 +2140,7 @@ async fn upload_admission_precedes_body_reads_and_rechecks_revocation() -> TestR
     let first = Request::builder()
         .method("POST")
         .uri("/v1/blobs")
-        .header("Phi-Protocol", PROTOCOL_MAJOR)
+        .header("Phi-Protocol", PROTOCOL)
         .header("Authorization", format!("Bearer {}", person.token))
         .body(body)?;
     let app = f.app.clone();
@@ -2151,7 +2153,7 @@ async fn upload_admission_precedes_body_reads_and_rechecks_revocation() -> TestR
             Request::builder()
                 .method("POST")
                 .uri("/v1/blobs")
-                .header("Phi-Protocol", PROTOCOL_MAJOR)
+                .header("Phi-Protocol", PROTOCOL)
                 .header("Authorization", format!("Bearer {}", f.root.token))
                 .body(make_body(polled.clone()))?,
         )

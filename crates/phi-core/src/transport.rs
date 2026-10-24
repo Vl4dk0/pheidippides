@@ -1,5 +1,5 @@
 use crate::{Result, user};
-use phi_proto::{API_PREFIX, ErrorBody, PROTOCOL_HEADER, PROTOCOL_MAJOR, Validate};
+use phi_proto::{API_PREFIX, ErrorBody, PROTOCOL, PROTOCOL_HEADER, Validate};
 use reqwest::{Client, Method};
 use serde::{Serialize, de::DeserializeOwned};
 use std::time::Duration;
@@ -18,8 +18,10 @@ pub enum Error {
     ClaimConflict(Box<phi_proto::Reaction>),
     #[error("authentication failed or device revoked; enroll this device again")]
     Auth,
-    #[error("phi {client_major}.x can't talk to a {0}.x server — upgrade phi", client_major = PROTOCOL_MAJOR)]
-    Upgrade(u16),
+    #[error("this host runs {} — upgrade phi", host(.0))]
+    Upgrade(Option<String>),
+    #[error("this host runs {} — ask the host to upgrade", host(.0))]
+    HostUpgrade(Option<String>),
     #[error("rate limited; retry after {0} seconds")]
     RateLimited(u64),
     #[error("network request failed: {0}")]
@@ -43,10 +45,38 @@ impl Error {
     pub fn exit_code(&self) -> u8 {
         match self {
             Self::Auth => 3,
-            Self::Upgrade(_) => 4,
+            Self::Upgrade(_) | Self::HostUpgrade(_) => 4,
             Self::Network(_) | Self::RateLimited(_) | Self::Server { status: 500.., .. } => 2,
             _ => 1,
         }
+    }
+}
+
+fn host(server: &Option<String>) -> String {
+    server
+        .as_ref()
+        .map_or("an older phi".into(), |version| format!("phi {version}"))
+}
+/// Position of a protocol value in release order: `0.<minor>` during 0.x, `<major>` from 1.0.
+fn release(protocol: &str) -> Option<(u16, u16)> {
+    match protocol.split_once('.') {
+        Some(("0", minor)) => Some((0, minor.parse().ok()?)),
+        Some(_) => None,
+        None => Some((protocol.parse().ok()?, 0)),
+    }
+}
+/// The older side must upgrade. A host that names no version predates the header, so it is older.
+fn upgrade(server: Option<String>) -> Error {
+    let host_older = match server.as_deref().map(release) {
+        None => true,
+        Some(host) => host
+            .zip(release(PROTOCOL))
+            .is_some_and(|(host, client)| host < client),
+    };
+    if host_older {
+        Error::HostUpgrade(server)
+    } else {
+        Error::Upgrade(server)
     }
 }
 
@@ -103,7 +133,7 @@ impl Http {
         let mut req = self
             .client
             .request(method, format!("{}{API_PREFIX}{path}", self.base))
-            .header(PROTOCOL_HEADER, PROTOCOL_MAJOR);
+            .header(PROTOCOL_HEADER, PROTOCOL);
         if let Some(token) = &self.token {
             req = req.bearer_auth(token);
         }
@@ -134,9 +164,7 @@ impl Http {
                     "{operation}: server returned an invalid conflict response"
                 )),
                 (401, _) => Error::Auth,
-                (426, Some(ErrorBody::Upgrade { required_major })) => {
-                    Error::Upgrade(required_major)
-                }
+                (426, Some(ErrorBody::Upgrade { server })) => upgrade(server),
                 (429, Some(ErrorBody::RateLimited { retry_after })) => {
                     Error::RateLimited(retry.unwrap_or(retry_after))
                 }
@@ -178,4 +206,23 @@ pub(crate) fn token_string(token: &phi_proto::Base64<32>) -> Result<String> {
         .as_str()
         .ok_or_else(|| user("invalid token"))?
         .to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_older_side_is_told_to_upgrade() {
+        let message = |server: Option<&str>| upgrade(server.map(Into::into)).to_string();
+        assert!(message(Some("99")).ends_with("— upgrade phi"));
+        assert_eq!(
+            message(Some("0.0")),
+            "this host runs phi 0.0 — ask the host to upgrade"
+        );
+        assert_eq!(
+            message(None),
+            "this host runs an older phi — ask the host to upgrade"
+        );
+    }
 }

@@ -242,8 +242,10 @@ pub enum ErrorBody {
     RateLimited {
         retry_after: u64,
     },
+    /// Hosts older than the Phi-Protocol header omit `server`.
     Upgrade {
-        required_major: u16,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        server: Option<String>,
     },
     Internal {
         message: String,
@@ -264,12 +266,12 @@ impl ErrorBody {
         }
     }
 }
-pub fn check_protocol(major: u16) -> Result<(), ErrorBody> {
-    if major == PROTOCOL_MAJOR {
+pub fn check_protocol(version: &str) -> Result<(), ErrorBody> {
+    if version == PROTOCOL {
         Ok(())
     } else {
         Err(ErrorBody::Upgrade {
-            required_major: PROTOCOL_MAJOR,
+            server: Some(PROTOCOL.into()),
         })
     }
 }

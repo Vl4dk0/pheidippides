@@ -1671,11 +1671,13 @@ async fn http_errors_admin_token_rate_limit_protocol_and_auth() -> Result<()> {
     ensure!(matches!(error, Error::RateLimited(_)) && error.exit_code() == 2);
     let response = reqwest::Client::new()
         .get(format!("{}/v1/spaces/{}", f.url, alice.profile.space_id))
-        .header("Phi-Protocol", PROTOCOL_MAJOR + 1)
+        .header("Phi-Protocol", "99")
         .send()
         .await?;
     ensure!(response.status().as_u16() == 426);
-    ensure!(Error::Upgrade(2).exit_code() == 4 && Error::Auth.exit_code() == 3);
+    ensure!(response.headers()["Phi-Protocol"] == PROTOCOL);
+    ensure!(Error::Upgrade(None).exit_code() == 4 && Error::HostUpgrade(None).exit_code() == 4);
+    ensure!(Error::Auth.exit_code() == 3);
     Ok(())
 }
 #[tokio::test]
@@ -2121,7 +2123,7 @@ async fn wait_survives_transient_gateway_errors() -> Result<()> {
         (401, "authentication"),
         (403, "HTTP 403"),
         (400, "HTTP 400"),
-        (426, "upgrade"),
+        (426, "ask the host to upgrade"),
         (500, "HTTP 500"),
     ] {
         f.faults(|faults| faults.event_reject = Some(status))?;

@@ -7,7 +7,7 @@ use axum::{
     Extension, Json, Router,
     body::to_bytes,
     extract::{FromRequest, FromRequestParts, Path, Query, Request, State},
-    http::{Method, header, request::Parts},
+    http::{HeaderValue, Method, header, request::Parts},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{delete, get, patch, post, put},
@@ -119,25 +119,28 @@ pub(super) fn router(server: Server) -> Router {
         .with_state(server)
 }
 async fn health() -> Json<serde_json::Value> {
-    Json(serde_json::json!({"status": "ok", "protocol_major": PROTOCOL_MAJOR}))
+    Json(serde_json::json!({"status": "ok", "protocol": PROTOCOL}))
 }
-async fn protocol(mut request: Request, next: Next) -> Response {
+/// Every response names the server's protocol so a mismatched client can tell which side is older.
+async fn protocol(request: Request, next: Next) -> Response {
+    let mut response = admit_protocol(request, next).await;
+    response
+        .headers_mut()
+        .insert(PROTOCOL_HEADER, HeaderValue::from_static(PROTOCOL));
+    response
+}
+async fn admit_protocol(mut request: Request, next: Next) -> Response {
     // Only infrastructure GET/HEAD probes bypass admission; all other requests keep it.
     if request.uri().path() == "/healthz" && matches!(*request.method(), Method::GET | Method::HEAD)
     {
         return next.run(request).await;
     }
-    let major = request
+    let version = request
         .headers()
         .get(PROTOCOL_HEADER)
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse().ok());
-    let result = major
-        .ok_or(ErrorBody::Upgrade {
-            required_major: PROTOCOL_MAJOR,
-        })
-        .and_then(check_protocol);
-    if let Err(error) = result {
+        .unwrap_or_default();
+    if let Err(error) = check_protocol(version) {
         return ApiError(error).into_response();
     }
     let token = request
