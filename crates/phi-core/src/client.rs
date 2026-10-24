@@ -785,17 +785,19 @@ impl Client {
         }
         Ok((self.new_channel(kind, "dm", members).await?, mentions))
     }
+    /// Mirrors the server's rule exactly (ciphertext bytes after the last summary, pending message
+    /// excluded) so the hint, the drafts and the server's rejection never disagree.
     fn next_reply(&self, history: &[DecodedMessage]) -> SummaryPreflight {
         let last_summary = history.iter().rposition(|m| m.content.summary.is_some());
-        let messages_since_summary = last_summary
-            .map_or(history.len(), |i| history.len() - i - 1)
-            .saturating_add(1);
+        let bytes_since_summary: u64 = history[last_summary.map_or(0, |i| i + 1)..]
+            .iter()
+            .map(|m| m.message.envelope.ciphertext.as_bytes().len() as u64)
+            .sum();
         SummaryPreflight {
             required: !self.from_gui
                 && self.settings.summary_mode == SummaryMode::Required
-                && u64::try_from(messages_since_summary).unwrap_or(u64::MAX)
-                    >= u64::from(self.settings.summary_bytes),
-            messages_since_summary,
+                && bytes_since_summary >= u64::from(self.settings.summary_bytes),
+            bytes_since_summary,
             threshold: self.settings.summary_bytes,
             summarizer_configured: self.profile.summarizer.is_some(),
             previous_summary: last_summary.and_then(|index| history[index].content.summary.clone()),
@@ -836,8 +838,8 @@ impl Client {
     ) -> Result<Message> {
         self.ensure_safe_epoch(channel).await?;
         let preflight = self.next_reply(history);
-        let since_summary = preflight.messages_since_summary;
-        let summary_every = preflight.threshold;
+        let since_summary = preflight.bytes_since_summary;
+        let summary_bytes = preflight.threshold;
         let summary_required = preflight.required;
         if options.summary.is_none()
             && (summary_required || self.profile.summarizer.is_some())
@@ -858,7 +860,7 @@ impl Client {
                 options.summary = Some(run_summarizer(command, &input).await?);
             } else if summary_required {
                 return Err(Error::SummaryRequired(format!(
-                    "--summary is required now: {since_summary} messages since the last summary (including this message; threshold {summary_every}) and summary_mode=required; extend the previous summary with every message after it, keep decisions and facts from the start, drop only what a later message superseded, or configure a summarizer in profile.toml"
+                    "--summary is required now: {since_summary} bytes since the last summary (threshold {summary_bytes}) and summary_mode=required; extend the previous summary with every message after it, keep decisions and facts from the start, drop only what a later message superseded, or configure a summarizer in profile.toml"
                 )));
             }
         }
@@ -1348,7 +1350,7 @@ impl Client {
                 WaitEntry::Reaction(notice) => output.push_str(&notice.text()),
                 WaitEntry::Settings(change) => {
                     output.push_str(&format!(
-                        "to: #all · space settings changed: retention_days={} summary_mode={:?} summary_every={}\n",
+                        "to: #all · space settings changed: retention_days={} summary_mode={:?} summary_bytes={}\n",
                         change.data.settings.retention_days, change.data.settings.summary_mode, change.data.settings.summary_bytes
                     ));
                 }
@@ -2703,14 +2705,14 @@ impl Client {
                     _ => return Err(user("summary_mode must be required or off")),
                 }
             }
-            "summary_every" => {
+            "summary_bytes" => {
                 settings.summary_bytes = value
                     .parse()
-                    .map_err(|_| user("summary_every must be a positive integer"))?;
+                    .map_err(|_| user("summary_bytes must be a whole number of bytes"))?;
             }
             _ => {
                 return Err(user(
-                    "setting must be retention_days, summary_mode or summary_every",
+                    "setting must be retention_days, summary_mode or summary_bytes",
                 ));
             }
         }

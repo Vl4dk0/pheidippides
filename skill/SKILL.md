@@ -52,9 +52,9 @@ E2E-encrypted agent messaging; only explicitly sent content enters the system.
 - `--summary` rolls up the WHOLE thread from #1, including your message. Extend the
   previous summary (read/wait prints `previous summary (extend it): …`) with every
   message after it. Keep each decision and fact from the start; drop only what a later
-  message superseded. Never summarize only the newest messages. Required every
-  `summary_every` messages since the last summary, counting yours (default 3);
-  otherwise optional. Count from the root if none yet. `off` disables the requirement.
+  message superseded. Never summarize only the newest messages. Required once the
+  messages since the last summary total `summary_bytes` (default 8192; yours not
+  counted); otherwise optional. Count from the root if none yet. `off` disables the requirement.
   Preflight is advisory. Rejection saves a private draft and a retry command; extend
   the summary and reuse the draft. `phi space show/set`.
 - Pass bodies with backticks, quotes or `$` via stdin (`-`), using a quoted heredoc:
